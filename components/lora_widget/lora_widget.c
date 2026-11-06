@@ -115,8 +115,8 @@ static void lora_rx_task(void *arg)
                 snr = ((int8_t)pkt_stat[1]) / 4;
             }
 
-            /* Clear IRQ (cmd 0x02, 0x0002) */
-            uint8_t clr[2] = { 0x00, 0x02 };
+            /* Clear IRQ (cmd 0x02, 0x03FF to clear all pending flags) */
+            uint8_t clr[2] = { 0x03, 0xFF };
             lora_write_cmd(0x02, clr, 2);
 
             /* Update stats */
@@ -130,6 +130,10 @@ static void lora_rx_task(void *arg)
 
             ESP_LOGI(TAG, "LoRa packet received! Total: %u, RSSI: %d dBm, SNR: %d dB",
                      (unsigned)s_stats.packet_count, rssi, snr);
+        } else if (irq != 0) {
+            /* Clear non-RxDone IRQ flags */
+            uint8_t clr[2] = { irq_stat[0], irq_stat[1] };
+            lora_write_cmd(0x02, clr, 2);
         }
     }
 }

@@ -468,6 +468,7 @@ static bool prepare_deep_sleep(void)
         s_presets_snap.hdr.magic = 0;
         return false;
     }
+    lora_widget_sleep();
     return true;
 }
 

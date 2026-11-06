@@ -43,7 +43,7 @@ fi
 export IDF_PATH PATH
 
 # export.sh prints a status banner on every run; keep it out of the output unless it fails.
-export_log="$(mktemp -t reflbo-idf-export)"
+export_log="$(mktemp -t reflbo-idf-export.XXXXXXXX)"
 set +e
 # shellcheck disable=SC1091
 . "$IDF_PATH/export.sh" >"$export_log" 2>&1

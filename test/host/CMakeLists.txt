@@ -13,8 +13,10 @@ set(REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 # The radar views' golden renders read the built-in map and the radar fixtures (radar_fixtures.h).
 add_compile_definitions(REFLBO_MAP_BIN="${REPO_ROOT}/assets/map/map.bin"
                         REFLBO_PNG_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/png"
-                        REFLBO_ADSB_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/adsb")
-set(REFLBO_WARNINGS -Wall -Wextra -Werror)
+                        REFLBO_ADSB_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/adsb"
+                        _DEFAULT_SOURCE
+                        _POSIX_C_SOURCE=200809L)
+set(REFLBO_WARNINGS -Wall -Wextra -Werror -Wno-format-truncation)
 
 # cmake -DREFLBO_SANITIZE=ON: everything with AddressSanitizer and UndefinedBehaviorSanitizer.
 option(REFLBO_SANITIZE "Build the host tests with ASan and UBSan" OFF)
