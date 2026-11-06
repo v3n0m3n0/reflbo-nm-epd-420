@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cJSON.h"
@@ -314,6 +315,17 @@ void settings_pc_defaults(settings_t *out)
     snprintf(out->pc_preset, sizeof(out->pc_preset), "%s", "pc");
 }
 
+void settings_lora_defaults(settings_t *out)
+{
+    out->lora.enabled = true;
+    out->lora.freq_khz = 868000;
+    out->lora.sf = 7;
+    out->lora.bw_khz = 250;
+    out->lora.cr = 5;
+    out->lora.sync_word = 0x1424;
+    out->lora.wake_on_rx = false;
+}
+
 /* A preset id's characters: a-z, 0-9, - and _ (ui_preset_json.c), 15 at most. */
 static bool preset_id(const char *s)
 {
@@ -346,6 +358,35 @@ static void read_pc(const cJSON *pc, settings_t *out)
     if (cJSON_IsString(preset) && preset_id(preset->valuestring)) {
         snprintf(out->pc_preset, sizeof(out->pc_preset), "%s", preset->valuestring);
     }
+}
+
+static void read_lora(const cJSON *lora, settings_t *out)
+{
+    if (!cJSON_IsObject(lora)) {
+        return;
+    }
+    read_bool(lora, "enabled", &out->lora.enabled);
+    out->lora.freq_khz = (uint32_t)read_scaled(lora, "freq_khz", out->lora.freq_khz, 1, 430000, 928000);
+    out->lora.sf = (uint8_t)read_scaled(lora, "sf", out->lora.sf, 1, 7, 12);
+    const cJSON *bw_item = child(lora, "bw_khz");
+    if (cJSON_IsNumber(bw_item)) {
+        long bw = lround(bw_item->valuedouble);
+        if (bw == 125 || bw == 250 || bw == 500) {
+            out->lora.bw_khz = (uint16_t)bw;
+        }
+    }
+    out->lora.cr = (uint8_t)read_scaled(lora, "cr", out->lora.cr, 1, 5, 8);
+    const cJSON *sw = child(lora, "sync_word");
+    if (cJSON_IsNumber(sw) && sw->valuedouble >= 0 && sw->valuedouble <= 0xFFFF) {
+        out->lora.sync_word = (uint16_t)sw->valueint;
+    } else if (cJSON_IsString(sw)) {
+        char *end = NULL;
+        unsigned long v = strtoul(sw->valuestring, &end, 16);
+        if (end != sw->valuestring && v <= 0xFFFF) {
+            out->lora.sync_word = (uint16_t)v;
+        }
+    }
+    read_bool(lora, "wake_on_rx", &out->lora.wake_on_rx);
 }
 
 const char *settings_step_name(settings_step_t step)
@@ -480,6 +521,7 @@ bool settings_from_json(const char *json, const settings_t *defaults, settings_t
     }
     read_solar(child(root, "solar"), child(root, "energy"), out);
     read_pc(child(root, "pc"), out);
+    read_lora(child(root, "lora"), out);
     cJSON_Delete(root);
     return true;
 }
@@ -630,6 +672,14 @@ size_t settings_to_json(const settings_t *s, const char *base_json, char *out, s
     put(pc, "interval_ms", cJSON_CreateNumber(s->pc_interval_ms));
     put(pc, "auto_always", cJSON_CreateBool(s->pc_auto_always));
     put(pc, "preset", cJSON_CreateString(s->pc_preset));
+    cJSON *lora = object_at(root, "lora");
+    put(lora, "enabled", cJSON_CreateBool(s->lora.enabled));
+    put(lora, "freq_khz", cJSON_CreateNumber(s->lora.freq_khz));
+    put(lora, "sf", cJSON_CreateNumber(s->lora.sf));
+    put(lora, "bw_khz", cJSON_CreateNumber(s->lora.bw_khz));
+    put(lora, "cr", cJSON_CreateNumber(s->lora.cr));
+    put(lora, "sync_word", cJSON_CreateNumber(s->lora.sync_word));
+    put(lora, "wake_on_rx", cJSON_CreateBool(s->lora.wake_on_rx));
     bool ok = size > 0 && cJSON_PrintPreallocated(root, out, (int)size, true);
     cJSON_Delete(root);
     return ok ? strlen(out) : 0;

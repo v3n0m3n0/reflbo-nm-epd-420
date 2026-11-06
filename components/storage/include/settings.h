@@ -74,6 +74,19 @@ typedef enum { SETTINGS_BATTERY_AUTO, SETTINGS_BATTERY_ON, SETTINGS_BATTERY_OFF 
 #define SETTINGS_PC_INTERVAL_MAX_MS 10000
 #define SETTINGS_PC_PRESET_LEN 16 /* a preset id, as UI_PRESET_ID_LEN */
 
+#ifndef _LORA_CONFIG_T_DEFINED
+#define _LORA_CONFIG_T_DEFINED
+typedef struct {
+    bool enabled;
+    uint32_t freq_khz;     /* 430000..928000: kHz */
+    uint8_t sf;            /* 7..12 */
+    uint16_t bw_khz;       /* 125, 250, 500 */
+    uint8_t cr;            /* 5..8 (4/5..4/8) */
+    uint16_t sync_word;    /* 0x0000..0xFFFF */
+    bool wake_on_rx;
+} lora_config_t;
+#endif
+
 /* A roof plane (spec §11.5). */
 typedef struct {
     uint16_t kwp_e2; /* 10..10000: 0.1 to 100 kWp in hundredths */
@@ -130,6 +143,7 @@ typedef struct {
     uint16_t pc_interval_ms;             /* 250..10000: how often the PC app sends its readings */
     bool pc_auto_always;                 /* a session switches to sync mode `always` */
     char pc_preset[SETTINGS_PC_PRESET_LEN]; /* and shows this preset; "" for none */
+    lora_config_t lora;                  /* LoRa radio configuration */
 } settings_t;
 
 /* The sync's and the NTP servers' defaults (spec §14.3): times mode at 05:30, a 60 min interval,
@@ -157,6 +171,8 @@ void settings_solar_defaults(settings_t *out);
 /* The PC's defaults (spec §12a.1): off, no address, port 47123, a reading a second, a session that switches to sync
  * mode `always` and to the preset `pc`. */
 void settings_pc_defaults(settings_t *out);
+/* The LoRa defaults: enabled, 868.000 MHz, SF7, 250 kHz, CR 4/5, sync word 0x1424, wake_on_rx off */
+void settings_lora_defaults(settings_t *out);
 /* A step's name in sync.steps: "weather", "air", "radar", "solar", "energy", "pc". */
 const char *settings_step_name(settings_step_t step);
 /* Forecast.Solar takes a second plane only with a key (spec §11.5): false with the reason. */

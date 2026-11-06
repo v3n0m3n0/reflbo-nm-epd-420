@@ -621,13 +621,25 @@ static int cmd_energy(int argc, char **argv)
     return diag_on_owner(energy_body, argc, argv);
 }
 
-/* `lora [status]` */
+/* `lora [status | reset]` */
 static int lora_body(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    if (argc >= 2 && strcmp(argv[1], "reset") == 0) {
+        lora_widget_reset_stats();
+        printf("lora: statistics reset\n");
+        return 0;
+    }
     lora_stats_t s = lora_widget_get_stats();
-    printf("lora: %s\n", s.initialized ? "initialized (SX1262 EU868 continuous RX)" : "disabled or not populated");
+    printf("lora: %s\n", s.initialized ? "initialized (SX1262 continuous RX)" : "disabled or not populated");
+    printf("  enabled: %s\n", s.enabled ? "yes" : "no");
+    if (s.freq_khz > 0) {
+        printf("  frequency: %lu.%03lu MHz\n", (unsigned long)(s.freq_khz / 1000), (unsigned long)(s.freq_khz % 1000));
+        printf("  spreading factor: SF%u\n", (unsigned)s.sf);
+        printf("  bandwidth: %u kHz\n", (unsigned)s.bw_khz);
+        printf("  coding rate: 4/%u\n", (unsigned)s.cr);
+        printf("  sync word: 0x%04X\n", (unsigned)s.sync_word);
+        printf("  wake on rx: %s\n", s.wake_on_rx ? "yes" : "no");
+    }
     printf("  packets received: %lu\n", (unsigned long)s.packet_count);
     if (s.packet_count > 0) {
         printf("  last RSSI: %d dBm\n", s.last_rssi_dbm);
@@ -657,7 +669,7 @@ void app_register_commands(void)
         { .command = "solar", .help = "solar status | demo on | demo off (spec §11.5, §11.6)", .func = &cmd_solar },
         { .command = "energy", .help = "energy raw: SolaX's last replies (D37)", .func = &cmd_energy },
         { .command = "pc", .help = "pc status | demo on | demo off (spec §12a)", .func = &cmd_pc },
-        { .command = "lora", .help = "lora status: SX1262 LoRa module statistics", .func = &cmd_lora },
+        { .command = "lora", .help = "lora status | reset: SX1262 LoRa module statistics and control", .func = &cmd_lora },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         esp_err_t err = esp_console_cmd_register(&cmds[i]);

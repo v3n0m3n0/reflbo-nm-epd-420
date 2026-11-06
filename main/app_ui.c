@@ -6,6 +6,7 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "lang.h"
+#include "lora_widget.h"
 #include "netmgr.h"
 #include "power.h"
 #include "sdkconfig.h"
@@ -60,6 +61,7 @@ static void default_settings(settings_t *out)
     settings_radar_defaults(out);
     settings_solar_defaults(out);
     settings_pc_defaults(out); /* M7 */
+    settings_lora_defaults(out);
     snprintf(out->place, sizeof(out->place), "%s", CONFIG_REFLBO_LOCATION_NAME);
     snprintf(out->tz_posix, sizeof(out->tz_posix), "%s", CONFIG_REFLBO_TZ);
     snprintf(out->tz_iana, sizeof(out->tz_iana), "%s", CONFIG_REFLBO_TZ_NAME);
@@ -208,6 +210,7 @@ void app_ui_apply_settings(void)
             ESP_LOGW(TAG, "panel rate: %s", esp_err_to_name(err));
         }
     }
+    lora_widget_apply(&s.settings.lora);
     if (s.cold_boot_at == 0 && timekeeping_valid()) {
         s.cold_boot_at = time(NULL); /* Info > Uptime counts from the first valid clock after a cold boot */
     }

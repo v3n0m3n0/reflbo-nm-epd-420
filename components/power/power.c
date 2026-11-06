@@ -16,6 +16,7 @@
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "lora_widget.h"
 #include "nvs.h"
 #include "sdkconfig.h"
 #include "util_snapshot.h"
@@ -267,6 +268,11 @@ power_wake_t power_sleep_light(time_t until_utc)
             gpio_wakeup_enable(k_wake_pins[i], GPIO_INTR_LOW_LEVEL);
         }
     }
+    lora_stats_t lstats = lora_widget_get_stats();
+    bool lora_wake = lstats.enabled && lstats.wake_on_rx;
+    if (lora_wake) {
+        gpio_wakeup_enable(BOARD_PIN_LORA_DIO1, GPIO_INTR_HIGH_LEVEL);
+    }
     esp_sleep_enable_gpio_wakeup();
     esp_sleep_enable_timer_wakeup(sleep_us_until(until_utc));
     int64_t slept_from_us = esp_timer_get_time();
@@ -276,6 +282,9 @@ power_wake_t power_sleep_light(time_t until_utc)
         gpio_wakeup_disable(k_wake_pins[i]);
         gpio_set_intr_type(k_wake_pins[i], GPIO_INTR_ANYEDGE);
         gpio_intr_enable(k_wake_pins[i]);
+    }
+    if (lora_wake) {
+        gpio_wakeup_disable(BOARD_PIN_LORA_DIO1);
     }
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
     if (err == ESP_OK) {
@@ -342,6 +351,10 @@ void power_sleep_deep(time_t until_utc)
     uint64_t bits = button_wake_bits(held);
     if (bits != 0) {
         esp_sleep_enable_ext1_wakeup_io(bits, ESP_EXT1_WAKEUP_ANY_LOW);
+    }
+    lora_stats_t lstats = lora_widget_get_stats();
+    if (lstats.enabled && lstats.wake_on_rx) {
+        esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(1ULL << BOARD_PIN_LORA_DIO1, ESP_GPIO_WAKEUP_GPIO_HIGH);
     }
     esp_sleep_enable_timer_wakeup(sleep_us_until(until_utc));
     start_deep_sleep();

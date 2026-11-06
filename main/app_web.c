@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_system.h"
+#include "lora_widget.h"
 #include "netmgr.h"
 #include "sensors.h"
 #include "storage_backup.h"
@@ -291,6 +292,25 @@ static void get_status(uint8_t *out, size_t size, webui_reply_t *reply)
     cJSON_AddStringToObject(preset, "active", active->id);
     cJSON_AddStringToObject(preset, "name", active->name);
     cJSON_AddBoolToObject(preset, "cycle", app_presets()->cycle_enabled);
+
+    lora_stats_t ls = lora_widget_get_stats();
+    cJSON *lora = cJSON_AddObjectToObject(o, "lora");
+    cJSON_AddBoolToObject(lora, "enabled", ls.enabled);
+    cJSON_AddBoolToObject(lora, "initialized", ls.initialized);
+    cJSON_AddNumberToObject(lora, "freq_khz", ls.freq_khz);
+    cJSON_AddNumberToObject(lora, "sf", ls.sf);
+    cJSON_AddNumberToObject(lora, "bw_khz", ls.bw_khz);
+    cJSON_AddNumberToObject(lora, "cr", ls.cr);
+    cJSON_AddNumberToObject(lora, "sync_word", ls.sync_word);
+    cJSON_AddBoolToObject(lora, "wake_on_rx", ls.wake_on_rx);
+    cJSON_AddNumberToObject(lora, "packet_count", ls.packet_count);
+    cJSON_AddNumberToObject(lora, "last_rssi_dbm", ls.last_rssi_dbm);
+    cJSON_AddNumberToObject(lora, "last_snr_db", ls.last_snr_db);
+    cJSON_AddNumberToObject(lora, "last_packet_at", ls.last_packet_time_s);
+    if (ls.last_packet_time_s != 0 && now >= (time_t)ls.last_packet_time_s) {
+        cJSON_AddNumberToObject(lora, "age_s", (double)(now - (time_t)ls.last_packet_time_s));
+    }
+
     reply_cjson(reply, out, size, o);
 }
 
@@ -688,6 +708,9 @@ void app_web_api(const char *method, const char *path, const char *query, const 
         backup(out, size, reply);
     } else if (strcmp(path, "/api/restore") == 0 && strcmp(method, "POST") == 0) {
         restore(body, out, size, reply);
+    } else if (strcmp(path, "/api/lora/reset") == 0 && strcmp(method, "POST") == 0) {
+        lora_widget_reset_stats();
+        reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
     } else {
         reply_error(reply, out, size, 404, "no such API");
     }

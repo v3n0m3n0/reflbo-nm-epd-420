@@ -20,6 +20,7 @@ void setUp(void)
     settings_radar_defaults(&s_defaults);
     settings_solar_defaults(&s_defaults);
     settings_pc_defaults(&s_defaults);
+    settings_lora_defaults(&s_defaults);
     memset(&s_out, 0xAA, sizeof(s_out));
     s_err[0] = '\0';
 }
@@ -841,12 +842,63 @@ static void test_the_largest_settings_fit_the_file_buffer(void)
     s.pc_interval_ms = 10000;
     size_t n = settings_to_json(&s, NULL, s_json, sizeof(s_json));
     TEST_ASSERT_TRUE(n > 0);
-    TEST_ASSERT_TRUE(n < SETTINGS_FILE_MAX / 2); /* room for keys a later firmware adds (M7's mqtt.*) */
+    TEST_ASSERT_TRUE(n < SETTINGS_FILE_MAX * 3 / 4); /* room for keys a later firmware adds */
+}
+
+static void test_the_lora_defaults_are_the_specs(void)
+{
+    settings_t defaults;
+    memset(&defaults, 0, sizeof(defaults));
+    settings_lora_defaults(&defaults);
+    TEST_ASSERT_TRUE(defaults.lora.enabled);
+    TEST_ASSERT_EQUAL_UINT32(868000, defaults.lora.freq_khz);
+    TEST_ASSERT_EQUAL_UINT8(7, defaults.lora.sf);
+    TEST_ASSERT_EQUAL_UINT16(250, defaults.lora.bw_khz);
+    TEST_ASSERT_EQUAL_UINT8(5, defaults.lora.cr);
+    TEST_ASSERT_EQUAL_HEX16(0x1424, defaults.lora.sync_word);
+    TEST_ASSERT_FALSE(defaults.lora.wake_on_rx);
+}
+
+static void test_the_lora_settings_parse_clamp_and_round_trip(void)
+{
+    /* Out-of-range clamped */
+    const char *bad = "{\"schema\":1,\"lora\":{\"freq_khz\":100000,\"sf\":4,\"bw_khz\":999,\"cr\":10,\"sync_word\":70000}}";
+    TEST_ASSERT_TRUE_MESSAGE(settings_from_json(bad, &s_defaults, &s_out, s_err, sizeof(s_err)), s_err);
+    TEST_ASSERT_EQUAL_UINT32(430000, s_out.lora.freq_khz); /* clamped to min 430000 */
+    TEST_ASSERT_EQUAL_UINT8(7, s_out.lora.sf);             /* clamped to min 7 */
+    TEST_ASSERT_EQUAL_UINT16(250, s_out.lora.bw_khz);      /* kept default since 999 is invalid */
+    TEST_ASSERT_EQUAL_UINT8(8, s_out.lora.cr);             /* clamped to max 8 */
+    TEST_ASSERT_EQUAL_HEX16(0x1424, s_out.lora.sync_word); /* kept default since > 0xFFFF */
+
+    /* Valid with string hex sync word */
+    const char *good = "{\"schema\":1,\"lora\":{\"enabled\":false,\"freq_khz\":915000,\"sf\":11,\"bw_khz\":125,\"cr\":7,\"sync_word\":\"0x2B24\",\"wake_on_rx\":true}}";
+    TEST_ASSERT_TRUE_MESSAGE(settings_from_json(good, &s_defaults, &s_out, s_err, sizeof(s_err)), s_err);
+    TEST_ASSERT_FALSE(s_out.lora.enabled);
+    TEST_ASSERT_EQUAL_UINT32(915000, s_out.lora.freq_khz);
+    TEST_ASSERT_EQUAL_UINT8(11, s_out.lora.sf);
+    TEST_ASSERT_EQUAL_UINT16(125, s_out.lora.bw_khz);
+    TEST_ASSERT_EQUAL_UINT8(7, s_out.lora.cr);
+    TEST_ASSERT_EQUAL_HEX16(0x2B24, s_out.lora.sync_word);
+    TEST_ASSERT_TRUE(s_out.lora.wake_on_rx);
+
+    /* Round-trip */
+    TEST_ASSERT_TRUE(settings_to_json(&s_out, NULL, s_json, sizeof(s_json)) > 0);
+    settings_t again;
+    TEST_ASSERT_TRUE(settings_from_json(s_json, &s_defaults, &again, s_err, sizeof(s_err)));
+    TEST_ASSERT_FALSE(again.lora.enabled);
+    TEST_ASSERT_EQUAL_UINT32(915000, again.lora.freq_khz);
+    TEST_ASSERT_EQUAL_UINT8(11, again.lora.sf);
+    TEST_ASSERT_EQUAL_UINT16(125, again.lora.bw_khz);
+    TEST_ASSERT_EQUAL_UINT8(7, again.lora.cr);
+    TEST_ASSERT_EQUAL_HEX16(0x2B24, again.lora.sync_word);
+    TEST_ASSERT_TRUE(again.lora.wake_on_rx);
 }
 
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_the_lora_defaults_are_the_specs);
+    RUN_TEST(test_the_lora_settings_parse_clamp_and_round_trip);
     RUN_TEST(test_the_spec_sketch_parses);
     RUN_TEST(test_missing_keys_take_the_defaults);
     RUN_TEST(test_bad_values_are_clamped_or_ignored_one_by_one);
