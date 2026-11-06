@@ -1,0 +1,52 @@
+# Icons rendered into components/gfx/icons by tools/gen_icons.sh (spec §4.5).
+# C name       Material Icons name, or wi:<name> from Weather Icons   sizes (px)
+thermometer    device_thermostat     16 24 48
+drop           water_drop            16 24 48
+dew            dew_point             16 24 48
+bolt           bolt                  16 24
+stale          sync_problem          16 24
+clock          schedule              16 24 48
+calendar       calendar_today        16 24 48
+person         person                16 24 48
+celebration    celebration           16 24 48
+cloud          cloud                 16 24 48
+web            language              16
+sync           sync                  16
+sync_failed    cloud_off             16
+synced         cloud_done            16
+wifi           wifi                  16
+wifi_off       wifi_off              16
+air            air                   16 24 48
+particles      blur_on               16 24 48
+uv             light_mode            16 24 48
+pollen         local_florist         16 24 48
+# The PV forecast and the house's energy (M6d, D35, D36): a sun for the forecast, panels for what they
+# make, the house, the grid's meter and a leaf for own use.
+forecast       wb_sunny              16 24 48
+solar          solar_power           16 24 48
+house          house                 16 24 48
+grid           electric_meter        16 24 48
+self_use       energy_savings_leaf   16 24 48
+# The PC's readings (M7, D44): a computer, the thermometer for a temperature.
+pc             computer              16 24 48
+# Weather codes (spec §11), day and night where they differ, and the sun's times (M5); 16 px for XS cells (M6c).
+wx_clear_day        wi:day-sunny                16 24 48
+wx_clear_night      wi:night-clear              16 24 48
+wx_mainly_day       wi:day-sunny-overcast       16 24 48
+wx_mainly_night     wi:night-alt-partly-cloudy  16 24 48
+wx_partly_day       wi:day-cloudy               16 24 48
+wx_partly_night     wi:night-alt-cloudy         16 24 48
+wx_overcast         wi:cloudy                   16 24 48
+wx_fog              wi:fog                      16 24 48
+wx_drizzle          wi:sprinkle                 16 24 48
+wx_rain             wi:rain                     16 24 48
+wx_freezing         wi:sleet                    16 24 48
+wx_snow             wi:snow                     16 24 48
+wx_showers_day      wi:day-showers              16 24 48
+wx_showers_night    wi:night-alt-showers        16 24 48
+wx_snow_showers_day   wi:day-snow               16 24 48
+wx_snow_showers_night wi:night-alt-snow         16 24 48
+wx_thunder          wi:thunderstorm             16 24 48
+wx_unknown          wi:na                       16 24 48
+sunrise             wi:sunrise                  16 24 48
+sunset              wi:sunset                   16 24 48

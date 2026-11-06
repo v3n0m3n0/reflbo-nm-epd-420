@@ -1,0 +1,196 @@
+#pragma once
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <time.h>
+
+#include "ui_fields.h"
+#include "ui_layout.h"
+#include "ui_split.h"
+#include "ui_visual.h"
+#include "ui_window.h"
+
+/*
+ * Presets (spec §5.4): a layout, its slot bindings and options, stored in /cfg/presets.json.
+ * Pure C, host-buildable.
+ */
+
+#define UI_PRESET_MAX 16
+#define UI_PRESET_ID_LEN 16   /* with the terminator */
+#define UI_PRESET_NAME_LEN 24
+#define UI_PRESET_ERR_LEN 128 /* fits ui_presets_from_json()'s longest reason: a window's, with a 15-character id */
+#define UI_CYCLE_MIN_S 10
+#define UI_CYCLE_MAX_S 3600
+#define UI_SCHEDULE_MAX 8
+#define UI_PRESETS_JSON_MAX 65536 /* presets.json at its largest: 24 cells a preset of PC readings (test_ui_preset.c, M7) */
+#define UI_TITLE_LEN 24           /* a slot's or cell's own title with its terminator, as a preset's name (D42) */
+#define UI_TITLES_BYTES 768       /* every preset's titles together, in the deep-sleep snapshot (spec §5.4, D42) */
+#define UI_VISUALS_MAX 48         /* every preset's visuals together (spec §5.4, M7) */
+#define UI_JSON_MAX_DEPTH 20      /* presets.json nests 17 levels at most (a split tree's chain of 13 splits),
+                                     settings.json 5; anything deeper is rejected unparsed */
+
+typedef enum {
+    UI_STALE_STALE,       /* show the value with its age (the default) */
+    UI_STALE_PLACEHOLDER, /* show "—" */
+    UI_STALE_HIDE,        /* leave the slot empty */
+} ui_stale_policy_t;
+
+/* What the status bar shows beside the battery icon (option status_battery). */
+enum {
+    UI_STATUS_BAT_PERCENT = 1u << 0,
+    UI_STATUS_BAT_VOLTAGE = 1u << 1,
+    UI_STATUS_BAT_DAYS = 1u << 2,
+};
+
+typedef enum {
+    UI_CLOCK_DEFAULT, /* follow the time.clock_24h setting */
+    UI_CLOCK_24H,
+    UI_CLOCK_12H,
+} ui_clock_mode_t;
+
+typedef struct {
+    char id[UI_PRESET_ID_LEN];
+    char name[UI_PRESET_NAME_LEN];
+    uint8_t layout; /* ui_layout_id_t */
+    bool in_cycle;
+    ui_window_t window; /* the auto-cycle skips the preset while it is closed (spec §5.4, D41); days 0: none */
+    uint8_t slots[UI_SLOT_MAX]; /* ui_field_id_t per slot, in the layout's slot order, or per cell */
+    uint8_t split[UI_SPLIT_NODES]; /* the split layout's tree (ui_split.h); all 0 for the others */
+    uint8_t clock;              /* ui_clock_mode_t */
+    bool seconds;
+    bool invert;
+    uint8_t stale_policy;   /* ui_stale_policy_t */
+    bool status_clock;      /* a small clock in the middle of the status bar */
+    uint8_t status_battery; /* UI_STATUS_BAT_* bits */
+    bool status_sync;       /* the last good sync's time on the status bar's left (spec §5.2, D43) */
+    uint32_t force_title;   /* split cells (bit = cell) whose title shows whatever their size (spec §5.4, D42) */
+} ui_preset_t;
+
+typedef enum {
+    UI_SCHED_PRESET, /* make a preset active */
+    UI_SCHED_NIGHT,  /* night sleep until `until_min` (spec §9.1) */
+} ui_sched_action_t;
+
+/* A schedule entry (spec §5.4, D15). Times are local minutes after midnight. */
+typedef struct {
+    uint16_t at_min;
+    uint8_t days;   /* bit 0 Monday ... bit 6 Sunday */
+    uint8_t action; /* ui_sched_action_t */
+    uint8_t preset; /* index into presets, for UI_SCHED_PRESET */
+    uint16_t until_min; /* for UI_SCHED_NIGHT, never `at_min`: before it means the next day */
+} ui_schedule_entry_t;
+
+typedef struct {
+    bool enabled;
+    uint8_t count;
+    ui_schedule_entry_t entries[UI_SCHEDULE_MAX];
+} ui_schedule_t;
+
+/* When the entries run (spec §5.4), with the local-time rules of spec §9.2. The first time after
+ * `after` that an entry runs, with that entry's index in *index; 0 if none ever will. */
+time_t ui_schedule_next(const ui_schedule_t *schedule, time_t after, int *index);
+/* The entries due in (after, now], in the order they run: by time, and within a minute the presets
+ * in list order before a night. Returns how many; `order` gets their indexes. */
+int ui_schedule_due(const ui_schedule_t *schedule, time_t after, time_t now, int order[UI_SCHEDULE_MAX]);
+/* One check (spec §5.4): the entries due since *checked, as ui_schedule_due() gives them, and
+ * *checked becomes now. Nothing runs late: the first check (*checked is 0), a clock that moved
+ * back, and a gap longer than max_gap_s, a sleep no entry could end, only move the mark. */
+int ui_schedule_step(const ui_schedule_t *schedule, time_t *checked, time_t now, time_t max_gap_s,
+                     int order[UI_SCHEDULE_MAX]);
+/* Where the checks resume after a night that ended at `until`: a night covers [start, until), so
+ * the entries inside it don't run, and one at the end minute does. */
+time_t ui_schedule_after_night(time_t until);
+
+/* Built-in presets a file from an earlier firmware is offered once (spec §5.4): presets.json's
+ * "offered" names them, so one deleted later stays deleted. */
+enum {
+    UI_OFFERED_RAIN = 1u << 0,    /* "rain": Rain radar (M6) */
+    UI_OFFERED_FLIGHTS = 1u << 1, /* "flights": Flights (M6) */
+    UI_OFFERED_SOLAR = 1u << 2,   /* "solar": Solar (M6d) */
+    UI_OFFERED_ENERGY = 1u << 3,  /* "energy": Energy (M6d) */
+    UI_OFFERED_PC = 1u << 4,      /* "pc": PC (M7) */
+};
+#define UI_OFFERED_ALL (UI_OFFERED_RAIN | UI_OFFERED_FLIGHTS | UI_OFFERED_SOLAR | UI_OFFERED_ENERGY | UI_OFFERED_PC)
+
+/* A slot's visual (spec §5.4, M7): its preset, its slot (or cell) and how it shows. */
+typedef struct {
+    uint8_t preset, slot;
+    ui_visual_t vis;
+} ui_visual_entry_t;
+
+typedef struct {
+    uint8_t count;
+    uint8_t active; /* index into presets */
+    bool cycle_enabled;
+    uint16_t cycle_interval_s;
+    ui_preset_t presets[UI_PRESET_MAX];
+    ui_schedule_t schedule;
+    uint8_t offered; /* UI_OFFERED_* */
+    /* The presets' own titles (spec §5.4, D42), in preset and slot order: each the preset's index, the slot, the text
+     * and its terminator. An empty text ends them, so all zeros is none. */
+    uint8_t titles[UI_TITLES_BYTES];
+    /* The PC readings the presets name (M7, D44): `pc.<id>` is field UI_FIELD_PC_FIRST + n with its id in entry n, in
+     * the order the file names them first; "" ends them. A reading the PC no longer sends keeps its entry. */
+    char pc_ids[UI_PC_FIELDS][PC_ID_LEN];
+    /* The slots that show their field as a visual (M7, D44), by preset and slot; the rest show the value. */
+    uint8_t visual_count;
+    ui_visual_entry_t visuals[UI_VISUALS_MAX];
+} ui_presets_t;
+
+/* What a preset sets for its own slots (or cells), for the renderer: their titles (D42; NULL: the field's own label)
+ * and their visuals (M7; NULL: the value). */
+typedef struct {
+    const char *text[UI_SLOT_MAX];
+    const ui_visual_t *visual[UI_SLOT_MAX];
+} ui_titles_t;
+
+/* How many of `p`'s slots its layout uses: a fixed layout's slots, or the cells of its split tree
+ * (0 for a tree cut short). */
+int ui_preset_slots(const ui_preset_t *p);
+
+/* The built-in presets (spec §5.4): used when presets.json is missing or invalid. */
+void ui_presets_defaults(ui_presets_t *p);
+int ui_presets_find(const ui_presets_t *p, const char *id); /* index, or -1 */
+/* The next preset in cycle order after the active one, wrapping; the active one if no other
+ * preset is in the cycle (spec §5.4, KEY short). Presets on the Flights layout are in it only in
+ * sync mode `always` (D28). */
+int ui_presets_next(const ui_presets_t *p, bool always);
+/* The auto-cycle's next preset (spec §5.4, D41): as ui_presets_next(), skipping presets whose cycle window is
+ * closed at `now` at the location (1e-4 degrees); the active one when no other is open. `now` 0, the clock not
+ * set: every window counts as open. */
+int ui_presets_cycle_next(const ui_presets_t *p, bool always, time_t now, int32_t lat_e4, int32_t lon_e4);
+/* Offers the built-ins `offered` doesn't name yet: each joins at the end if its id is free and
+ * there is room, and is marked offered either way. True if anything changed: save the file. */
+bool ui_presets_offer_builtins(ui_presets_t *p);
+/* The field for PC reading `id` (M7): its entry in the table, or a new one; UI_FIELD_NONE for an id outside the rule
+ * (pc_id_valid()) or a table already full. */
+ui_field_id_t ui_presets_pc_field(ui_presets_t *p, const char *id);
+/* A field by its name in presets.json: "env.temp", or "pc.<id>" through ui_presets_pc_field(); UI_FIELD_NONE for
+ * neither. */
+ui_field_id_t ui_presets_field_by_name(ui_presets_t *p, const char *name);
+/* A field's name in presets.json into `out`; its length, or 0 (and "") for none or a PC entry without an id. */
+size_t ui_presets_field_name(const ui_presets_t *p, ui_field_id_t field, char *out, size_t size);
+/* The built-in PC preset's charts and bars from the PC app's first catalogue (spec §5.4, M7): its first four readings
+ * as 60 s charts, the next three as bars, each with the reading's own range. Only a preset `pc` on the PC layout
+ * whose slots are all empty: one the owner has changed stays as it is. True if anything changed: save the file. */
+bool ui_presets_fill_pc(ui_presets_t *p, const pc_catalog_t *cat);
+/* The fields the presets' charts show, each once, in preset and slot order: the history's series (spec §5.3). How
+ * many, up to UI_HIST_SERIES. */
+int ui_presets_chart_fields(const ui_presets_t *p, char names[UI_HIST_SERIES][UI_HIST_NAME_LEN]);
+/* Preset `preset`'s own title for `slot`, or NULL. */
+const char *ui_presets_title(const ui_presets_t *p, int preset, int slot);
+/* Sets it (NULL or "" clears it), keeping the pool in order. False, the pool unchanged, if it doesn't fit. */
+bool ui_presets_set_title(ui_presets_t *p, int preset, int slot, const char *text);
+/* Preset `preset`'s visual for `slot`, or NULL: its value. */
+const ui_visual_t *ui_presets_visual(const ui_presets_t *p, int preset, int slot);
+/* Sets it (NULL or UI_VIS_VALUE clears it), keeping the pool in preset and slot order. False, the pool unchanged, when
+ * all 48 are taken. */
+bool ui_presets_set_visual(ui_presets_t *p, int preset, int slot, const ui_visual_t *vis);
+/* Preset `preset`'s titles and visuals, pointing into the pools: valid while they don't change. */
+void ui_presets_titles(const ui_presets_t *p, int preset, ui_titles_t *out);
+/* Parses and validates presets.json. On failure returns false with a reason in `err` and leaves
+ * *out unspecified. */
+bool ui_presets_from_json(const char *json, ui_presets_t *out, char *err, size_t err_size);
+/* Serialises; returns the length written, or 0 if `size` is too small. */
+size_t ui_presets_to_json(const ui_presets_t *p, char *out, size_t size);

@@ -1,0 +1,773 @@
+#include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "cJSON.h"
+#include "ui_fields.h"
+#include "ui_preset.h"
+#include "ui_split.h"
+#include "util_json.h"
+
+#define SCHEMA 1
+
+static const char *const k_policies[] = { [UI_STALE_STALE] = "stale", [UI_STALE_PLACEHOLDER] = "placeholder",
+                                          [UI_STALE_HIDE] = "hide" };
+static const char *const k_battery_parts[] = { "percent", "voltage", "days" }; /* UI_STATUS_BAT_* bit order */
+static const char *const k_offered_ids[] = { "rain", "flights", "solar", "energy", "pc" }; /* UI_OFFERED_* order */
+
+static bool fail(char *err, size_t size, const char *fmt, ...)
+{
+    if (size > 0) {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(err, size, fmt, ap);
+        va_end(ap);
+    }
+    return false;
+}
+
+/* Ids travel in console commands and HA select options: keep them short and plain. */
+static bool valid_id(const char *id)
+{
+    size_t n = strlen(id);
+    if (n == 0 || n >= UI_PRESET_ID_LEN) {
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        char c = id[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool optional_bool(const cJSON *obj, const char *key, bool fallback)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    return cJSON_IsBool(item) ? cJSON_IsTrue(item) : fallback;
+}
+
+/* Copies a name, cut to fit at a character boundary (a limit inside "ř" would split it). */
+static void copy_name(char *out, size_t size, const char *name)
+{
+    size_t n = strlen(name);
+    if (n >= size) {
+        n = size - 1;
+        while (n > 0 && ((unsigned char)name[n] & 0xC0) == 0x80) { /* name[n] continues a sequence */
+            n--;
+        }
+    }
+    memcpy(out, name, n);
+    out[n] = '\0';
+}
+
+/* A slot's or cell's own title (spec §5.4, D42): text, cut like a name, control characters as spaces; "" or null is
+ * none. False, with the reason, if it isn't text or the pool is full. */
+static bool parse_title(const cJSON *title, ui_presets_t *all, int index, int slot, const char *id, char *err,
+                        size_t size)
+{
+    if (title == NULL || cJSON_IsNull(title)) {
+        return true;
+    }
+    if (!cJSON_IsString(title)) {
+        return fail(err, size, "preset \"%s\": a title must be text", id);
+    }
+    char text[UI_TITLE_LEN];
+    copy_name(text, sizeof(text), title->valuestring);
+    for (char *c = text; *c; c++) {
+        if ((unsigned char)*c < 0x20 || *c == 0x7F) {
+            *c = ' ';
+        }
+    }
+    if (!ui_presets_set_title(all, index, slot, text)) {
+        return fail(err, size, "titles: %d bytes at most in all presets, each title taking 3 more", UI_TITLES_BYTES);
+    }
+    return true;
+}
+
+static bool parse_titles(const cJSON *titles, const ui_layout_t *layout, ui_presets_t *all, int index, char *err,
+                         size_t size)
+{
+    const char *id = all->presets[index].id;
+    if (titles == NULL || cJSON_IsNull(titles)) {
+        return true;
+    }
+    if (!cJSON_IsObject(titles)) {
+        return fail(err, size, "preset \"%s\": titles must be an object of slot names", id);
+    }
+    const cJSON *title;
+    cJSON_ArrayForEach(title, titles)
+    {
+        int slot = ui_slot_by_name(layout, title->string);
+        if (slot < 0) {
+            return fail(err, size, "preset \"%s\": layout %s has no slot \"%s\"", id, layout->id, title->string);
+        }
+        if (!parse_title(title, all, index, slot, id, err, size)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static const char *const k_visual_names[UI_VIS_COUNT] = {
+    [UI_VIS_CHART] = "chart", [UI_VIS_BAR] = "bar", [UI_VIS_RING] = "ring", [UI_VIS_GAUGE] = "gauge",
+};
+
+/* A visual's bound (spec §5.4, M7): left out for the field's own, a number, or "auto" for a chart's. */
+static bool parse_bound(const cJSON *b, uint8_t as, uint8_t *mode, float *out, const char *id, char *err, size_t size)
+{
+    if (b == NULL || cJSON_IsNull(b)) {
+        *mode = UI_LIMIT_FIELD;
+        return true;
+    }
+    if (cJSON_IsString(b) && strcmp(b->valuestring, "auto") == 0) {
+        if (as != UI_VIS_CHART) {
+            return fail(err, size, "preset \"%s\": only a chart's min and max can be auto", id);
+        }
+        *mode = UI_LIMIT_AUTO;
+        return true;
+    }
+    if (!cJSON_IsNumber(b) || !isfinite((float)b->valuedouble)) {
+        return fail(err, size, "preset \"%s\": a visual's min and max are numbers", id);
+    }
+    *mode = UI_LIMIT_VALUE;
+    *out = (float)b->valuedouble;
+    return true;
+}
+
+/* How slot `slot` (named `what` in a reason) shows its field, which must be a number (spec §5.4, M7, D44). */
+static bool parse_visual(const cJSON *o, ui_presets_t *all, int index, int slot, const char *what, char *err,
+                         size_t size)
+{
+    const char *id = all->presets[index].id;
+    if (!cJSON_IsObject(o)) {
+        return fail(err, size, "preset \"%s\": a visual must be an object", id);
+    }
+    if (!ui_field_numeric((ui_field_id_t)all->presets[index].slots[slot])) {
+        return fail(err, size, "preset \"%s\": %s shows no number", id, what);
+    }
+    const cJSON *as = cJSON_GetObjectItemCaseSensitive(o, "as");
+    ui_visual_t vis = { .as = UI_VIS_VALUE, .span_s = UI_SPAN_DEFAULT_S };
+    for (int a = UI_VIS_CHART; a < UI_VIS_COUNT && cJSON_IsString(as); a++) {
+        if (strcmp(as->valuestring, k_visual_names[a]) == 0) {
+            vis.as = (uint8_t)a;
+        }
+    }
+    if (vis.as == UI_VIS_VALUE) {
+        return fail(err, size, "preset \"%s\": a visual is chart, bar, ring or gauge", id);
+    }
+    if (!parse_bound(cJSON_GetObjectItemCaseSensitive(o, "min"), vis.as, &vis.min_mode, &vis.min, id, err, size) ||
+        !parse_bound(cJSON_GetObjectItemCaseSensitive(o, "max"), vis.as, &vis.max_mode, &vis.max, id, err, size)) {
+        return false;
+    }
+    if (vis.min_mode == UI_LIMIT_VALUE && vis.max_mode == UI_LIMIT_VALUE && !(vis.min < vis.max)) {
+        return fail(err, size, "preset \"%s\": a visual's min must be below its max", id);
+    }
+    if (vis.as == UI_VIS_CHART) {
+        const cJSON *span = cJSON_GetObjectItemCaseSensitive(o, "span_s");
+        if (span != NULL && !cJSON_IsNull(span)) {
+            double s = cJSON_IsNumber(span) ? span->valuedouble : -1.0;
+            if (s != floor(s) || s < 0 || s > UI_SPAN_MAX_S || !ui_visual_span_ok((uint32_t)s)) {
+                return fail(err, size, "preset \"%s\": a chart's span is 10-3600 s, or whole hours up to 24 h", id);
+            }
+            vis.span_s = (uint32_t)s;
+        }
+        vis.numbers = optional_bool(o, "numbers", true);
+    }
+    if (!ui_presets_set_visual(all, index, slot, &vis)) {
+        return fail(err, size, "preset \"%s\": %d visuals at most in all presets", id, UI_VISUALS_MAX);
+    }
+    return true;
+}
+
+static bool parse_visuals(const cJSON *visuals, const ui_layout_t *layout, ui_presets_t *all, int index, char *err,
+                          size_t size)
+{
+    const char *id = all->presets[index].id;
+    if (visuals == NULL || cJSON_IsNull(visuals)) {
+        return true;
+    }
+    if (!cJSON_IsObject(visuals)) {
+        return fail(err, size, "preset \"%s\": visuals must be an object of slot names", id);
+    }
+    const cJSON *visual;
+    cJSON_ArrayForEach(visual, visuals)
+    {
+        int slot = ui_slot_by_name(layout, visual->string);
+        if (slot < 0) {
+            return fail(err, size, "preset \"%s\": layout %s has no slot \"%s\"", id, layout->id, visual->string);
+        }
+        char what[24];
+        snprintf(what, sizeof(what), "slot %s", layout->slots[slot].name);
+        if (!parse_visual(visual, all, index, slot, what, err, size)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* A bound as the file writes it: a float's own digits, not its double's. */
+static void add_bound(cJSON *o, const char *key, uint8_t mode, float v)
+{
+    if (mode == UI_LIMIT_AUTO) {
+        cJSON_AddStringToObject(o, key, "auto");
+    } else if (mode == UI_LIMIT_VALUE) {
+        char digits[24];
+        snprintf(digits, sizeof(digits), "%.7g", (double)v);
+        cJSON_AddNumberToObject(o, key, strtod(digits, NULL));
+    }
+}
+
+static cJSON *visual_json(const ui_visual_t *v)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "as", v->as < UI_VIS_COUNT && k_visual_names[v->as] ? k_visual_names[v->as] : "bar");
+    add_bound(o, "min", v->min_mode, v->min);
+    add_bound(o, "max", v->max_mode, v->max);
+    if (v->as == UI_VIS_CHART) {
+        cJSON_AddNumberToObject(o, "span_s", v->span_s);
+        cJSON_AddBoolToObject(o, "numbers", v->numbers);
+    }
+    return o;
+}
+
+/* "22:30" -> minutes after midnight. */
+static bool parse_hhmm(const cJSON *item, uint16_t *out)
+{
+    const char *s = cJSON_IsString(item) ? item->valuestring : "";
+    if (strlen(s) != 5 || s[2] != ':') {
+        return false;
+    }
+    for (int i = 0; i < 5; i++) {
+        if (i != 2 && (s[i] < '0' || s[i] > '9')) {
+            return false;
+        }
+    }
+    int h = (s[0] - '0') * 10 + (s[1] - '0'), m = (s[3] - '0') * 10 + (s[4] - '0');
+    if (h > 23 || m > 59) {
+        return false;
+    }
+    *out = (uint16_t)(h * 60 + m);
+    return true;
+}
+
+/* A slot's or cell's field by its name; a PC reading takes an entry in the presets' table (M7, D44). */
+static bool field_named(ui_presets_t *all, const char *preset, const char *name, ui_field_id_t *out, char *err,
+                        size_t size)
+{
+    *out = ui_presets_field_by_name(all, name);
+    if (*out != UI_FIELD_NONE) {
+        return true;
+    }
+    if (strncmp(name, "pc.", 3) == 0 && pc_id_valid(name + 3)) {
+        return fail(err, size, "preset \"%s\": the presets name more than %d PC readings", preset, UI_PC_FIELDS);
+    }
+    return fail(err, size, "preset \"%s\": unknown field \"%s\"", preset, name);
+}
+
+static bool parse_slots(const cJSON *slots, const ui_layout_t *layout, ui_presets_t *all, ui_preset_t *out, char *err,
+                        size_t size)
+{
+    if (!cJSON_IsObject(slots)) {
+        return fail(err, size, "preset \"%s\": slots must be an object of slot names", out->id);
+    }
+    const cJSON *slot;
+    cJSON_ArrayForEach(slot, slots)
+    {
+        int index = ui_slot_by_name(layout, slot->string);
+        if (index < 0) {
+            return fail(err, size, "preset \"%s\": layout %s has no slot \"%s\"", out->id, layout->id, slot->string);
+        }
+        if (cJSON_IsNull(slot) || (cJSON_IsString(slot) && slot->valuestring[0] == '\0')) {
+            continue; /* explicitly empty */
+        }
+        if (!cJSON_IsString(slot)) {
+            return fail(err, size, "preset \"%s\": slot %s needs a field id", out->id, slot->string);
+        }
+        ui_field_id_t field;
+        if (!field_named(all, out->id, slot->valuestring, &field, err, size)) {
+            return false;
+        }
+        if (!(layout->slots[index].kinds & UI_KIND(ui_field_info(field)->kind))) {
+            return fail(err, size, "preset \"%s\": slot %s can't show %s", out->id, slot->string, slot->valuestring);
+        }
+        out->slots[index] = (uint8_t)field;
+    }
+    return true;
+}
+
+typedef struct {
+    ui_preset_t *out;
+    ui_presets_t *all; /* for the titles' pool (spec §5.4, D42) */
+    int index;         /* out's index in it */
+    int nodes; /* taken so far, in preorder */
+    int cells;
+    char *err;
+    size_t size;
+} tree_t;
+
+/* A split tree's node and everything under it (spec §5.4). The file's depth is checked before it
+ * parses, so the recursion is at most UI_JSON_MAX_DEPTH deep. */
+static bool parse_node(tree_t *t, const cJSON *node)
+{
+    const char *id = t->out->id;
+    if (t->nodes >= UI_SPLIT_NODES) { /* a tree of n cells has 2n - 1 nodes */
+        return fail(t->err, t->size, "preset \"%s\": a split preset has at most %d cells", id, UI_SPLIT_CELLS);
+    }
+    const cJSON *split = cJSON_GetObjectItemCaseSensitive(node, "split");
+    if (split == NULL) {
+        t->out->split[t->nodes++] = 0;
+        const cJSON *field = cJSON_GetObjectItemCaseSensitive(node, "field");
+        if (field != NULL && !cJSON_IsNull(field) && !(cJSON_IsString(field) && field->valuestring[0] == '\0')) {
+            if (!cJSON_IsString(field)) {
+                return fail(t->err, t->size, "preset \"%s\": a cell's field must be a field id", id);
+            }
+            ui_field_id_t f;
+            if (!field_named(t->all, id, field->valuestring, &f, t->err, t->size)) {
+                return false;
+            }
+            t->out->slots[t->cells] = (uint8_t)f;
+        }
+        if (!parse_title(cJSON_GetObjectItemCaseSensitive(node, "title"), t->all, t->index, t->cells, id, t->err,
+                         t->size)) {
+            return false;
+        }
+        if (optional_bool(node, "force_title", false)) {
+            t->out->force_title |= 1u << t->cells;
+        }
+        const cJSON *show = cJSON_GetObjectItemCaseSensitive(node, "show");
+        if (show != NULL && !cJSON_IsNull(show)) {
+            char what[24];
+            snprintf(what, sizeof(what), "cell %d", t->cells + 1);
+            if (!parse_visual(show, t->all, t->index, t->cells, what, t->err, t->size)) {
+                return false;
+            }
+        }
+        t->cells++;
+        return true;
+    }
+    const char *dir = cJSON_IsString(split) ? split->valuestring : "";
+    bool columns = strcmp(dir, "columns") == 0;
+    if (!columns && strcmp(dir, "rows") != 0) {
+        return fail(t->err, t->size, "preset \"%s\": a split is rows or columns", id);
+    }
+    const cJSON *ratio = cJSON_GetObjectItemCaseSensitive(node, "ratio");
+    int r = cJSON_IsString(ratio) ? ui_split_ratio_by_name(ratio->valuestring) : 0;
+    if (r == 0) {
+        return fail(t->err, t->size, "preset \"%s\": a split's ratio is 1/4, 1/3, 1/2, 2/3 or 3/4", id);
+    }
+    const cJSON *a = cJSON_GetObjectItemCaseSensitive(node, "a"), *b = cJSON_GetObjectItemCaseSensitive(node, "b");
+    if (!cJSON_IsObject(a) || !cJSON_IsObject(b)) {
+        return fail(t->err, t->size, "preset \"%s\": a split needs both parts, a and b, as objects", id);
+    }
+    t->out->split[t->nodes++] =
+        (uint8_t)(r | (columns ? UI_SPLIT_COLUMNS : 0) | (optional_bool(node, "line", true) ? 0 : UI_SPLIT_NO_LINE));
+    return parse_node(t, a) && parse_node(t, b);
+}
+
+/* The split layout's tree, then its geometry and what each cell can show (spec §5.2). */
+static bool parse_split(const cJSON *split, ui_presets_t *all, int index, char *err, size_t size)
+{
+    ui_preset_t *out = &all->presets[index];
+    if (split == NULL || cJSON_IsNull(split)) {
+        return true; /* one empty cell */
+    }
+    if (!cJSON_IsObject(split)) {
+        return fail(err, size, "preset \"%s\": split must be a tree of splits and cells", out->id);
+    }
+    tree_t t = { .out = out, .all = all, .index = index, .err = err, .size = size };
+    if (!parse_node(&t, split)) {
+        return false;
+    }
+    ui_split_geometry_t g;
+    if (!ui_split_layout(out->split, ui_split_area(), &g)) {
+        return fail(err, size, "preset \"%s\": a split's parts must be at least %d×%d", out->id, UI_SPLIT_MIN_W,
+                    UI_SPLIT_MIN_H);
+    }
+    for (int i = 0; i < g.cells; i++) {
+        const ui_field_info_t *info = ui_field_info((ui_field_id_t)out->slots[i]);
+        if (info != NULL && ui_split_field_size(info->kind, g.cell[i].w, g.cell[i].h) < 0) {
+            char name[4 + PC_ID_LEN];
+            ui_presets_field_name(all, (ui_field_id_t)out->slots[i], name, sizeof(name));
+            return fail(err, size, "preset \"%s\": cell %d (%d×%d) can't show %s", out->id, i + 1, g.cell[i].w,
+                        g.cell[i].h, name);
+        }
+    }
+    return true;
+}
+
+/* A preset's cycle window (spec §5.4, D41): from, until and days, checked as the console checks them. */
+static bool parse_window(const cJSON *window, ui_preset_t *out, char *err, size_t size)
+{
+    if (!cJSON_IsObject(window)) {
+        return fail(err, size, "preset \"%s\": window must be an object", out->id);
+    }
+    const cJSON *from = cJSON_GetObjectItemCaseSensitive(window, "from");
+    const cJSON *until = cJSON_GetObjectItemCaseSensitive(window, "until");
+    const cJSON *days = cJSON_GetObjectItemCaseSensitive(window, "days");
+    int mask = 0x7F;
+    if (days != NULL) {
+        mask = cJSON_IsNumber(days) && days->valuedouble == (double)days->valueint ? days->valueint : -1;
+    }
+    char why[96];
+    if (!ui_window_make(cJSON_IsString(from) ? from->valuestring : "", cJSON_IsString(until) ? until->valuestring : "",
+                        mask, &out->window, why, sizeof(why))) {
+        return fail(err, size, "preset \"%s\": window: %s", out->id, why);
+    }
+    return true;
+}
+
+static bool parse_preset(const cJSON *item, ui_presets_t *all, int index, char *err, size_t size)
+{
+    ui_preset_t *out = &all->presets[index];
+    memset(out, 0, sizeof(*out));
+    const cJSON *id = cJSON_GetObjectItemCaseSensitive(item, "id");
+    if (!cJSON_IsString(id) || !valid_id(id->valuestring)) {
+        return fail(err, size, "a preset id must be 1-%d characters of a-z, 0-9, - or _", UI_PRESET_ID_LEN - 1);
+    }
+    snprintf(out->id, sizeof(out->id), "%s", id->valuestring);
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(item, "name");
+    if (cJSON_IsString(name)) {
+        copy_name(out->name, sizeof(out->name), name->valuestring);
+    } else {
+        copy_name(out->name, sizeof(out->name), out->id); /* not snprintf: GCC sees both in `all` and warns */
+    }
+    const cJSON *layout_name = cJSON_GetObjectItemCaseSensitive(item, "layout");
+    int layout = cJSON_IsString(layout_name) ? ui_layout_by_name(layout_name->valuestring) : -1;
+    if (layout < 0) {
+        return fail(err, size, "preset \"%s\": unknown layout", out->id);
+    }
+    out->layout = (uint8_t)layout;
+    out->in_cycle = optional_bool(item, "in_cycle", true);
+    const cJSON *window = cJSON_GetObjectItemCaseSensitive(item, "window");
+    if (window != NULL && !cJSON_IsNull(window) && !parse_window(window, out, err, size)) {
+        return false;
+    }
+    const cJSON *slots = cJSON_GetObjectItemCaseSensitive(item, "slots");
+    if (slots != NULL && !cJSON_IsNull(slots) &&
+        !parse_slots(slots, ui_layout((ui_layout_id_t)layout), all, out, err, size)) {
+        return false;
+    }
+    if (layout == UI_LAYOUT_SPLIT && !parse_split(cJSON_GetObjectItemCaseSensitive(item, "split"), all, index, err, size)) {
+        return false;
+    }
+    if (layout != UI_LAYOUT_SPLIT && !parse_titles(cJSON_GetObjectItemCaseSensitive(item, "titles"),
+                                                   ui_layout((ui_layout_id_t)layout), all, index, err, size)) {
+        return false;
+    }
+    if (layout != UI_LAYOUT_SPLIT && !parse_visuals(cJSON_GetObjectItemCaseSensitive(item, "visuals"),
+                                                    ui_layout((ui_layout_id_t)layout), all, index, err, size)) {
+        return false;
+    }
+    const cJSON *options = cJSON_GetObjectItemCaseSensitive(item, "options");
+    const cJSON *h24 = cJSON_GetObjectItemCaseSensitive(options, "clock_24h");
+    out->clock = cJSON_IsBool(h24) ? (cJSON_IsTrue(h24) ? UI_CLOCK_24H : UI_CLOCK_12H) : UI_CLOCK_DEFAULT;
+    out->seconds = optional_bool(options, "seconds", false);
+    out->invert = optional_bool(options, "invert", false);
+    out->stale_policy = UI_STALE_STALE;
+    const cJSON *policy = cJSON_GetObjectItemCaseSensitive(options, "stale_policy");
+    if (policy != NULL && !cJSON_IsNull(policy)) {
+        int found = -1;
+        for (int i = 0; cJSON_IsString(policy) && i < (int)(sizeof(k_policies) / sizeof(k_policies[0])); i++) {
+            if (strcmp(policy->valuestring, k_policies[i]) == 0) {
+                found = i;
+            }
+        }
+        if (found < 0) {
+            return fail(err, size, "preset \"%s\": stale_policy must be stale, placeholder or hide", out->id);
+        }
+        out->stale_policy = (uint8_t)found;
+    }
+    out->status_clock = optional_bool(options, "status_clock", false);
+    out->status_sync = optional_bool(options, "status_sync", false);
+    out->status_battery = UI_STATUS_BAT_PERCENT;
+    const cJSON *battery = cJSON_GetObjectItemCaseSensitive(options, "status_battery");
+    if (battery != NULL && !cJSON_IsNull(battery)) {
+        if (!cJSON_IsArray(battery)) {
+            return fail(err, size, "preset \"%s\": status_battery must be a list", out->id);
+        }
+        out->status_battery = 0;
+        const cJSON *part;
+        cJSON_ArrayForEach(part, battery)
+        {
+            int bit = -1;
+            for (int i = 0; cJSON_IsString(part) && i < 3; i++) {
+                if (strcmp(part->valuestring, k_battery_parts[i]) == 0) {
+                    bit = i;
+                }
+            }
+            if (bit < 0) {
+                return fail(err, size, "preset \"%s\": status_battery takes percent, voltage and days", out->id);
+            }
+            out->status_battery |= (uint8_t)(1u << bit);
+        }
+    }
+    return true;
+}
+
+static bool parse_schedule(const cJSON *schedule, ui_presets_t *out, char *err, size_t size)
+{
+    out->schedule.enabled = optional_bool(schedule, "enabled", false);
+    const cJSON *entries = cJSON_GetObjectItemCaseSensitive(schedule, "entries");
+    if (entries == NULL || cJSON_IsNull(entries)) {
+        return true;
+    }
+    if (!cJSON_IsArray(entries)) {
+        return fail(err, size, "schedule: entries must be a list");
+    }
+    if (cJSON_GetArraySize(entries) > UI_SCHEDULE_MAX) {
+        return fail(err, size, "schedule: at most %d entries", UI_SCHEDULE_MAX);
+    }
+    const cJSON *e;
+    cJSON_ArrayForEach(e, entries)
+    {
+        int n = out->schedule.count + 1;
+        ui_schedule_entry_t *se = &out->schedule.entries[out->schedule.count];
+        if (!parse_hhmm(cJSON_GetObjectItemCaseSensitive(e, "at"), &se->at_min)) {
+            return fail(err, size, "schedule entry %d: \"at\" must be HH:MM", n);
+        }
+        const cJSON *days = cJSON_GetObjectItemCaseSensitive(e, "days");
+        se->days = cJSON_IsNumber(days) ? (uint8_t)(days->valueint & 0x7F) : 0x7F;
+        const cJSON *action = cJSON_GetObjectItemCaseSensitive(e, "action");
+        const char *a = cJSON_IsString(action) ? action->valuestring : "";
+        if (strcmp(a, "preset") == 0) {
+            const cJSON *id = cJSON_GetObjectItemCaseSensitive(e, "preset");
+            int index = cJSON_IsString(id) ? ui_presets_find(out, id->valuestring) : -1;
+            if (index < 0) {
+                return fail(err, size, "schedule entry %d: unknown preset", n);
+            }
+            se->action = UI_SCHED_PRESET;
+            se->preset = (uint8_t)index;
+        } else if (strcmp(a, "night") == 0) {
+            if (!parse_hhmm(cJSON_GetObjectItemCaseSensitive(e, "until"), &se->until_min)) {
+                return fail(err, size, "schedule entry %d: night needs \"until\" as HH:MM", n);
+            }
+            if (se->until_min == se->at_min) {
+                return fail(err, size, "schedule entry %d: a night must end at another time than it starts", n);
+            }
+            se->action = UI_SCHED_NIGHT;
+        } else {
+            return fail(err, size, "schedule entry %d: action must be preset or night", n);
+        }
+        out->schedule.count++;
+    }
+    return true;
+}
+
+static bool parse(const cJSON *root, ui_presets_t *out, char *err, size_t size)
+{
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint != SCHEMA) {
+        return fail(err, size, "schema must be %d", SCHEMA);
+    }
+    const cJSON *presets = cJSON_GetObjectItemCaseSensitive(root, "presets");
+    int n = cJSON_IsArray(presets) ? cJSON_GetArraySize(presets) : 0;
+    if (n < 1 || n > UI_PRESET_MAX) {
+        return fail(err, size, "presets must hold 1-%d entries", UI_PRESET_MAX);
+    }
+    memset(out, 0, sizeof(*out));
+    const cJSON *item;
+    cJSON_ArrayForEach(item, presets)
+    {
+        ui_preset_t *p = &out->presets[out->count];
+        if (!parse_preset(item, out, out->count, err, size)) {
+            return false;
+        }
+        if (ui_presets_find(out, p->id) >= 0) {
+            return fail(err, size, "duplicate preset id \"%s\"", p->id);
+        }
+        out->count++;
+    }
+    const cJSON *active = cJSON_GetObjectItemCaseSensitive(root, "active");
+    int index = cJSON_IsString(active) ? ui_presets_find(out, active->valuestring) : -1;
+    out->active = (uint8_t)(index < 0 ? 0 : index);
+    const cJSON *cycle = cJSON_GetObjectItemCaseSensitive(root, "cycle");
+    out->cycle_enabled = optional_bool(cycle, "enabled", false);
+    const cJSON *interval = cJSON_GetObjectItemCaseSensitive(cycle, "interval_s");
+    int seconds = cJSON_IsNumber(interval) ? interval->valueint : 60;
+    out->cycle_interval_s = (uint16_t)(seconds < UI_CYCLE_MIN_S ? UI_CYCLE_MIN_S
+                                       : seconds > UI_CYCLE_MAX_S ? UI_CYCLE_MAX_S
+                                                                  : seconds);
+    const cJSON *offered = cJSON_GetObjectItemCaseSensitive(root, "offered");
+    const cJSON *names = cJSON_IsArray(offered) ? offered : NULL;
+    const cJSON *id;
+    cJSON_ArrayForEach(id, names)
+    {
+        for (int i = 0; cJSON_IsString(id) && i < (int)(sizeof(k_offered_ids) / sizeof(k_offered_ids[0])); i++) {
+            if (strcmp(id->valuestring, k_offered_ids[i]) == 0) {
+                out->offered |= (uint8_t)(1u << i); /* unknown names are a later firmware's */
+            }
+        }
+    }
+    const cJSON *schedule = cJSON_GetObjectItemCaseSensitive(root, "schedule");
+    return schedule == NULL || cJSON_IsNull(schedule) || parse_schedule(schedule, out, err, size);
+}
+
+bool ui_presets_from_json(const char *json, ui_presets_t *out, char *err, size_t err_size)
+{
+    if (util_json_depth(json) > UI_JSON_MAX_DEPTH) {
+        return fail(err, err_size, "nested more than %d levels", UI_JSON_MAX_DEPTH);
+    }
+    cJSON *root = json != NULL ? cJSON_Parse(json) : NULL;
+    if (root == NULL) {
+        return fail(err, err_size, "not valid JSON");
+    }
+    bool ok = parse(root, out, err, err_size);
+    cJSON_Delete(root);
+    return ok;
+}
+
+/* A split tree's node and everything under it, in preorder: `at` the node, `cell` its first cell. */
+static cJSON *node_json(const ui_presets_t *all, int index, int *at, int *cell)
+{
+    const ui_preset_t *p = &all->presets[index];
+    cJSON *obj = cJSON_CreateObject();
+    uint8_t node = p->split[(*at)++];
+    if ((node & UI_SPLIT_RATIO) == 0) {
+        int c = (*cell)++;
+        char name[4 + PC_ID_LEN];
+        if (ui_presets_field_name(all, (ui_field_id_t)p->slots[c], name, sizeof(name)) > 0) {
+            cJSON_AddStringToObject(obj, "field", name);
+        }
+        const char *title = ui_presets_title(all, index, c);
+        if (title != NULL) {
+            cJSON_AddStringToObject(obj, "title", title);
+        }
+        if (p->force_title & (1u << c)) {
+            cJSON_AddBoolToObject(obj, "force_title", true);
+        }
+        const ui_visual_t *vis = ui_presets_visual(all, index, c);
+        if (vis != NULL) {
+            cJSON_AddItemToObject(obj, "show", visual_json(vis));
+        }
+        return obj;
+    }
+    cJSON_AddStringToObject(obj, "split", node & UI_SPLIT_COLUMNS ? "columns" : "rows");
+    cJSON_AddStringToObject(obj, "ratio", ui_split_ratio_name(node & UI_SPLIT_RATIO));
+    cJSON_AddBoolToObject(obj, "line", !(node & UI_SPLIT_NO_LINE));
+    cJSON_AddItemToObject(obj, "a", node_json(all, index, at, cell));
+    cJSON_AddItemToObject(obj, "b", node_json(all, index, at, cell));
+    return obj;
+}
+
+static cJSON *preset_json(const ui_presets_t *all, int index)
+{
+    const ui_preset_t *p = &all->presets[index];
+    const ui_layout_t *layout = ui_layout((ui_layout_id_t)p->layout);
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "id", p->id);
+    cJSON_AddStringToObject(obj, "name", p->name);
+    cJSON_AddStringToObject(obj, "layout", layout->id);
+    cJSON_AddBoolToObject(obj, "in_cycle", p->in_cycle);
+    if (p->window.days != 0) {
+        char from[UI_BOUND_TEXT_LEN], until[UI_BOUND_TEXT_LEN];
+        ui_bound_format(p->window.from, from, sizeof(from));
+        ui_bound_format(p->window.until, until, sizeof(until));
+        cJSON *window = cJSON_AddObjectToObject(obj, "window");
+        cJSON_AddStringToObject(window, "from", from);
+        cJSON_AddStringToObject(window, "until", until);
+        cJSON_AddNumberToObject(window, "days", p->window.days);
+    }
+    if (p->layout == UI_LAYOUT_SPLIT) {
+        int at = 0, cell = 0;
+        bool whole = ui_split_nodes(p->split) > 0; /* a tree cut short can't be walked: one empty cell */
+        cJSON_AddItemToObject(obj, "split", whole ? node_json(all, index, &at, &cell) : cJSON_CreateObject());
+    } else {
+        cJSON *slots = cJSON_AddObjectToObject(obj, "slots");
+        cJSON *titles = NULL;
+        for (int i = 0; i < layout->slot_count; i++) {
+            char name[4 + PC_ID_LEN];
+            if (ui_presets_field_name(all, (ui_field_id_t)p->slots[i], name, sizeof(name)) > 0) {
+                cJSON_AddStringToObject(slots, layout->slots[i].name, name);
+            }
+            const char *title = ui_presets_title(all, index, i);
+            if (title != NULL) {
+                titles = titles != NULL ? titles : cJSON_CreateObject();
+                cJSON_AddStringToObject(titles, layout->slots[i].name, title);
+            }
+        }
+        if (titles != NULL) {
+            cJSON_AddItemToObject(obj, "titles", titles);
+        }
+        cJSON *visuals = NULL;
+        for (int i = 0; i < layout->slot_count; i++) {
+            const ui_visual_t *vis = ui_presets_visual(all, index, i);
+            if (vis != NULL) {
+                visuals = visuals != NULL ? visuals : cJSON_CreateObject();
+                cJSON_AddItemToObject(visuals, layout->slots[i].name, visual_json(vis));
+            }
+        }
+        if (visuals != NULL) {
+            cJSON_AddItemToObject(obj, "visuals", visuals);
+        }
+    }
+    cJSON *options = cJSON_AddObjectToObject(obj, "options");
+    if (p->clock != UI_CLOCK_DEFAULT) {
+        cJSON_AddBoolToObject(options, "clock_24h", p->clock == UI_CLOCK_24H);
+    }
+    cJSON_AddBoolToObject(options, "seconds", p->seconds);
+    cJSON_AddBoolToObject(options, "invert", p->invert);
+    cJSON_AddStringToObject(options, "stale_policy", k_policies[p->stale_policy < 3 ? p->stale_policy : 0]);
+    cJSON_AddBoolToObject(options, "status_clock", p->status_clock);
+    if (p->status_sync) { /* left out when off: older firmware has no use for it, and the file has no room to spare */
+        cJSON_AddBoolToObject(options, "status_sync", true);
+    }
+    cJSON *battery = cJSON_AddArrayToObject(options, "status_battery");
+    for (int i = 0; i < 3; i++) {
+        if (p->status_battery & (1u << i)) {
+            cJSON_AddItemToArray(battery, cJSON_CreateString(k_battery_parts[i]));
+        }
+    }
+    return obj;
+}
+
+size_t ui_presets_to_json(const ui_presets_t *p, char *out, size_t size)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "schema", SCHEMA);
+    cJSON_AddStringToObject(root, "active", p->count ? p->presets[p->active].id : "");
+    cJSON *cycle = cJSON_AddObjectToObject(root, "cycle");
+    cJSON_AddBoolToObject(cycle, "enabled", p->cycle_enabled);
+    cJSON_AddNumberToObject(cycle, "interval_s", p->cycle_interval_s);
+    cJSON *presets = cJSON_AddArrayToObject(root, "presets");
+    for (int i = 0; i < p->count; i++) {
+        cJSON_AddItemToArray(presets, preset_json(p, i));
+    }
+    if (p->schedule.enabled || p->schedule.count) {
+        cJSON *schedule = cJSON_AddObjectToObject(root, "schedule");
+        cJSON_AddBoolToObject(schedule, "enabled", p->schedule.enabled);
+        cJSON *entries = cJSON_AddArrayToObject(schedule, "entries");
+        for (int i = 0; i < p->schedule.count && i < UI_SCHEDULE_MAX; i++) {
+            const ui_schedule_entry_t *e = &p->schedule.entries[i];
+            cJSON *obj = cJSON_CreateObject();
+            char hhmm[8];
+            snprintf(hhmm, sizeof(hhmm), "%02d:%02d", e->at_min / 60 % 24, e->at_min % 60);
+            cJSON_AddStringToObject(obj, "at", hhmm);
+            cJSON_AddNumberToObject(obj, "days", e->days);
+            if (e->action == UI_SCHED_NIGHT) {
+                cJSON_AddStringToObject(obj, "action", "night");
+                snprintf(hhmm, sizeof(hhmm), "%02d:%02d", e->until_min / 60 % 24, e->until_min % 60);
+                cJSON_AddStringToObject(obj, "until", hhmm);
+            } else {
+                cJSON_AddStringToObject(obj, "action", "preset");
+                cJSON_AddStringToObject(obj, "preset", e->preset < p->count ? p->presets[e->preset].id : "");
+            }
+            cJSON_AddItemToArray(entries, obj);
+        }
+    }
+    if (p->offered) {
+        cJSON *offered = cJSON_AddArrayToObject(root, "offered");
+        for (int i = 0; i < (int)(sizeof(k_offered_ids) / sizeof(k_offered_ids[0])); i++) {
+            if (p->offered & (1u << i)) {
+                cJSON_AddItemToArray(offered, cJSON_CreateString(k_offered_ids[i]));
+            }
+        }
+    }
+    /* unformatted: the device reads it, and 16 presets must fit UI_PRESETS_JSON_MAX */
+    bool ok = size > 0 && cJSON_PrintPreallocated(root, out, (int)size, false);
+    cJSON_Delete(root);
+    return ok ? strlen(out) : 0;
+}

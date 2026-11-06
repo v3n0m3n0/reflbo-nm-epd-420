@@ -1,0 +1,114 @@
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <time.h>
+
+/*
+ * When the next sync runs (spec §9.3): the schedule's modes, quiet hours (D25) and the retries
+ * after a failure. Pure C, host-buildable. Local time comes from the TZ environment variable
+ * (tzset()), as in the scheduler; a local time that doesn't exist (spring forward) maps to the
+ * first valid minute after it, and a repeated one (fall back) runs once, at its first occurrence.
+ */
+
+typedef enum { SYNC_MODE_TIMES, SYNC_MODE_INTERVAL, SYNC_MODE_ALWAYS, SYNC_MODE_MANUAL } sync_mode_t;
+
+/* A sync's steps (spec §9.3), in their order. */
+typedef enum {
+    SYNC_STEP_WIFI,
+    SYNC_STEP_TIME,
+    SYNC_STEP_WEATHER,
+    SYNC_STEP_AIR,
+    SYNC_STEP_RADAR,  /* M6 (spec §11.2) */
+    SYNC_STEP_SOLAR,  /* M6d (spec §11.5) */
+    SYNC_STEP_ENERGY, /* M6d (spec §11.6) */
+    SYNC_STEP_PC,     /* M7 (spec §12a.2): finding the PC app */
+    SYNC_STEP_COUNT,
+} sync_step_t;
+
+typedef enum {
+    SYNC_STEP_NOT_RUN, /* skipped: switched off, without a source, or the sync never got there */
+    SYNC_STEP_OK,
+    SYNC_STEP_FAILED,
+    SYNC_STEP_KEPT, /* it ran and kept what it had: Solcast's budget ("kept"), a provider's 429 (M6d) */
+} sync_step_result_t;
+
+/* A sync fails when a step fails, except the Energy and PC steps (D36, D44; from M8 the MQTT step's, D32): their
+ * failures show but start no retry. A step kept or not run is no failure. */
+bool sync_report_failed(const uint8_t result[SYNC_STEP_COUNT]);
+/* The first step that failed, whichever it is, for Info ▸ Last sync; SYNC_STEP_COUNT for none. */
+int sync_first_failed(const uint8_t result[SYNC_STEP_COUNT]);
+
+#define SYNC_TIMES_MAX 8
+#define SYNC_ALWAYS_REFRESH_MIN 60 /* weather and air quality in `always` mode */
+#define SYNC_RETRY_COUNT 3         /* retries 15, 30 and 60 min after each failure */
+
+typedef struct {
+    uint8_t mode;                   /* sync_mode_t */
+    uint8_t time_count;             /* SYNC_MODE_TIMES: 1..SYNC_TIMES_MAX */
+    uint16_t times[SYNC_TIMES_MAX]; /* minutes after local midnight, ascending, no repeats */
+    uint16_t interval_min;          /* SYNC_MODE_INTERVAL: 15..1440, slots aligned to local midnight */
+    bool quiet;                     /* quiet hours on */
+    uint16_t quiet_from, quiet_to;  /* minutes after local midnight, [from, to), may cross midnight; equal: none */
+} sync_schedule_t;
+
+typedef struct {
+    time_t failed_at; /* when the last sync failed (UTC); 0 = it succeeded, or none yet */
+    uint8_t retries;  /* retries already run since the last failure of a scheduled or on-demand sync */
+} sync_history_t;
+
+typedef struct {
+    time_t at;  /* UTC; 0 = nothing due */
+    bool retry; /* a retry of a failed sync, not a scheduled one */
+} sync_due_t;
+
+bool sync_quiet_at(const sync_schedule_t *s, time_t t);
+/* The next scheduled sync strictly after `after`: a time, an interval slot, or in `always` mode the
+ * hourly refresh (aligned like interval 60); one inside quiet hours moves to their end. 0 in `manual`. */
+time_t sync_next_scheduled(const sync_schedule_t *s, time_t after);
+/* The next automatic sync after a sync ended (or at boot / after a settings change) at `now`: the
+ * scheduled one, or the next retry if that comes first: 15 min after the first failure, then 30 min
+ * after the first retry failed, then 60 min after the second; none after the third, none when
+ * `low_battery`, none in `manual` mode. A retry inside quiet hours moves to their end too. A retry
+ * that is already overdue, after a restart, is due at `now`. */
+sync_due_t sync_next_due(const sync_schedule_t *s, const sync_history_t *h, time_t now, bool low_battery);
+typedef enum {
+    SYNC_NEED_NOTHING,  /* the schedule decides */
+    SYNC_NEED_FORECAST, /* no forecast yet: a network was just saved, or the first boot */
+    SYNC_NEED_WIFI,     /* sync mode `always` wants Wi-Fi, and it is off: a night or quiet hours ended */
+    SYNC_NEED_TIME,     /* the clock is lost (D9) */
+} sync_need_t;
+/* What a device lacks that a sync brings, the most urgent first: the clock; the Wi-Fi that sync mode `always` wants
+ * while it is off (`always_wifi_off`); the first forecast, which only a sync with its Weather step on brings (D35),
+ * so with that step off the schedule decides. */
+sync_need_t sync_need(bool clock_valid, bool always_wifi_off, bool have_forecast, bool weather_on);
+
+/* sync_next_due() for a device that lacks what a sync brings. SYNC_NEED_TIME: at `now`, or after a
+ * failure at the next retry, 15, 30 then 60 min on and every 60 min after the third, whatever the
+ * schedule, quiet hours or the battery, as a lost clock knows none of them. SYNC_NEED_FORECAST and
+ * SYNC_NEED_WIFI: at `now`, unless a sync failed since (the retries and the schedule take over, so a
+ * router that is off isn't tried every minute) or in `manual` mode. */
+sync_due_t sync_next_due_needing(const sync_schedule_t *s, const sync_history_t *h, time_t now, bool low_battery,
+                                 sync_need_t need);
+
+#define SYNC_RADIO_MAX_MS 45000 /* spec §9.3: the radio is on for at most 45 s a sync */
+#define SYNC_STEP_MIN_MS 1000   /* a step with less left is skipped, as a timeout */
+/* What a sync's step may take (ms): its own limit, or what is left before `deadline_us` (one monotonic
+ * clock for both), whichever is less; 0 with less than SYNC_STEP_MIN_MS left. */
+int sync_budget_ms(int64_t now_us, int64_t deadline_us, int step_max_ms);
+
+/* After a sync ended at `ended`: `due` is what started it ({0, false} for one on demand), `ok` whether
+ * every step passed. Success clears the history; a failed retry counts up; any other failure starts
+ * the retries over. */
+void sync_history_record(sync_history_t *h, sync_due_t due, bool ok, time_t ended);
+/* Spec §9.3 expected interval: the longest gap between consecutive scheduled syncs over the local day
+ * of `now` and the next, quiet hours included; 0 in `manual` mode (data never expires). */
+uint32_t sync_expected_interval_s(const sync_schedule_t *s, time_t now);
+/* `always` mode wants Wi-Fi at `t`: on unless quiet hours; false in the other modes. */
+bool sync_wifi_wanted(const sync_schedule_t *s, time_t t);
+#define SYNC_RADAR_DELAY_S 60 /* a radar-only refresh waits this long after a frame's step */
+/* The next radar-only refresh strictly after `after` (spec §9.3), in sync mode `always`: a minute
+ * past each `step_s` of the clock, 300 s for ČHMÚ and 600 for RainViewer. */
+time_t sync_radar_next(time_t after, uint32_t step_s);
+/* Settings text: "HH:MM" <-> minutes after midnight; -1 for anything else. */
+int sync_parse_hhmm(const char *text);

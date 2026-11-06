@@ -1,0 +1,1697 @@
+# reflbo firmware: design spec
+
+- **Date:** 2026-09-25
+- **Status:** Approved by the owner on 2026-09-25 (r3; changes listed in §21)
+- **Covers:** firmware v1, milestones M0–M9
+- **Related:** `AGENTS.md` (hardware reference §3, workflow §6–§8)
+
+## 1. Purpose and scope
+
+reflbo turns the Waveshare ESP32-S3-RLCD-4.2 into a battery-powered desk display. It shows watch-face-like dashboards, rings alarms and plays internet radio. It can be configured on the device and from a phone, and optionally linked to Home Assistant over MQTT.
+
+### 1.1 Requirements
+
+| ID | Requirement |
+|---|---|
+| R1 | Monitor battery voltage, level and charging state |
+| R2 | A few layouts whose data fields are optional; presets can be stored and cycled automatically or by hand |
+| R3 | Fields: time, date, SHTC3 temperature and humidity, internet weather, sunrise/sunset, data from other local devices |
+| R4 | Keep time with the PCF85063 RTC |
+| R5 | Audio: alarms and internet radio |
+| R6 | Settings on the device and on a website the device hosts, reachable from a phone in AP mode and over the LAN |
+| R7 | Save power: sync on a configurable schedule (default once a day), keep Wi-Fi off otherwise, turn Wi-Fi on when asked so the configurator is reachable |
+| R8 | Control everything with the board buttons |
+| R9 | Use the microSD slot (feature set agreed at M10, D44) |
+| R10 | Two-way Home Assistant integration: publish status and sensors, and show chosen HA entities |
+| R11 | Agent-verifiable: logs and screenshots over USB, rendering on the host; the owner confirms physical output |
+| R12 | Split cells small enough for values the size of the status bar's: down to 40×20 px, up to 24 a preset (owner, 2026-10-04, D34) |
+| R13 | Solar: a forecast of the PV system's output for the day, from the location and the roof's orientation and size, as a layout and as fields; the house's energy now (solar output, grid import and export, an optional battery, consumption) as a second layout and as fields, from SolaX Cloud; a built-in preset for each (owner, 2026-10-04, D35, D36) |
+| R14 | Each data step of the sync can be switched off, so a service nobody uses costs no requests (owner, 2026-10-04, D35) |
+
+| ID | Non-functional requirement |
+|---|---|
+| N1 | Works fully offline; network features only add data |
+| N2 | Battery life as long as practical. Stretch goal: average current below 2 mA with the default sync schedule |
+| N3 | English UI, with strings and formats organised as language packs |
+| N4 | Location, time zone and units are configurable. Defaults: Brno, Europe/Prague, metric |
+| N5 | Open source, with third-party code credited |
+
+### 1.2 Decisions
+
+| ID | Decision | Notes |
+|---|---|---|
+| D1 | Our own immediate-mode 1-bpp renderer | LVGL is not used |
+| D2 | ESP-IDF v5.5.x (v5.5.5 at the time of writing) | Revisit v6.x after M5 |
+| D3 | Light sleep is the default idle strategy (M2 measurement, 2026-09-28) | Both drew 11.5 mA at 5.24 V; the 3V3 converter's forced PWM dominates (§9.4). Deep sleep stays selectable |
+| D4 | English by default, structured as language packs | A Czech pack joins in M3 (D15) |
+| D5 | Home Assistant over MQTT with HA MQTT discovery | |
+| D6 | Power is best effort; an average below 2 mA is the stretch goal | |
+| D7 | Other local devices publish to MQTT, and the device maps topics to fields | Same mechanism as HA values (§12.5) |
+| D8 | Licence Apache-2.0, plus `NOTICE` and `THIRD_PARTY.md` (confirmed 2026-09-25); GPL-3.0-only since 2026-10-21 (D46) | Same licence as the Waveshare code we adapt. `NOTICE` carries attribution into forks |
+| D9 | No RTC backup cell is fitted now; one can be fitted later. Firmware must work without it (§7) | The owner may fit an ML1220 |
+| D10 | Features beyond R1–R11 and N1–N5 are proposals, discussed at the relevant milestone (§19) | |
+| D11 | The sync schedule and the display update interval are both configurable (§9.2, §9.3) | Owner adjustment in r2 |
+| D12 | Panel: the factory init sequence, with the LPM refresh rate set separately (default 1 Hz; `panel rate` changes it from 0.25 to 8 Hz) (§4.2) | Owner check at M1: factory contrast is visibly better than XiaoZhi's, and it looks the same at 1 Hz as at 8 Hz |
+| D13 | Landscape only | Portrait orientation declined at M1 |
+| D14 | Light sleep is entered explicitly by the app (`power_sleep_light()`); esp_pm automatic light sleep is not used. A tethered board stays awake (§3.4) | M2: the USB console drops in any light sleep, and automatic light sleep would need level-type interrupts on the button and RTC pins all the time |
+| D15 | Accepted M3 proposals (owner, 2026-09-28): the LPM refresh rate as a display setting (§4.2); a preset schedule whose entries can also start a timed night sleep (§5.4, §9.1); extra local fields (§5.1); a Czech language pack with name days and public holidays (§5.8) | The Night layout stays deferred (§19). The owner asked to measure what night sleep saves |
+| D16 | Owner, 2026-09-29: the `cs` pack ships the public holidays but no name-day calendar until a source with a clean licence turns up (§5.8, §20). A button still held when the board goes to sleep is left out of that sleep's wake sources (§9.2) | The best name-day list found (`namedays-cs`, MIT) traces its data to Czech Wikipedia (CC BY-SA). A stuck KEY or BOOT would otherwise wake the board again and again |
+| D17 | Owner, 2026-09-29 (M3b render review): the menu leaves out Display ▸ Contrast for now, and the temperature offset steps by 0.1 °C (§5.7) | No contrast levels besides the factory sequence's (D12) have been checked on the panel |
+| D18 | Owner, 2026-09-30 (M4 planning): the web UI gets a password instead of the admin PIN, chosen on the first visit over the device's own AP and needed on every visit after (§10.4); web UI translations stay deferred; M4 runs as one plan; the snapshot header gets no ELF hash | A PIN guards little that a password doesn't; every firmware change resets the chip, and only deep-sleep wakes read the snapshot |
+| D19 | Owner, 2026-09-30 (M4 spike review): the first-run screen appears when `settings.json` is missing at boot (§5.5); the status bar's Wi-Fi state moves to M5 and M6 (§5.2); a restart from the web UI returns in config mode (§10.2); the web UI sets a lost clock from the phone, can change the password and log out, and gets a Device page (§10.3, §10.4); the temperature offset defaults to −2.0 °C (§8) | In M4 Wi-Fi runs only in config mode, which has its own screen. The board warms the SHTC3 by about 2 °C at all times; the user trims the rest |
+| D20 | Owner, 2026-09-30 (M4 acceptance): config mode watches the battery (§8, §10.2); while a phone is logged in, config mode shows the dashboard with a globe in the status bar (§5.2, §10.2); the preset preview names its slots, and a new preset joins the cycle (§10.3); seconds keep the refresh rate the user picked (§7); the battery level can follow the owner's own full and empty voltages (§8) | A battery that sags under the radio would brown out anyway. The owner wants to watch settings change on the screen itself. The refresh rate is the user's to tune |
+| D21 | Owner, 2026-09-30: the battery curve is learned from one full discharge, not a charge (§8) | The firmware can't see charging, and the charger's current lifts VBAT, so a charge maps poorly to the resting level; this board's steady load makes time a fair measure of charge |
+| D22 | Owner, 2026-10-01 (ADS-B radar proposal, §19.1): adsb.fi is the only source; the radar runs only in sync mode `always` (D11), with no time-boxed sessions and no separate switch; the map is centred on a point and zoomed from the web UI, with towns and airports built in | Still a proposal for after M5 (D10). One always-on Wi-Fi mode serves both the radar and the LAN configurator (§10.4) |
+| D23 | Owner, 2026-10-01 (weather radar, §19.2): ČHMÚ by default, with RainViewer outside its coverage; both a full-screen radar layout and a slot widget; aircraft stay a separate view, never over the rain; the radar never turns Wi-Fi on itself: it takes a frame with each normal sync, and every 5 minutes in sync mode `always`; both radars join the roadmap | M7 follows M6, which brings sync mode `always`; Audio and microSD move to M8 and M9 |
+| D24 | Owner, 2026-10-01: the radars come sooner. Sync mode `always` moves from the MQTT milestone into M5, the radars follow as M6, and MQTT and Home Assistant become M7 | Nothing in the radars needs MQTT; `always` belongs with the sync framework anyway |
+| D25 | Owner, 2026-10-01 (M5 planning): M5 also brings quiet hours (§9.3), air quality and pollen from Open-Meteo (§5.1, §11) and the RTC trim against NTP (§7); a static IP stays deferred; M5 runs as one plan; review minors are fixed where M5 touches their code | The RTC loses about 3.4 s a day (`AGENTS.md` gotcha 7); one trim step is 4.34 ppm, 0.37 s a day |
+| D26 | Owner, 2026-10-01 (M5 spike review): the weather icons come from the Weather Icons font (SIL OFL 1.1) beside Material Icons (§4.5); the sun widget shows the day length's change since yesterday, M3's deferred proposal (§5.1); a UV index field joins the air quality (§5.1, §11); pollen stays as built: a top field and one per type | The day-length change needed `astro`; the UV index comes in the same request |
+| D27 | Owner, 2026-10-01 (M6 planning): M6 runs as one plan, written straight from the spec without a spike; review minors are fixed where M6 touches their code; three extras join the radars: rain in the next 2 hours (§11.4), a loop of the last hour's radar frames (§11.2), and the nearest aircraft's route from adsb.lol (§11.3) | The radars are about the size of M3a and M3b together (§19) |
+| D28 | Owner, 2026-10-01 (M6 design): the flight radar is a built-in preset that the cycle visits only in sync mode `always` (§5.4); each radar has its own centre and zoom (§11.1); BOOT short on the radar layout plays the last hour, 12 frames (§5.6, §11.2); the map draws borders, towns and airports (§11.1); no microSD in M6, as its working set fits PSRAM and LittleFS, while radar and flight history over days, a detailed map pack and an aircraft registration database join M9's candidates (§19) | A frame's grid is 78 KB of PSRAM; 12 frames take about 1 MB of the 8 MB |
+| D29 | Owner, 2026-10-02 (M6 plan review): GeoNames' places join the map's towns inside ČHMÚ's radar area, and GeoNames is credited (§11.1); the RTC trim keeps measuring only across syncs at least 20 h apart (§7); aircraft altitudes stay as flight levels from 10 000 ft and feet below (§11.3); M6 runs inline, one context with a review of the whole branch at the end | GeoNames is CC BY 4.0; its places of 1000 inhabitants or more add about 4 000 towns and 110 KB to the map |
+| D30 | Owner, 2026-10-02 (M6 board checks): BOOT short on the Radar layout starts a sync on demand, for a fresh frame, whenever the loop can't play (outside sync mode `always`, or with fewer than two frames), with the menu's Sync now toasts; in `always` it keeps playing the last hour (§5.6, §11.2) | The press re-read the sensors there, which that screen doesn't show |
+| D31 | Owner, 2026-10-02 (M6b design): a split layout (§5.2) beside the fixed ones, which stay as they are: the area under the status bar split into rows or columns at 1/4, 1/3, 1/2, 2/3 or 3/4, each part split again, at most 8 cells of at least 90×40, each cell holding one field at the size its dimensions allow, each split's separator shown or hidden; edited on the web page with the live preview (§10.3). BOOT double on the dashboard toggles sync mode `always`, remembering the mode before (§5.6, §9.3). Both are M6b, one plan, before M7 | Halves alone can't give a top of three quarters; the fixed layouts' hand-tuned sizes aren't all expressible in the five ratios, so they stay |
+| D32 | Owner, 2026-10-03 (M7 design): one `ha_mqtt` client, a session in every sync and kept connected in sync mode `always` (§12.9); a failed MQTT session is shown (the Sync page, Info, a mark in the status bar) but doesn't fail the sync, so it isn't retried; M7 adds HA buttons (sync now, next preset), key-press device triggers, reported only while connected, and a message entity, shown as a banner until KEY dismisses it and as the `ha.message` field (§12.3–§12.8); TLS and HA's REST API as a source stay deferred; review minors are fixed where M7 touches their code, and `fetch`'s transmit buffer too (M6's review). There is no broker or HA yet, so M7 is built and host-tested and its checks with HA wait for the owner's setup. The M6b build is the stable firmware (tag `stable-m6b`): it goes back on the board after every MQTT/HA test, the board's configuration is backed up before a test and restored after, and nothing is erased from the board without asking (§12.10) | One client serves both kinds of session; a broker that is down costs no extra radio time; the board stays on known-good firmware with its data while M7 is tested |
+| D33 | Owner, 2026-10-04: M7 waits, and two plans come first: M6c, small split cells (D34), then M6d, solar and the house's energy (D35, D36). Their designs were reviewed as panel renders from a throwaway spike (`spike/m6cd`) and approved the same day. M7 keeps its number; its plan is refreshed against them before it runs | The owner wants these before Home Assistant; M7's plan needs the new fields and sync steps anyway |
+| D34 | Owner, 2026-10-04 (M6c design): split cells down to 40×20 px, up to 24 a preset; a size class XS (from 40×20) takes every kind S takes and draws like the status bar: one line in a short or wide cell, the symbol over the value in a narrow, tall one, the unit under the number where there is height, short forms before an ellipsis; S in cells under 150×80 puts the symbol beside the value; a cell that grows never draws a field at a smaller size; the fixed layouts stay as they are (§5.2, §5.3) | The owner's example was a 132×69 cell. The fixed layouts' goldens stay identical |
+| D35 | Owner, 2026-10-04 (M6d forecast): the PV forecast comes from the source the user picks: Open-Meteo's tilted irradiance through our own PV model (the default, no key), Forecast.Solar (no key: 1 plane, hourly, 2 days), or Solcast (a key and 1–2 rooftop sites, asked at most every 3 h a site within its 10 calls a day); up to 2 roof planes; the `pv.*` fields with a chart, the Solar layout and a built-in Solar preset outside the cycle; a Solar step in the sync, which fails and retries like the weather's, except on a 429. Every data step of the sync can be switched off (the owner's addition); the time step always runs (§9.3, §11.5) | Open-Meteo is a source already and needs no account; the others are for owners with an account there |
+| D36 | Owner, 2026-10-04 (M6d energy): the house's energy now comes from SolaX Cloud's real-time API, with the token and the dongle's registration number in NVS: a reading in each sync, and every 5 min in sync mode `always`; its failures show but don't fail the sync (as D32's MQTT); the home battery shows on auto, on or off; the `energy.*` fields with a flow widget, the Energy layout and a built-in Energy preset outside the cycle; an MQTT source joins with M7 (§11.6). After M6d's acceptance its build replaces `stable-m6b` as the stable firmware (`stable-m6d`, §12.10) | SolaX Cloud as the owner asked; the dongle's local API depends on its firmware; the cloud refreshes about every 5 min, so a failed reading is soon replaced |
+| D37 | Owner, 2026-10-05 (M6d board checks): a second SolaX source, the Developer API (developer.solaxcloud.com), beside the Token ID one: an application's Client ID and Client Secret in NVS and SolaX's region (Europe by default, China, India); the device logs in for a bearer token (kept in RAM only, renewed 10 min before it runs out or once after a refusal, never logged), finds the plant and its inverter, battery and meter once, reads their real-time data, and takes today's totals from the plant's statistics, so this source needs no midnight reading; `energy raw` prints the last replies, to check the fields and signs on the owner's plant (§11.6) | solaxcloud.com no longer issues Token IDs: the owner's account has only the Developer API, and a Developer API token is refused by the Token ID endpoint |
+| D38 | Owner, 2026-10-06 (M6d acceptance): a power under 1 kW shows in whole watts, as the SolaX app does ("382 W", not "0.38 kW"), on every field, the Solar and Energy layouts and the flow; the flow, whose heading carries one unit, shows W while all its powers are under 1 kW. Solcast's check with the owner's key waits for later | "0.39 kW" and "0.00 kW" told less than the app's watts in the evening; the flow's numbers have no room for units of their own |
+| D39 | Owner, 2026-10-06 (M6d acceptance): the Developer API's solar output is the app's figure, what the panels give through the inverter (its AC output, with a battery's charge, at most the panels' DC power), not the panels' DC power; the past bars from SolaX's 5-minute history stay an option for later (§19); the owner's roof checked; the power measurement and Solcast's check come at the project's end; this build becomes `stable-m6d` | The app's Solar equals Home when the grid is at 0 (382 W both): it shows the inverter's output, about 5 % under the panels' 1471 W against 1397 W |
+| D40 | Owner, 2026-10-06 (M7's plan refreshed against M6c and M6d, D33): M7 also brings an MQTT source for the house's energy, beside SolaX's two (§11.6, §12.11); state labels for text fields and a time kind for timestamps, so any HA entity reads well on the panel (§12.5); HA's `unknown` and `unavailable` count as no value; the device publishes no `pv.*` or `energy.*` values to HA; the checks with HA still wait for the owner's broker; the plan runs Native | Any HA entity as a field was the aim (D7); raw states (`on`, `not_home`) and timestamps read badly; the owner's house may report its energy to HA by other means than SolaX Cloud |
+| D41 | Owner, 2026-10-09: presets get a cycle window (§5.4): from and until, each a local time or sunrise or sunset with an offset of up to 3 h, crossing midnight when until comes first, and the days it opens on; only the auto-cycle skips a preset whose window is closed: KEY short, the schedule, the menu, the web UI and HA still reach it, and a preset on screen when its window closes stays until the cycle's next step; built now as M6e, before M7. M7 also publishes the sync's status to HA (Sync problem, Sync error, Last successful sync, Next sync; §12.2, §12.3), built with M7. Sync now stays where it is (Menu ▸ Sync ▸ Sync now). Owner, 2026-10-19 (M6e's final review): a window with a sun end runs past midnight only from an evening end to a morning end, so ends that swap order with the seasons leave it closed rather than a day long | The Solar preset says little after sundown, so it should leave the cycle then and come back in the morning; HA should know when the board's syncs fail |
+| D42 | Owner, 2026-10-12 (asked in the T5 fork, its DT14, and backported): a preset can be exported from the web page to a file and imported on another device; every slot and split cell can carry its own title in place of its field's label; a split cell can show its title always, whatever its size (§5.2, §5.4, §10.3) | A split preset built on one device is wanted on another, and the owner's sensors and entities want the owner's names |
+| D43 | Owner, 2026-10-13 (asked in the T5 fork, its DT15, and backported): a preset can show the last good sync's time in the status bar, on the left after the marks; today's time, an earlier day's weekday and time, a date after a week (§5.2, §5.4, §10.3) | How old the data is, at a glance, without opening the menu |
+| D44 | Owner, 2026-10-19: a new M7 before MQTT and Home Assistant, which become M8 (audio M9, microSD M10): live values from the owner's Windows PC. A tray app in its own repository (`reflbo-stats-win`, Go, Apache-2.0 then, GPL-3.0-only since D46) reads HWiNFO Pro's shared memory, with a sensor picker on a page of its own, the readings' units and scale, auto-start after login (off by default) and Quit in its tray menu; the board connects to it over the LAN by WebSocket with a token (§12a), at an interval of 250 ms–10 s set on the board (default 1 s), redrawing on each message, with a warning when the interval is shorter than the panel's frame time; only a sync's PC step finds the PC, and a session can switch to sync mode `always` and to a chosen preset, each optional, restoring on the PC's silence only what the owner hasn't changed by hand; the readings are `pc.<id>` fields; every numeric field can show as a history chart (a span of 10 s–1 h from each value, longer from minutes), a bar, a ring or an arc gauge, chosen per slot and cell; a PC layout and preset; the visuals and the layout are approved from a spike's renders before their plan | The PC's load and temperatures at a glance while the owner works at it, and the usual dashboards back when it sleeps |
+| D45 | Owner, 2026-10-21 (M7's final review): leaving sync mode `always` by hand during a PC session (BOOT double, the menu, the Sync page) ends the session at once; Wi-Fi goes with the owner's mode, and the session's preset comes back if it is still on screen; `always` turned on again by hand is the owner's own (§12a.4) | Your hand wins: a session must not keep Wi-Fi on for hours after the owner has turned it off |
+| D46 | Owner, 2026-10-21: reflbo, the PC app and the T5 fork become GPL-3.0-only, in place of Apache-2.0 (D8); versions up to the switch stay Apache-2.0. The firmware's `NOTICE` adds a permission under GPL §7 to link with the libraries ESP-IDF ships in object form only (Wi-Fi, PHY, Bluetooth, coexistence); the PC app needs none | The owner's choice. Every third-party part fits: Apache-2.0, MIT, ISC, BSD, LGPL-3.0 and CC BY 4.0 combine with GPL-3.0 (Apache-2.0 only with version 3), public-domain data has no terms, and the fonts' licences allow bundling with any software. ESP-IDF's Wi-Fi and PHY libraries come without source, which GPL-3.0 would otherwise ask of anyone passing on a build |
+
+### 1.3 Out of scope for v1
+
+- Everything in §19.
+- BLE and ESP-NOW sources.
+- Voice features.
+- Network services other than those §11 names (Open-Meteo, ČHMÚ, RainViewer, adsb.fi, adsb.lol, Forecast.Solar, Solcast, SolaX Cloud), NTP, the owner's MQTT broker and the owner's PC running reflbo-stats (§12a).
+- Portrait orientation.
+
+### 1.4 Terms
+
+| Term | Meaning | Frequency | Radio |
+|---|---|---|---|
+| **Sync** | A network session: Wi-Fi on → time (NTP) → weather, air quality, radar, solar forecast and the house's energy (each can be switched off, M6d) → the PC (M7, D44) → MQTT (M8) → Wi-Fi off | Configurable schedule (§9.3); default once a day at 05:30 | Yes |
+| **Display update** | Redraw from local data (RTC time, the latest readings, stored weather and MQTT values) and push to the panel | Configurable (§9.2); default every minute | No |
+| **PC session** | The board connected to the owner's PC app (§12a): its readings live, Wi-Fi kept up | While the PC answers, from the sync that found it (M7, D44) | Yes |
+| **Sensor sample** | A reading from the SHTC3 and the battery gauge | Every 5 min (configurable) | No |
+| **Wake** | The CPU leaving sleep for any of the above, or for a button, an alarm or a timeout | — | — |
+
+## 2. Hardware constraints that shape the design
+
+`AGENTS.md` §3 has the details.
+
+- Firmware can read only two buttons, KEY (GPIO18) and BOOT (GPIO0). PWR is a hardware power switch.
+- No GPIO reports charging or USB presence, so charging state is inferred (§8).
+- The panel is write-only. It keeps its image while powered. Its low-power mode is reported to draw about 1 mA.
+- The PCF85063 INT line on GPIO15 gives exact wake-ups. It has no external pull-up.
+- The audio analog rail and the microSD slot are always powered.
+- The USB console disappears during deep sleep.
+- Baseline to beat: the vendor factory firmware draws about 90 mA.
+
+## 3. System architecture
+
+### 3.1 Components
+
+| Component | Responsibility | Depends on | Host build |
+|---|---|---|---|
+| `main` | Init order, wiring, app event loop | all | — |
+| `board` | Pin map, I²C bus, GPIO setup and ISR service, buttons → gestures, codec standby | IDF | gesture logic |
+| `st7305` | Panel init, frame push, LPM/HPM, deep-sleep retention | board | frame conversion |
+| `display` | Canonical framebuffer; pushes it to the panel when its CRC changes | gfx, st7305, util | — |
+| `gfx` | Framebuffer, primitives, text, fonts, bitmaps, QR, PBM/BMP encoders | — | ✓ |
+| `util` | Small pure-C helpers: CRC-32, base64, delay ticks, SHA-256, HMAC and PBKDF2 | — | ✓ |
+| `locale` | Language packs (API prefix `lang_`, because libc owns `locale_t`): strings, date and number formats, name days and holidays | — | ✓ |
+| `astro` | Sunrise, sunset, day length | — | ✓ |
+| `datastore` | Measured and fetched values, freshness, derived values and trends, change mask (§6) | — | ✓ |
+| `ui` | Field catalogue, layouts, widgets, status bar, presets and their JSON codec, cycle order, screens, menu, input handling | gfx, locale, datastore, util; from M6 map, radar, adsb; from M6d `solar` and `energy` (the solar state, `ui_solar.h`, and the goldens' sample day, `ui_solar_demo()`); from M7 `ha_mqtt`'s values (§12.5) | ✓ |
+| `scheduler` | Next-wake computation for display, sensors, alarms, sync, timeouts | — | ✓ |
+| `sensors` | SHTC3, battery gauge | board | curve and filter logic |
+| `rtc` | PCF85063 (API prefix `pcf85063_`, because ESP-IDF owns `rtc_*`): time, oscillator-stop flag, alarm → INT, the Offset register; the time set to the millisecond and its error timed (§7) | board | register codec, the offset's |
+| `timekeeping` | System time from the RTC, time zone, the true time from a sync, the RTC trim, manual set | rtc | TZ logic, the trim's arithmetic |
+| `power` | Power states, idle strategy, wake sources and wake cause, sleep entry, sleep statistics | board, rtc, st7305 | sleep policy |
+| `netmgr` | Wi-Fi STA/AP state machine, a sync's station-only join, captive DNS, mDNS | IDF | captive DNS reply, saved-network list, scan choices |
+| `webui` | HTTP server, the password and sessions, Wi-Fi, OTA and place-search routes, embedded web assets; every other API route goes to `main` | netmgr, util, weather | password record, sessions, HTTP helpers, host names, status lines |
+| `weather` | Open-Meteo's forecast (with `minutely_15` from M6), air quality and place search: URLs, parsers, skies, bands and levels; the HTTPS fetch | datastore, fetch | all but the fetch |
+| `solar` | The PV forecast (M6d, §11.5): Open-Meteo's, Forecast.Solar's and Solcast's URLs and parsers, our PV model, the local quarter hours and the midnight roll-over, Solcast's budget | util, timekeeping (its ISO 8601 parser; as built) | ✓ |
+| `energy` | The house's energy (M6d, §11.6): SolaX Cloud by its Token ID (`energy.c`) and by its Developer API (`energy_dev.c`, D37), their requests and replies, the signs, the battery's auto rule, today's totals from midnight readings or SolaX's statistics, the quarter-hour actuals | util, timekeeping (as built) | ✓ |
+| `pcstats` | The PC's sensors (M7, §12a): the PC step's probe, the WebSocket client to the PC app, its messages and the catalogue | util, json, fetch; `esp_websocket_client` | the messages and the session's rules |
+| `fetch` | HTTPS GETs, and from D37 POSTs, with the certificate bundle and a `reflbo/<version>` User-Agent; a session keeps its connection for the next request to the same host and closes one the server won't keep (M6); a bearer header (Solcast's key, SolaX's token) built on the heap for tokens up to 1 KB, and a 2 KB transmit buffer (D37, gotcha 41); a failed request's log names its host alone, never a query or a header | IDF | — |
+| `png` | PNG reader for the radar images: 8-bit palette and RGBA, row by row; the ROM's `tinfl` on the device, zlib on the host (M6) | util | ✓ |
+| `map` | Web-Mercator views; the built-in map (`assets/map/map.bin`: borders, coasts, towns, airports) and its drawing, with labels that keep clear (M6) | gfx, util | ✓ |
+| `radar` | ČHMÚ's and RainViewer's frames: decoding into three rain levels, the store, the frame file, which views a frame covers, drawing; their HTTPS fetch on the sync task (M6) | png, map, fetch | all but the fetch |
+| `adsb` | adsb.fi's aircraft on the Flights map, adsb.lol's routes and their cache; the polling task (M6) | map, fetch | all but the task |
+| `ha_mqtt` | MQTT session (one esp-mqtt client: a session in every sync, kept connected in sync mode `always`), discovery, state, commands, key-press triggers, field mappings and their values, the message (M7, §12) | netmgr, storage | topics, payload builders and parsers, the mappings' codec, the discovery hash, `expire_after` |
+| `sync` | When syncs run (the modes, quiet hours, retries, the radio's 45 s), SNTP packets, and the sync task, which fetches and reports to `main` (§9.3); from M6 the radar step and sync mode `always`'s radar-only refresh; from M6d the Solar and Energy steps, the energy reading in that refresh, and the steps' switches; MQTT joins in M7 | netmgr, weather, scheduler, datastore, storage | the plan and the SNTP packets |
+| `audio` | Codec control, tone/WAV/stream players, alarm ringing | board, storage | — |
+| `storage` | NVS (identity, secrets), LittleFS config files, microSD mount | IDF | settings codec with its defaults, config-file backup logic |
+| `diag` | Console commands, screenshot export | most | — |
+
+Rules:
+
+- Components with ✓ in the host column must not include ESP-IDF headers. They build and run their tests on macOS. The partial entries ("gesture logic", "parser" and so on) name the pure-logic part that must be kept free of IDF headers.
+- Data flows one way: drivers and services write to `datastore`, and `ui` reads from it. The UI never calls network code or drivers. It emits intents, such as "start radio" or "enter config mode", which `main` handles.
+- Only `main` knows every component.
+
+### 3.2 Runtime model
+
+One app task owns an event queue. Event types:
+
+| Event | Posted by |
+|---|---|
+| `MINUTE_TICK`, `TIMER` (cycle, menu or config timeout, seconds display) | power / scheduler |
+| `BUTTON` (button, gesture) | board, `diag btn` |
+| `ALARM_DUE` | scheduler |
+| `SYNC_DUE`, `SYNC_DONE` | scheduler, sync |
+| `DATA_CHANGED` (field mask) | datastore |
+| `NET` (Wi-Fi or MQTT state) | netmgr, ha_mqtt |
+| `COMMAND` (from MQTT or the web UI) | ha_mqtt, webui |
+| `POWER` (battery thresholds) | sensors |
+
+How events are handled:
+
+1. The app task takes an event and updates its state (UI state machine, scheduler inputs). If the output changed, it renders into the framebuffer. It pushes the frame to the panel only if the frame's CRC32 changed.
+2. Long-running work runs in its own task (sync, HTTP server, audio) and reports back with events.
+3. When the queue is empty, the app task asks `power_plan()` whether and how to sleep, then calls `power_sleep_light()` or `power_sleep_deep()` (§3.4).
+
+Initial task plan (finalised in the implementation plan): app (core 1), sync (core 0, created per sync), httpd (IDF default), audio stream and decode (core 1, only while playing), console REPL (low priority).
+
+### 3.3 Boot and wake paths
+
+- **Cold boot** (power-on, reset, OTA, panic):
+  1. Init the board.
+  2. Reset and init the panel, then clear it.
+  3. Mount storage and load settings and presets.
+  4. Read the RTC and check its oscillator-stop flag, then set system time.
+  5. Restore the last persisted datastore snapshot. Its data is shown as stale according to its age.
+  6. Read the sensors and render.
+  7. If the time is invalid and Wi-Fi is configured, start a sync at once to fetch the time (§7). Then go idle.
+- **Wake from deep sleep**:
+  1. Decode the wake cause.
+  2. Restore the RTC-RAM snapshot (magic, version, CRC). If it is invalid, take the cold-boot path but skip the panel reset.
+  3. Re-attach SPI without resetting the panel.
+  4. Re-read the RTC.
+  5. Post the event (`MINUTE_TICK`, `BUTTON` or `ALARM_DUE`), handle it normally, then go idle.
+- **Routine wakes** (the RTC alarm or its backup timer): skip the console, NVS and info-level logs. Each costs time on every wake, and no PC can enumerate the board before it sleeps again. The app starts all three once it decides to stay awake: after a button, while tethered, or when a `sleep test` ends. Settings needed on routine wakes (the idle strategy) are mirrored in RTC RAM.
+- **Boot failure** (a driver fails to start): while a PC is attached, stay awake with the console up. Otherwise deep-sleep for 5 min, or until KEY or BOOT, then boot from scratch with a reset, so every driver and the panel start over. The RTC alarm is not a wake source then, because whatever broke the boot may hold INT low.
+- **Button presses after a deep-sleep wake.** The press that woke the chip may be over by the time the app runs, roughly 100–300 ms later.
+  - If the pin is already high, treat it as a short press. When the current context binds a double press, wait out the double-press window first.
+  - If the pin is still low, keep timing it for a long press.
+
+### 3.4 Idle strategies (D3)
+
+Both strategies live in `power` (`power_sleep_deep()`, `power_sleep_light()`) until the M2 measurements pick the default. The app calls one of them when it has nothing to do (D14).
+
+| | Deep sleep | Light sleep (`power_sleep_light()`) |
+|---|---|---|
+| RAM state | Lost; RTC-RAM snapshot of at most 4 KB | Kept |
+| Wake latency | Full boot; 63 ms of app time per routine wake with a frame push (M2), plus ROM and bootloader | Under 1 ms; 57 ms of app time per wake with a frame push (M2) |
+| ESP32-S3 floor current | µA range | Hundreds of µA (measure, PSRAM included) |
+| USB console | Disconnects: the USB PHY is off | Unusable while asleep: the pad is disabled; the Mac keeps the port |
+| Extra complexity | Snapshot, pin holds, a panel attach without reset | GPIO wake with level interrupts, restored to edges after wake |
+
+- **Tethered mode.** While a USB host is connected (`usb_serial_jtag_is_connected()`, checked before every sleep), the board stays awake, because either sleep interrupts the console and flashing. After a cold boot or a button wake it stays awake 2 s so a PC can find it. `sleep test <deep|light> <n>` forces sleep cycles while tethered, for testing.
+- **Decision rule at M2.** Choose deep sleep if the measured average current is clearly lower (guideline: at least 20 % lower at the one-minute cadence). Otherwise choose light sleep.
+- **Result (2026-09-28): light sleep.** Deep and light sleep both drew 11.5 mA at 5.24 V (60.35 and 60.29 mW over 58 min and 1 h 55 min), because the 3V3 converter runs in forced PWM (§9.4). Deep sleep stays selectable with `power idle deep`. Measure again if the board gets the PS/SYNC rework.
+
+## 4. Display and rendering
+
+### 4.1 Framebuffer
+
+- **Canonical frame.** 400×300 at 1 bpp: row-major, MSB first, 1 = black, stride 50 bytes, 15 000 bytes in total. This is exactly the PBM P4 payload.
+- **Panel buffer.** 15 000 bytes in the ST7305 landscape layout, kept in DMA-capable internal RAM. **In the panel buffer, bit 1 means white.**
+- **Conversion from canonical to panel.** Pixel (x, y) goes to byte `(x/2)·75 + (299−y)/4`, bit `7 − (((299−y) mod 4)·2 + (x mod 2))`. The bit value is inverted: a black canonical pixel (1) becomes panel bit 0.
+  - Done as a direct loop. We don't copy the vendor's 360 KB PSRAM lookup table.
+  - Host-tested against the vendor formula.
+
+### 4.2 ST7305 driver
+
+- **SPI.** Mode 0, 8-bit commands and parameters through esp_lcd panel IO, as in the vendor code. D/C GPIO5, CS GPIO40, RESET GPIO41, TE GPIO6. Clock 10 MHz, as in the factory sequence (D12).
+- **`st7305_init(cold)`.**
+  - Cold: hardware reset and a wait of at least 120 ms (datasheet §12.1.4), the factory init sequence (D12; XiaoZhi's stays selectable for diagnostics), the configured LPM rate, then clear.
+  - Warm (deep-sleep wake): attach the IO only.
+- **`st7305_push()`.** Set the column window (`2Ah` 0x12–0x2A) and the page window (`2Bh` 0x00–0xC7), send `2Ch`, then write 15 000 bytes.
+- **`st7305_set_mode(HPM | LPM)`.** Sends `38h`/`39h` using the switching sequence in datasheet §7.11, including its delays: about 120 ms into LPM and 320 ms into HPM. The sequence's per-mode voltage step reselects voltage set 1 (`C9h`), because both vendor sequences load the same values into all four sets.
+  - Idle uses LPM.
+  - Menu and config mode use HPM, so new frames appear without lag. Entering HPM takes about 320 ms, which the M3 menu design must absorb, for example by switching before rendering or asynchronously.
+- **LPM frame rate.** The LFRA field of `B2h` (0.25–8 Hz), written after the vendor sequence, so it is independent of that sequence. Default 1 Hz. A new rate applies at once, even in LPM. `panel rate` changes it at runtime, and the setting `display.lpm_hz` (menu Display ▸ Refresh rate) keeps it (D15). Its power cost is measured at M5.
+- **Frame-rate check.** The TE output (GPIO6, enabled by `35h`) pulses once per panel frame. `panel fps` counts the pulses, which gives the real frame rate. M1 measured 1.00 Hz in LPM and about 16–17 Hz in HPM with the factory sequence.
+- **RAM writes in LPM.** The panel RAM can be written in any power mode. The datasheet (§7.3) guarantees no visible artefacts when the interface writes while the panel reads. New content appears at the next panel frame, so at 1 Hz LPM a minute update shows within 1 s. Idle updates therefore stay in LPM and need no mode switch.
+- **Partial updates (verified in datasheet §7.2.3, §7.4, §8.1.14–16).**
+  - CASET/RASET define a RAM window, and RAMWR fills only that window. One window cell is 3 bytes: 12 source pixels × 2 gate lines. In our landscape orientation that is 12 px of *y* by 2 px of *x*.
+  - Partial writes shorten only the SPI transfer. They do **not** lower panel power: every frame, the controller re-drives the whole active-matrix panel from its RAM, whether or not anything changed. Panel power depends on the power mode and frame rate.
+  - What they save is CPU-awake time, and not much of it.
+    - At 40 MHz a full frame takes about 3 ms. A typical clock-digit window saves about 2 ms per update, roughly 0.03 mAh/day at one update a minute.
+    - At 10 MHz the saving is about 0.1 mAh/day.
+    - For scale, the panel in LPM costs about 24 mAh/day.
+  - The controller's Partial Display Mode (`PTLON`, 12h) is something else. It drives fewer gate lines and leaves the rest of the panel undriven, so it can't show a full-screen dashboard.
+  - **v1 decision:** push full frames, and skip the push when the frame CRC is unchanged. Windowed pushes stay an optimisation candidate in case M2 measurements show they matter (§9.4).
+- **Sleep-in and wake** (night sleep, §9.1).
+  - Sleep-in follows datasheet §7.10: from LPM through HPM (`38h`, 300 ms), then `SLPIN` (`10h`, 100 ms). The panel stops scanning, and its image fades.
+  - Both init sequences set NRDSLP (`D6h`), so `SLPOUT` would reload the NVM defaults; at M3b the panel came back at 2 Hz that way. Waking therefore resets the panel and runs the init sequence again, then pushes the frame and returns to LPM.
+  - A deep-sleep wake keeps a sleeping panel asleep: the snapshot records it.
+- **Before deep sleep.** Drive CS high and RESET high, then call `gpio_hold_en()` on both and `gpio_deep_sleep_hold_en()`. Release the holds on wake.
+- **Test pattern (M1).** 1-px border, corner labels TL/TR/BL/BR, a 10-px grid, a checkerboard patch and a glyph sample. The owner confirms orientation and contrast, and the screenshot must match the panel.
+
+### 4.3 gfx
+
+- **Framebuffer type.** `gfx_fb_t { uint8_t *buf; int16_t width, height, stride; gfx_rect_t clip; }`. The fields are signed so that clip arithmetic needs no casts.
+- **Primitives.** Pixel, horizontal/vertical line, line, rectangle, filled rectangle, rounded rectangle, circle, filled circle. Draw modes: black, white, invert (XOR).
+- **Bitmaps.** 1-bpp images, drawn transparent, opaque or inverted.
+- **Text.**
+  - UTF-8 decoding and glyph lookup by binary search.
+  - Measure, then draw with alignment.
+  - Single-line ellipsis, or word wrap inside a box.
+  - A missing glyph draws a fallback hollow box.
+- **QR codes.** Nayuki qrcodegen (MIT), vendored so it also builds on the host.
+- **Encoders.** PBM P4 and 1-bit BMP, used by screenshots and the web preview.
+
+### 4.4 Fonts
+
+- **Pipeline.** Source fonts live in `assets/fonts/` with their licences. `tools/fontgen.py` (Pillow) renders glyphs at fixed pixel sizes into C sources under `components/gfx/fonts/`. These sources are committed, so building needs no Python or Pillow.
+- **Format.** Header (ascent, line height, glyph count; descent = line height − ascent), a sorted codepoint table, per-glyph metrics (w, h, x/y offset, advance), and 1-bpp packed bitmaps. Each generated file names the font's licence file.
+- **Glyph coverage for text fonts.** ASCII, Latin-1 Supplement, Latin Extended-A, `° µ ² ³ € – — …` and the arrows used by widgets.
+  - This covers Czech and most European languages.
+  - MQTT/HA text with diacritics therefore renders correctly even with the English UI.
+- **Numeric display fonts.** Large sizes can carry only digits, `: . - °` and a few letters.
+- **Sizes (M3a).** Text: DejaVu Sans 12, 16 and 20 px, and Sans Bold 16, 20 and 28 px. Numeric: DejaVu Sans Condensed Bold 48, 72, 110 and 130 px. `fontgen` trims blank glyph rows and columns, and grows the ascent and line height to fit every glyph's ink.
+- **Choice.** DejaVu 2.37, picked at M1 (`THIRD_PARTY.md`). Every font needs a licence that allows redistribution in this repository.
+
+### 4.5 Icons
+
+- A 1-bpp icon set generated into C bitmaps by `tools/imggen.py` (`tools/gen_icons.sh`) from Google's Material Icons font (Apache-2.0, pinned to one upstream commit). `assets/icons/icons.txt` lists each icon's name and sizes.
+- M3a: thermometer, drop, dew, bolt (charging), stale, clock, calendar, person, celebration and cloud, at 16, 24 or 48 px as the list says. The battery and the moon are drawn with primitives. Weather codes (day and night), Wi-Fi, sync, the alarm bell, sunrise and sunset join with their milestones.
+- M5 (D26): the weather codes, sunrise and sunset come from Erik Flowers' Weather Icons (SIL OFL 1.1), as Material Icons has no rain or showers. The generator draws a second font with `--font PREFIX=TTF,CODEPOINTS,LICENCE`, its glyphs fitted to the square inside Material's padding. Sync, a crossed-out cloud, Wi-Fi, a crossed-out Wi-Fi, air, particles, UV and a flower come from Material Icons.
+- M6c and M6d (D34–D36): 16 px forms of the field icons for XS cells; a sun for the forecast (`wb_sunny`), solar panels for measured output (`solar_power`), a house, an electricity meter for the grid (`electric_meter`) and a leaf for own use (`energy_savings_leaf`), all from Material Icons.
+  - As built (M6c): 16 px forms of dew, clock, calendar, person, celebration, cloud, air, particles, UV, pollen, sunrise, sunset and every weather code; 105 icons in all.
+- Sources and licences are recorded in `THIRD_PARTY.md`.
+
+## 5. UI
+
+### 5.1 Field catalogue (v1)
+
+| Field id | Kind | Source | Freshness |
+|---|---|---|---|
+| `time.clock` | time | system time | Valid whenever the time is valid |
+| `date.day` | date | system time | Same |
+| `env.temp` | number, °C | SHTC3 | Stale after 15 min without a reading, or after twice the sample interval if that is longer |
+| `env.hum` | number, % | SHTC3 | Same |
+| `bat.level` | battery (%, V, charging state) | gauge | Stale after 15 min |
+| `wx.now` | weather (code, temperature) | Weather data (see below) | Normal until the expected sync interval (§9.3) plus 2 h has passed since the last fetch; stale after that; missing past the forecast range |
+| `wx.today` | weather day (code, min, max, precipitation %) | forecast | Same |
+| `wx.hourly` | series: next 12 h (temperature, code) | forecast | Same |
+| `wx.daily` | series: 3 days | forecast | Same |
+| `sun.times` | pair (sunrise, sunset) | `astro`, computed locally | Always, given a valid date and location |
+| `env.dew` | number, °C | Dew point from `env.temp` and `env.hum` (Magnus formula) | Same as `env.temp` |
+| `env.temp_min`, `env.temp_max` | number, °C | Lowest and highest `env.temp` since local midnight | From the first reading of the day; reset at midnight |
+| `date.week` | number | ISO 8601 week of the local date | Valid whenever the time is valid |
+| `moon.phase` | moon (phase index 0–7, illumination %) | Computed from the date | Always, given a valid date |
+| `bat.days` | number, days | Level ÷ the discharge rate over up to the last 24 h | Missing unless discharging, with at least 6 h of history |
+| `date.nameday` | text | The language pack's name-day calendar | Valid whenever the time is valid; empty for packs without one |
+| `date.holiday` | text | The language pack's public holidays | Same; empty on ordinary days |
+| `aq.index` | level: the European air quality index and its band | Air quality data (§11), the hour now | As `wx.now` |
+| `aq.pm25`, `aq.pm10` | number, µg/m³ | Air quality data, the hour now | Same |
+| `aq.uv` | level: the UV index, rounded, and its WHO band (D26) | Air quality data, the hour now | Same |
+| `pollen.top` | pollen: the type with the highest level today, and that level | Air quality data, today's peaks | Same; missing where CAMS has no pollen (outside Europe); "None" when nothing is in the air |
+| `pollen.alder`, `pollen.birch`, `pollen.grass`, `pollen.mugwort`, `pollen.olive`, `pollen.ragweed` | pollen: today's peak in grains/m³, and its level | Same | Same |
+| `wx.rain2h` | series: 8 × 15 min from now (precipitation, its probability) | forecast, Open-Meteo's `minutely_15` (§11.4) | As `wx.now`; missing past the 24 h stored |
+| `rain.map` | rain map: the weather radar's latest frame around its centre | the weather radar (§11.2) | Its frame time always shows; after 30 min the time shows inverted with its age |
+| `pc.<id>` | number with the PC app's label, unit and decimals (M7, D44) | the PC app's readings (§12a) | Fresh for three intervals after its last value; missing without a session, before the first value, or while HWiNFO sends none |
+| `mqtt.<key>` | number, text (with state labels) or time (D40), with unit and label | MQTT mapping (§12.5) | Configured TTL; default twice the expected sync interval (§9.3) |
+| `ha.message` | text: the latest message from Home Assistant (§12.7) | HA's notify entity (M7, D32) | Until replaced or cleared; stale after 24 h |
+| `pv.now` | number, kW: the forecast for the quarter hour now | the PV forecast (§11.5, M6d) | As `wx.now`, with Solcast's wait (3 or 6 h) in place of a shorter sync interval; missing on a day the forecast doesn't cover |
+| `pv.today`, `pv.left`, `pv.tomorrow` | number, kWh: today's total, what is still to come today, tomorrow's total | Same | Same |
+| `pv.peak` | number, kW, with the time of the day's highest quarter hour | Same | Same |
+| `pv.chart` | chart: today's output a quarter hour a bar (an hour in narrow cells), the past filled and the rest outlined, now marked; with the house's readings, the past bars are what was produced and a line over them is the forecast | the PV forecast and the house's readings (§11.6) | Same |
+| `energy.pv`, `energy.load` | number, kW: the panels' output and the house's consumption now | the house's energy (§11.6, M6d) | Fresh while the reading is at most 15 min old; stale after |
+| `energy.grid` | number, kW, with its direction: "Export" or "Import" as the label in M and up, ↑ to the grid or ↓ from it in S and XS | Same | Same |
+| `energy.battery` | battery: charge %, a bolt while charging, ↓ while discharging, the power in M and up | Same | Same; missing when no battery shows (§11.6) |
+| `energy.yield`, `energy.export`, `energy.import` | number, kWh today: produced, to the grid, from the grid | Same | Same; export and import are missing on a day without a reading near midnight (§11.6) |
+| `energy.self` | number, %: the share of today's production the house used | Same | Same |
+| `energy.flow` | flow: the panels, the grid, the house and a battery, with arrows where power flows: a diagram in tall cells, a row in short ones | Same | Same |
+
+`env.temp` and `env.hum` carry a trend: the change over the last hour. Widgets show ↑ or ↓ when it exceeds 0.5 °C or 3 %. The extra fields (from `env.dew` to `date.holiday`) are the accepted M3 proposals (D15); the air quality and pollen fields are an accepted M5 proposal (D25); `wx.rain2h` and `rain.map` come with M6 (D23, D27).
+
+As built (M6): `wx.rain2h` is missing unless its 8 quarter hours lie within the stored day, and when none of them has an amount (Open-Meteo's nulls: no data, not a dry spell). Its bars are a third, two thirds or the whole height for light, moderate or heavy rain (below 2.5 mm/h, below 7.6 mm/h, above), solid from 50 % probability and an outline below. `rain.map` before the first frame shows "Rain map —", not the map (§20).
+
+`wx.now` uses the `current` block while it is at most 60 minutes old. After that it uses the hourly forecast entry for the current local hour. This keeps "now" meaningful between syncs, even with a once-a-day schedule. `aq.*` take the hourly entry for the current hour in the same way. Pollen forecasts are read by the day, so `pollen.*` show today's peak.
+
+- **Air quality bands** (Open-Meteo's `european_aqi`, the EEA's bands): 0–20 good, 20–40 fair, 40–60 moderate, 60–80 poor, 80–100 very poor, above 100 extremely poor.
+- **UV bands** (WHO, D26), of the index rounded: 0–2 low, 3–5 moderate, 6–7 high, 8–10 very high, 11 and above extreme.
+- **Sun times** show the day length and, in medium and large slots, its change since yesterday in whole minutes (D26).
+- **Solar and energy fields** (M6d, D35, D36): `pv.chart` and `energy.flow` need M or larger; the others fit anywhere from XS. A sun marks the forecast and solar panels the measured output, so `pv.now` and `energy.pv` don't look alike. Where a number doesn't fit, kW from 1 kW up drops to one decimal (3.4) and kWh from 10 kWh up to whole numbers (27); smaller values keep their decimals (0.86 kW, 1.4 kWh).
+  - As built (M6d): kW has two decimals ("3.42", "12.3" from 10 kW), its short form one decimal from 1 kW ("3.4") and none from 10 kW; kWh one decimal, none from 10 kWh. From D38 a power under 1 kW is whole watts ("382 W"), without a short form. `energy.grid` says "Export" or "Import" as its label in M and up, without an arrow, and ↑ or ↓ in S and XS; under 20 W it says "Grid" and shows no way. Today's totals to and from the grid carry their arrows in S and XS too. The forecast is fresh for the expected sync interval or Solcast's wait, whichever is longer, plus 2 h, and never stale in `manual`; a reading for 15 min; today's totals come only from a reading of today. The fields, the chart and the flow are missing before the first forecast or reading, and the forecast's on a day it doesn't cover.
+- **Pollen levels** from the clinical thresholds CAMS uses (EAACI, checked 2026-10-01): below 1 grain/m³ none; then low; moderate from the season threshold; high from the peak threshold. Alder, birch, olive and mugwort: 10 and 100. Grass and ragweed: 3 and 50. `pollen.top` compares the types by level, then by concentration as a share of the type's peak threshold.
+
+### 5.2 Layouts (v1)
+
+Every layout has a status bar (top 20 px):
+
+- Left: "Set time" while the time is invalid (§5.3); otherwise a stale warning when a shown value is stale. After either, a globe while a phone is logged in to the web UI (D20), and a small monitor during a PC session (M7, D44). Then the sync state (M5): a sync mark while a sync runs, or a crossed-out cloud while the last scheduled sync failed, until one succeeds. In sync mode `always`, the Wi-Fi state follows: a Wi-Fi mark while on the network, a crossed-out one while rejoining it (D19). From M7, a crossed-out MQTT mark while the last MQTT session failed, until one succeeds (D32).
+  - If the preset sets `status_sync` (D43), the time the last sync that succeeded started follows the marks, in the 12 px font and the device's 12- or 24-hour form: today `14:05`, one to six days before `Mon 14:05`, a week or more before (or a later day, the clock having gone back) the language's short date (`18 Sep`, `18. 9.`). "Succeeded" is the verdict that clears the crossed-out cloud (the house's energy doesn't count, D36), and the time is the one Menu ▸ Info ▸ Last sync gives for it. With no mark before it, a cloud with a check (Material `cloud_done`, the icon `synced`) goes first, so a lone time doesn't pass for the clock; the running sync's arrows would say a sync runs (owner, 2026-10-14). It runs up to the small clock when the preset shows it, else to the battery's text; when it doesn't fit, an earlier day shows its weekday alone (`Mon`), then nothing. It is kept through deep sleep with the syncs' state (§6), not through a cold boot: nothing shows from a power-on or a restart until a sync succeeds, nor while the time is invalid.
+- Middle: a small clock, if the preset sets `status_clock`. It is meant for data-first presets (owner request, 2026-09-28).
+- Right: the charging bolt and the battery icon, with the parts `status_battery` lists: level %, voltage, days left. The default is the level.
+- Later: the next alarm (M8).
+
+| Layout | Slots |
+|---|---|
+| Classic | `main` XL (time), `sub` M (date), bottom row `s1`–`s4` S |
+| Weather | `now` L, `today` M, `hourly` M (series strip), `s1`–`s2` S |
+| Grid | `g1`–`g6` M, in 3×2 |
+| Focus | `main` XL, `s1`–`s2` M |
+| Radar (M6) | the weather radar map, full width under the status bar (400×279 as built), with the frame's time and source and a legend (§11.2) |
+| Flights (M6) | the flight radar map (400×238 as built) over a line and a 40 px panel for the nearest aircraft (§11.3) |
+| Split (M6b, D31) | up to 24 cells (8 before M6c, D34), as the preset's tree splits the area under the status bar (below) |
+| Solar (M6d, D35) | today's PV forecast: the total, now, the peak with its time and what is still to come; the day's chart; the next two days' totals with their weather (§11.5) |
+| Energy (M6d, D36) | the house now: the panels above, the grid left, the house right, the battery below when it shows, flow lines with arrows; today's totals and the reading's time (§11.6) |
+| PC (M7, D44) | four history charts in 2×2 (`c1`–`c4`), each with its number over it, and three bars under them (`b1`–`b3`); any field in each slot, "Show as" per slot (§5.3); "PC asleep" across it without a session (§12a). Its look is the spike's, approved on 2026-10-19 |
+
+- Slot rectangles are fixed per layout and defined in code (`components/ui/ui_layout.c`). The owner approved them from the M3a host renders on 2026-09-28.
+- Each slot declares which field kinds it accepts. The preset editor offers only compatible fields.
+- **The split layout** (M6b, D31): the area under the status bar (400×279) is split into two parts, as rows (a top part `a` over a bottom part `b`) or as columns (`a` left of `b`), and each part can be split again.
+  - **A split** gives its first part 1/4, 1/3, 1/2, 2/3 or 3/4 of its rectangle, rounded down to whole pixels; a 1 px gap follows, and the second part takes the rest. Its separator is a 1 px line in that gap, across the split's own rectangle and 8 px short of each end, drawn unless the split turns it off. The gap stays either way, so hiding a line never moves a cell. Lines follow White on black like the rest of the screen.
+  - **A cell** holds one field or none. A preset has at most 24 cells, and a split whose parts would be under 40×20 px is refused (M6c, D34; 8 cells and 90×40 before).
+  - **A cell's size class** comes from its dimensions: XL 400 wide and at least 120 tall; L at least 200×150; M at least 130×80; S at least 90×40; XS at least 40×20 (M6c, D34). S draws the icon beside the value from 150 px of width or under 80 px of height (M6c; from 150 px of width only before), and the icon above the value in a narrower, taller cell. XS draws one line, like the status bar, in a cell 120 px wide or more or under 44 px tall, and the symbol over the value otherwise (§5.3).
+  - **A field** draws at the largest class its cell allows that accepts its kind (§5.1): XL takes only the clock and numbers, so the current weather in a full-width cell draws at L; series, the rain map, the chart and the flow need M or more; the small kinds fit anywhere from XS. The device publishes these rules in `GET /api/layouts`, so the editor offers each cell only the fields that fit.
+  - **A cell's title** (D42): a cell, like a fixed layout's slot, can carry its own title, shown wherever its field shows its label, in the label's place (§5.4). A cell can also show its title always (`force_title`): where its field draws no label at its size, the title takes a line above the field (the M size's label font, 12 px) when the height under that line still fits the field at some size, which it then draws at; otherwise it goes beside the field (16 px where the cell is tall enough, else 12), cut to half the cell's width, when the width left still fits the field; otherwise the field shows alone. A cell whose field shows its label anyway is unchanged, and a value the stale policy hides takes its title with it. Whether a widget draws its label at a size is the widget's own answer (`ui_widget_labelled()`, a dry run with nothing to draw on), so the rule follows the widgets as they change.
+  - **Example**, Weather with smaller bottom cells: rows 3/4; the top as columns 1/2, its left part a cell of 200×209 (L) and its right part rows 1/2 (two cells of 199×104, M); the bottom as columns 1/2 (cells of 200×69 and 199×69, S drawn wide).
+  - As built (M6b): some kinds' widgets need more than their size's least cell, so a cell draws a field at a size only with the height that kind needs there, narrower than 150 px or not: at S 86 and 61 px for the current weather, 99 and 51 for the day's weather, 80 and 49 for the sun, 83 and 40 for the air quality and UV, 86 and 42 for pollen; at M 98 and 80 for the current weather, 94 and 80 for the day's, 94 for the sun, 93 for the air quality and UV, 105 for pollen. `GET /api/layouts` publishes them (`split.sizes`), and the host tests draw every field in each of the 336 cell sizes a tree can make. A cell without room for its field draws nothing.
+  - **M6c** (D34): a cell that grows never draws a field at a smaller size, so at each size a kind's least height for a wide cell is no more than for a narrow one. At S the current weather and the day's weather need 50 px whatever the width (their compact form: the sky beside the temperature), the sun 56 and 49, the air quality and UV 46 and 40, pollen 46 and 42 (narrow and wide); M keeps M6b's heights. The plan settles them against the renderer; the host tests check that more room never loses a field, and draw every field in every cell size a tree can make.
+  - As built (M6d): the Solar and Energy layouts are the spike's renders (D33): `home_energy` and the Energy layouts match them to the byte; the Solar layout and the chart elsewhere differ by a pixel of bar tops and of the forecast's line, as the device keeps power in tens of W. Both layouts raise the status bar's stale warning when what they show is stale, as a stale slot does; a day without a total, and a total to or from the grid without a reading near midnight, show a dash. Their numbers take short forms from 100 kWh a day: whole kWh, and a total in the row of four starts under its icon from 1 MWh. "No solar forecast yet" without today's quarter hours; "No data from the inverter yet" before the first reading. On the board a wake that draws the Solar layout is awake 107 ms (2026-10-05).
+  - As built (M6c): measured against the renderer, S needs 49 px for the sun, 42 for pollen and its own 40 for every other kind, narrow and wide alike; M keeps M6b's heights. A legal tree makes 2451 cell sizes (336 under M6b's limits), and the host tests draw every field in each of them, in fifteen sets of data. On the board a wake that draws 24 cells is awake 77 ms, against about 60 ms for the dashboards (M6).
+
+### 5.3 Widgets
+
+- There is one renderer per field kind and size class (XL/L/M/S, and XS from M6c). For example, a number widget in M shows label, value and unit; in S it shows an icon and the value with its unit. A number that doesn't fit its slot first drops its decimals ("101 °F" for 100.8 °F), then steps down to smaller fonts; only if it still doesn't fit is it cut with an ellipsis. Text that doesn't fit ends in an ellipsis, and a widget never draws outside its slot.
+  - As built (M6b): a number fits its slot's height as well as its width, in the same order, with 2 px to each edge; every digit counts as the deepest one, so a number keeps its size as it changes. In Czech the comma's tail is what doesn't fit first: a full-width cell under 163 px shows "23 °C" where English shows "23.4 °C". In Classic's main slot both draw 110 px digits; the 130 px ones sat on its bottom edge before, and a Czech comma lost its tail there. The current weather's digits and the forecast strips' temperatures step down to fit "−13 °C" and "102 °F", and the sun widget's 12-hour times step down in a 100 px cell.
+- **XS** (M6c, D34), the status bar's look:
+  - One line in a cell 120 px wide or more, or under 44 px tall: the 16 px symbol (24 px from 34 px of height), then the value in the largest face the height takes, its unit smaller. A time stands alone, centred.
+  - Otherwise the symbol over the value, both centred: the largest bold face that fits, with the unit and a trend arrow beside it; then without the arrow; then the unit on its own line under the number, where the cell has the height; then without the unit. A date shows its weekday over its day ("Fri" over "25"); pollen too long for its word shows its level bar.
+  - No age mark: the status bar's stale warning covers it.
+  - As built (M6c): a number gives up its trend arrow, then (stacked) puts its unit under itself, then drops it, and drops its symbol before it is cut; a time, or a value whose symbol had to go, stands alone, centred. Words take bold 20, bold 16 or sans 12 before they are cut. The date is "Fri 25 Sep" or "Fri 25" in one line (the locale's day form, "Pá 25." in Czech). The Moon keeps its disc, with its name, its short name or its illumination, whichever fits. Today's low and high keep their arrow beside the thermometer, and a charging battery its bolt (beside the 16 px outline where the 24 px one leaves no room). The sun's line shows both times in the largest face that takes them, a 12-hour time's suffix kept before it is dropped, and where both don't fit, the next event alone: the sunrise before it, the sunset in the day, tomorrow's sunrise after the sunset (owner, 2026-10-05); stacked, a row each, else each icon over its time, else the two times alone. Polar day and night show the clear sky alone where their words would be cut.
+- **S in a short cell** (M6c, under 150×80): the symbol beside the value, the current weather's word on two lines where it is long, the air quality's word under the number when it doesn't fit beside it (Czech "Přijatelná").
+  - As built (M6c): nothing is cut before the rest gives way. Words take their shorter forms (the date's "Fri 25", the Moon's short name, then its illumination), then leave their symbol behind (the Moon keeps its disc). A number gives up the battery's bolt, its trend arrow, its unit (a time its clock first, as AM/PM says more), then its symbol, and stands alone, centred. The current weather's sky is 24 px in a cell under 120×52; the air quality's index steps down to bold 20 or 16 past 100; today's weather in a wide cell tries its short form and smaller faces before an ellipsis ("102/97°"); the sun's polar words go beside its sky under 60 px. A name stacks on two lines only from 86 px.
+- **The chart and the flow** (M6d, M and up): `pv.chart` has a heading with the sun, today's total and, where it fits, its label; L draws kW on the left and every third hour below. `energy.flow` has its heading with "kW" at the right ("W" while all its powers are under 1 kW, D38): a diagram from 76 px under the heading (the panels above a junction, the grid left, the house right, the battery below from 100 px), a row of icons with arrows below that (a battery at the end from 180 px of width, with a bolt while it charges).
+  - As built (M6d): the host tests draw the 13 small solar fields, the chart and the flow in every cell size with fifteen sets of data, one at the largest values (200 kW from the roof, 1599 kWh in a day). They found three overflows the spike had, now fixed: the chart's axis labels take the widest label's margin, its "now" mark stays inside the plot, and its heading's total steps to its short form ("2800 kWh"), then drops its unit, before a cut; the flow's values take their short forms where a column is too narrow ("200", "64%"). With the house's readings, a past bar is its quarter hour's mean reading, and a quarter hour without a reading draws its forecast.
+- **Show as** (M7, D44): a slot or cell with a numeric field draws it as its value (the widgets above) or as one of four visuals, between a minimum and a maximum:
+  - **History chart**: a 1 px line over a light dithered fill, the newest value at the right, moving on with each new value. Its span is 10 s–1 h, from each value the field takes, or 2–24 h, from one-minute minimum, mean and maximum. A pixel column that holds several values draws their range as a half-grey band with their mean as the line, so a spike never vanishes and a busy hour doesn't turn solid. Its range is fixed or automatic (the values in view, with a tenth's room). The label's line stays clear of the chart, with the range's top at its right; "Numbers over the chart" draws the latest value over the chart's top left with a 1 px white halo, the range's bottom and the span in the bottom corners; without it the value sits on the label's line, at the right.
+  - **Bar**: a level from the minimum to the maximum. The label and the value share a line, the bar under them; in a cell under 44 px tall the value follows the bar on one line; in a tall narrow cell the bar stands upright with the value under it.
+  - **Ring**: a ring filled clockwise from 12 o'clock, the value inside where it fits (its unit dropped first), else beside a smaller ring; under 30 px a disc (a pie).
+  - **Gauge**: a 240° arc filled to the value, the value inside it; from 70 px of height the range's ends under the arc's ends.
+  - The minimum and maximum default to the field's: 0–100 for a %, the PC app's usual range for a PC reading, automatic for the rest. A value past them fills the visual and keeps its number; a field without a value draws the visual empty with "—".
+  - A visual needs room, about 80×40 px for a chart, 60×40 for a gauge, 40×40 for a ring and 60×16 for a bar; the editor offers only those that fit. The title shows where the field's label would, where the visual leaves room. The looks are the spike's renders, approved by the owner on 2026-10-19 (branch `spike/m7`, local; the PC layout: CPU load, CPU and GPU temperature and GPU load as 60 s charts, RAM, VRAM and the network as bars, the monitor in the status bar; "PC asleep" in a box with since when and the PC's name).
+  - **History** (RAM only): kept for the fields a chart on any preset shows, at most 16 series, in PSRAM: each field's last 3 600 values at its own rate (an hour at 1 s, 15 min at 250 ms), and 24 h of one-minute minimum, mean and maximum. As built each value keeps its time, so a gap stays a gap: about 47 KB a series, 761 KB for 16, taken once a preset charts a field and the board stays awake (never on a routine deep-sleep wake). A value's age is the unsigned difference to now; one up to 60 s ahead counts as now. A restart or a deep sleep loses it (PSRAM is off in deep sleep): a chart starts empty and fills from there. Values come at their own rates: a PC reading with each message, the indoor values at each sample (every 5 min), the PV and energy fields at each sync. A span longer than the last 3 600 values cover draws from the minutes.
+- Each slot sets a policy for missing or stale data (a preset option):
+  - `hide`: leave the slot empty.
+  - `placeholder`: show `—`.
+  - `stale`: show the value with an age marker: the stale icon and the age, e.g. "2 d", at the slot's bottom right.
+    - As built (M6c): only where nothing lies within 1 px of the mark's ink; never in XS, nor in an S cell under 80 px. Where it has no room, the status bar's stale warning stands for it.
+
+  Default: `stale` for data that has a value, `placeholder` for data that doesn't.
+- If the time is invalid (RTC oscillator-stop flag set, and the time was never synced or set), time fields show `--:--` and the status bar shows "Set time".
+
+### 5.4 Presets
+
+A preset is a layout, a slot → field binding and a set of options. Presets are stored in `/cfg/presets.json`:
+
+```json
+{
+  "schema": 1,
+  "active": "home",
+  "cycle": { "enabled": false, "interval_s": 60 },
+  "presets": [
+    {
+      "id": "home",
+      "name": "Home",
+      "layout": "classic",
+      "in_cycle": true,
+      "slots": {
+        "main": "time.clock", "sub": "date.day",
+        "s1": "env.temp", "s2": "env.hum", "s3": "moon.phase", "s4": "bat.level"
+      },
+      "options": { "clock_24h": true, "seconds": false, "invert": false, "stale_policy": "stale",
+                   "status_clock": false, "status_battery": ["percent"] }
+    }
+  ]
+}
+```
+
+- **Split presets** (M6b, D31) have `"layout": "split"` and a `"split"` tree instead of `"slots"`. A split is `{ "split": "rows", "ratio": "3/4", "line": true, "a": {…}, "b": {…} }` (`rows` or `columns`; a missing `line` is `true`); a cell is `{ "field": "wx.now" }`, or `{}` when empty.
+  - As built (M6b): a split preset is written with its tree, every split with its `line`, and no `slots`; one without a tree is one empty cell. A refused cell is named by its place in preorder and its size ("cell 4 (400×69) can't show rain.map"). The largest `presets.json` (16 split presets of 8 cells, the longest names and ids, 8 schedule entries) is 16 253 bytes; the file may be 20 KB.
+  - M6c (D34): with 24 cells the largest file is about 36 KB; the file may be 48 KB, and the buffers that read, write and validate it are in PSRAM.
+  - As built (M6c): the largest `presets.json` (16 split presets of 24 cells in three rows of eight columns, every line hidden, the longest ids and names, every option at its longest, 8 schedule entries) is 37 197 bytes; the file may be 48 KB. The deepest legal tree has 13 splits in a chain: its file nests 17 levels, a backup of it 19; `presets.json` may nest 20 levels.
+- **Built-in defaults.** Home (Classic), Indoor (Grid, with the status clock), Weather and Focus clock are compiled in. They are used when the file is missing or invalid. The built-in Weather preset joins the cycle from M5, which brings its data; a `presets.json` saved earlier keeps its own choice. M6 adds Rain radar (the Radar layout, in the cycle) and Flights (the Flights layout, D28): the cycle visits Flights only in sync mode `always`, and outside it a preset on that layout says "Flights need sync mode Always on". A `presets.json` saved before M6 gains both once, at the first boot that knows them, if there is room; the file then carries a marker, so a preset deleted later stays deleted. There can be at most 16 presets.
+  - M6d (D35, D36) adds Solar (the Solar layout) and Energy (the Energy layout), both outside the cycle, offered once to an older `presets.json` as M6's were, and named in the same marker.
+  - As built (M6d): `solar` and `energy`, with the status clock. An older `presets.json` gains them once, at its end, if there is room and their ids are free; the marker then names them, so one deleted later stays deleted. The owner's M6c file gained both at M6d's first boot.
+  - M6e (D41): the built-in Solar preset has the cycle window `sunrise` → `sunset`; it stays outside the cycle until the user adds it. A file saved earlier keeps its presets as they are.
+- **Options.** `clock_24h` overrides the time setting when present. `status_clock`, `status_battery` and `status_sync` shape the status bar (§5.2); `status_sync` (D43) is written only when on, so older firmware never meets it but drops it at its next save.
+- **Validation.** A file with a structural error is rejected as a whole, and the error names it. Structural errors:
+  - not JSON, or another schema;
+  - no presets, or more than 16;
+  - a bad or duplicate id;
+  - an unknown layout, slot or field, or a field the slot can't show;
+  - a split tree with more than 24 cells (8 before M6c), a part under 40×20 px (90×40 before M6c), an unknown `split` or `ratio`, or a field its cell can't show (M6b);
+  - an `mqtt.<key>` with a bad key, or more than 32 different keys in the file (M7, §12.5); a key no mapping names is not an error;
+  - an unknown `stale_policy` or `status_battery` value;
+  - nesting deeper than 16 levels, or `slots` that isn't an object;
+  - a bad schedule: more than 8 entries, or an entry with a bad time, action or preset, or a night that ends at the minute it starts;
+  - a bad `window` (M6e, D41): a bound that isn't a time or `sunrise` or `sunset` with an offset of 1–180 minutes, `from` and `until` the same, or `days` outside 1–127.
+  - a title that isn't text, a `titles` that isn't an object or names a slot the layout lacks, or titles that overflow their 768 bytes (D42).
+
+  Everything else is lenient:
+  - an unknown `active` selects the first preset;
+  - the cycle interval is clamped to 10 s–1 h;
+  - a missing name takes the id, and a name longer than 23 bytes is cut at a character boundary;
+  - missing or `null` options take their defaults;
+  - `null` or `""` leaves a slot empty.
+- **Switching.** Presets change by:
+  - KEY short: next preset in cycle order.
+  - The auto-cycle timer: interval at least 10 s; each switch costs a wake-up. From M6e it skips a preset whose cycle window is closed (D41).
+  - The HA `select` entity (§12.3).
+  - The web UI or the menu.
+
+  A manual switch is saved in `presets.json`, so it survives a reboot. An auto-cycle switch is not saved.
+- **Seconds.** `seconds: true` needs a wake-up every second. It is allowed, and the web UI shows the power cost.
+- **Schedule** (D15). `presets.json` holds `"schedule": { "enabled": true, "entries": [...] }` with up to 8 entries: `{ "at": "22:30", "days": 127, "action": "preset", "preset": "focus" }` or `{ "at": "23:00", "days": 127, "action": "night", "until": "06:00" }`. `days` is a Mon–Sun bitmask (bit 0 = Monday, default all). An entry runs at its local minute, with the same DST rules as user alarms (§9.2).
+  - `preset` makes that preset active. Manual switching and auto-cycling carry on from there.
+  - `night` starts night sleep (§9.1) until `until`, which may be on the next day.
+  - Entries of the same minute run in list order, presets before a night, because nothing runs once a night has started.
+  - Entries run only while the time is valid, and not on the critical-battery screen. They don't run late: not those a night covers or a clock change skips, not those missed while the board was off, and not after a gap longer than the display interval plus 5 minutes, such as the critical sleep.
+  - A night covers the minutes from its start up to its end, so an entry at the end minute runs: night 23:00–06:00 with a preset at 06:00 switches the preset in the morning.
+  - A preset entry's switch is not saved, like an auto-cycle switch.
+  - Until the web UI (M4), the `schedule` console command edits the entries (§15).
+- **Cycle windows** (M6e, D41). A preset may carry `"window": { "from": "sunrise", "until": "sunset-30", "days": 127 }`, beside `in_cycle`: the auto-cycle visits it only while its window is open.
+  - A bound is a local time, `"HH:MM"`, or `"sunrise"` or `"sunset"` with an optional offset of 1–180 minutes (`"sunset+30"`, `"sunrise-15"`). Sun times are those of the day the bound falls on, at the device's location (`astro`, §11). Where the sun doesn't rise or set that day, a polar day runs from midnight to midnight (sunrise at 00:00, sunset at 24:00) and a polar night the other way round (sunrise at 24:00, sunset at 00:00). As built: r45's 12:00 for both ends of a polar night made sunrise → sunset a day-long window. So in a polar night sunrise → sunset is empty and sunset → sunrise spans the day.
+  - A window opens on each day `days` names (the schedule's Mon–Sun mask, every day when missing) at `from`, and closes at `until`: the same day, or the next day for a window that runs past midnight. Whether it does is decided by its ends, not by a day's sun (owner, 2026-10-19, D41): two clock ends by the clock face, when `until` is at or before `from` (`22:00` → `06:00`); with a sun end, from an evening end (`sunset` with any offset, or a time from 12:00) to a morning end (`sunrise` with any offset, or a time before 12:00): `sunset` → `sunrise` and `22:00` → `sunrise` span the night. On a day when the sun puts the end at or before the start, the window stays closed: `18:00` → `sunset` in winter, `06:00` → `sunrise` in summer, `sunrise` → `sunset` in a polar night, and the first day after one opens at its sunrise. (Until 2026-10-19 each day decided from its own sun times, so such a window ran almost a day for months.) A local time that a DST change skips counts from the next valid minute, as alarms do (§9.2); 02:00–02:30 on the spring-forward night, both ends falling at 03:00, is empty that night rather than a day long. A sun end can fall on the day before: `sunrise-180` where the sun rises at 01:00 opens the window at 22:00 the evening before its day.
+  - Only the auto-cycle looks at windows: it steps to the next preset in cycle order whose window is open (Flights still only in sync mode `always`), and keeps the one shown when none is. KEY short, `cmd/next` (§12.4), schedule entries, the menu, the web UI and HA's select still reach every preset. A preset on screen when its window closes stays until the cycle's next step; with the auto-cycle off it stays.
+  - Without a valid time every window counts as open, as the schedule's entries don't run then either.
+  - A preset without `window` is always open, so earlier files work unchanged.
+  - The windows ride with the presets in the RTC snapshot (§6): a bound takes two bytes (the minute of the day, or 2000 for sunrise and 3000 for sunset plus the offset) and the days one, 112 bytes for 16 presets as built. `stable-m6d` reads a file with windows, ignoring them, and its next save of `presets.json` drops them; restoring the backup brings them back (checked on the board at M6e).
+  - The console's `preset window` and the file share their words: both read a bound and check a window with the same code (`ui_window_make()`), so they refuse the same windows with the same reasons (§15).
+  - As built, the largest `presets.json` with windows, 16 split presets of 24 cells each with a window at its longest, is 38 238 bytes of its 48 KB (D42's titles later bring it to 48 030).
+
+- **Titles** (D42). A fixed preset's `"titles": { "s1": "Obývák" }`, beside `"slots"`, and a split cell's `"title": "Obývák"`, give a slot or cell its own title in place of its field's label (§5.2, §5.3); a split cell's `"force_title": true` shows it whatever the cell's size (§5.2). Each is left out when unset, so earlier files work unchanged, and older firmware ignores them (and drops them at its next save).
+  - A title is text of at most 23 bytes, cut at a character boundary like a name; control characters become spaces; `""` or `null` is none. A title that isn't text, or a slot the layout lacks, is a structural error.
+  - The presets ride the deep-sleep snapshot (§6), which has no room for a title a slot: every preset's titles share a pool of 768 bytes in `ui_presets_t`, each taking its text, its terminator and two bytes (about 60 titles of ten letters). A file whose titles don't fit is refused, with the reason. The force flags are a 32-bit mask a preset.
+  - The largest `presets.json` grows with titles to 48 030 bytes as built (every cell forced, the pool full of one-character titles that each take two bytes as JSON), within its 48 KB. M7 raises the limit to 64 KB (the web server's buffers to 72 KB, in PSRAM): with PC readings in 24-cell presets and the pool's 48 visuals at their longest it is 54 243 bytes as built.
+
+- **Visuals** (M7, D44). A fixed preset's `"visuals": { "s1": { "as": "chart", "min": 0, "max": 100, "span_s": 60, "numbers": true } }`, beside `"titles"`, and a split cell's `"show": { "as": "ring", "min": 0, "max": 100 }` choose how a numeric field draws (§5.3). `as` is `chart`, `bar`, `ring` or `gauge`; `min` and `max` are numbers in the field's unit, left out for the field's own range, and a chart takes `"auto"` for either; `span_s` is 10–3 600, or whole hours from 7 200 to 86 400; `numbers` is a chart's. Without them a slot draws its value as before; older firmware ignores them, and drops them at its next save.
+  - Refused with the reason: a visual on a field that isn't a number, an unknown `as`, `min` not below `max`, a span outside its ranges, more than 48 visuals in the file.
+  - All presets' visuals share a pool of 48 entries of 20 bytes (960 bytes as built), kept through deep sleep with the presets in their own block in RTC FAST memory (§6). A visual that doesn't fit its slot or cell draws the value; the file isn't refused for it.
+  - PC readings are field bytes 128 + n, n an entry in a table of 32 reading ids kept with the presets, rebuilt from the file at each parse; a slot keeps its reading whatever the catalogue's order.
+  - The built-in **PC** preset (M7): the PC layout, its charts and bars taking the PC app's first readings when the first catalogue comes, outside the cycle: the first four as 60 s charts with their numbers, the next three as bars, each with the reading's own range. It is filled while it is empty and has the PC layout; an owner's PC preset is never refilled, and a deleted one stays deleted. A file saved earlier gains it once, as the radars and Solar joined.
+
+### 5.5 Screens
+
+| Screen | Content |
+|---|---|
+| Dashboard | The active preset |
+| Menu | §5.7 |
+| Config mode | Wi-Fi state; URL (`http://reflbo-XXXX.local`) and IP; a QR code to join the AP or open the URL; time left before timeout |
+| First run | "Hold BOOT 3 s to set up Wi-Fi · Hold KEY for menu · Press KEY to continue", plus the clock if the time is valid. Shown at boot when `settings.json` doesn't exist: a new board, or after a factory reset (D19). Whichever button leads on saves the settings, so it doesn't come back |
+| Alarm ringing | Large time, the alarm label, button hints |
+| Radio | Station, ICY title, volume, a battery warning when on battery |
+| Critical battery | A large empty battery, "Battery empty" and "Please charge me", with the time and date it was drawn. Nothing else updates |
+| Toast | A short overlay near the bottom, in a black box (e.g. "Preset: Weather", "Sync failed"), shown for 3 s. The board stays awake meanwhile |
+| Message | A black banner across the bottom of the dashboard with Home Assistant's message (§12.7), until KEY short dismisses it, a new message replaces it, or 24 h pass (M7, D32) |
+
+`XXXX` is the last two bytes of the Wi-Fi STA MAC in lowercase hex. The same id is used for the hostname, AP SSID, MQTT client id and device id.
+
+### 5.6 Controls
+
+- **Gesture timings.**
+  - Debounce: 30 ms.
+  - Double press: 300 ms window, waited for only when the context binds a double press.
+  - Long press: fires at 1 s while the button is still held.
+  - BOOT on the dashboard: long press fires at 3 s instead, so Wi-Fi doesn't switch on by accident.
+  - In the menu KEY has no double press, so a short press answers at once, and BOOT's long press fires at 1 s.
+- A context binds at most one long gesture per button.
+
+| Context | KEY short | KEY double | KEY long | BOOT short | BOOT double | BOOT long |
+|---|---|---|---|---|---|---|
+| Dashboard | Next preset | Auto-cycle on/off | Open menu | Refresh sensors | Sync mode `always` on/off (M6b) | Config mode (3 s) |
+| Radar layout (M6) | Next preset | Auto-cycle on/off | Open menu | Play the last hour in sync mode `always`; otherwise sync now, for a fresh frame (D30, §11.2) | Sync mode `always` on/off (M6b) | Config mode (3 s) |
+| Menu: browsing | Next item | — | Select / enter | Back | — | Exit menu |
+| Menu: editing a value | + | — | Confirm | − | — | Cancel |
+| First run | Dashboard | — | Open menu | — | — | Config mode (3 s) |
+| Config mode | Toggle QR (join AP / open URL) | — | — | — | — | Exit config mode (1 s) |
+| Alarm ringing | Snooze | Snooze | Stop | Snooze | — | Stop |
+| Radio | Volume + | Next station | Open menu | Volume − | — | Stop radio |
+
+- **BOOT double on the dashboard** (M6b, D31) toggles sync mode `always`. Turning it on remembers the mode before in `sync.mode_before_always` (§14.3) and toasts "Always on: Wi-Fi stays on"; turning it off returns to that mode and toasts its name. It is refused on a critical battery and with no network saved, with Sync now's toasts. As the dashboard then binds a double press, BOOT short waits the 300 ms double-press window before it acts.
+  - As built (M6b): in quiet hours or a night, which keep Wi-Fi off until they end, the toast is "Always on: Wi-Fi from 06:00", the time the span ends; leaving `always` it is "Sync: <mode>" in the menu's words ("Sync: At set times"). A BOOT double within a second of the menu closing does nothing: BOOT pressed fast to back out of the menu would otherwise turn `always` on with the presses after it closed.
+- **From M7** (D32): while a message banner shows, KEY short only dismisses it (§12.7). While MQTT is connected, each dashboard gesture is also published as a key-press trigger (§12.8).
+
+The `diag` console command `btn` injects the same gestures. Holding BOOT at power-on still enters download mode; holding it at runtime is safe.
+
+### 5.7 Menu (v1)
+
+```
+Presets    ▸ Active preset · Auto-cycle on/off · Interval (10 s … 1 h) · Schedule on/off
+Alarms     ▸ Alarm 1–8: on/off · Time · Days · Sound · Volume        (M8)
+Radio      ▸ Play/stop · Station · Volume                            (M8)
+Wi-Fi      ▸ Config mode · Forget networks · Reset web password
+Sync       ▸ Sync now · Schedule (times / interval / always / manual) · Interval · Quiet hours on/off · Steps (M6d)
+Time       ▸ Set date and time · 24-hour clock · Time zone (short list)
+Display    ▸ Contrast · Update interval (1–15 min) · Refresh rate (0.25–8 Hz)
+Sensors    ▸ Temperature offset · Humidity offset · Units (°C/°F)
+Info       ▸ Battery V/% · Firmware · IP/MAC · Last sync result · Uptime · Free heap
+System     ▸ Language (English, Čeština) · Reboot · Factory reset (with confirmation)
+```
+
+- The menu closes after 60 s without input.
+- Items for features that don't exist yet (Wi-Fi before M4, Sync before M5, Alarms and Radio before M8) are hidden, not shown disabled.
+- Schedule entries are edited in the web UI (M4); until then `presets.json` or the console sets them.
+- Display ▸ Contrast is hidden for now (D17). Last sync result joins Info with M5.
+- Sync (M5): Interval shows in `interval` mode only. The times of the `times` mode and the span of the quiet hours are set in the web UI; the menu's Quiet hours switches them on and off.
+- As built (M3b):
+  - A toggle flips at once. A choice or a number is edited in place and saved with KEY long.
+  - The temperature offset steps by 0.1 °C (±10 °C, D17), the humidity offset by 0.5 % (±20 %).
+  - The time zone list holds 14 zones. A zone set elsewhere stays selectable.
+  - Info shows the device id `reflbo-XXXX`, the firmware version with the first bytes of its ELF hash, and the uptime since the first valid clock after a cold boot.
+  - Reboot doesn't ask. Factory reset asks, and only KEY held confirms it.
+  - The date-time editor starts from 2026 when the clock reads an earlier year, as after a power-off without the backup cell (D9).
+  - The panel is in HPM while the menu is open.
+- As built (M4):
+  - Wi-Fi ▸ Config mode starts config mode at once. Forget networks and Reset web password ask first, like Factory reset, and end with a toast.
+  - Info shows IP and MAC as two rows. The IP shows only while Wi-Fi is on, otherwise a dash.
+  - A value too long for its row, such as a zone the web UI set, is cut with "…". A short label keeps its width; a long one gets half the row.
+- As built (M5):
+  - Sync ▸ Sync now starts a sync at once, without asking, and ends with a toast; on the device's own network alone it is refused, as nothing can be reached. Schedule is a choice of the four modes, Interval shows in `interval` mode, Quiet hours toggles.
+  - Info ▸ Last sync reads "HH:MM OK", or the time, the first step that failed and why. The IP row shows whenever Wi-Fi runs, in config mode or not.
+- M6d (D35): Sync ▸ Steps switches each data step on and off (§9.3): Weather, Air quality, Radar, Solar forecast, House energy.
+  - As built (M6d): a section of five switches, named as Info ▸ Last sync names the steps; each saves at once. A switch doesn't plan a sync: turning Weather on with no forecast waits for the next scheduled sync (the web page's save plans one; §20).
+- The full time zone picker is in the web UI.
+
+### 5.8 Language packs
+
+- **What a pack holds.** Each pack in `locale` is a set of C tables:
+  - String ID → UTF-8 text.
+  - Weekday and month names, including short forms.
+  - Date and time patterns.
+  - Decimal separator.
+  - First day of the week.
+  - The character set the pack needs, so `fontgen` can check coverage.
+- **v1.** Ships `en` and `cs` (D15). `settings.language` selects the pack.
+- **Czech extras.** The `cs` pack also holds the public holidays: 1 January, Good Friday, Easter Monday, 1 and 8 May, 5 and 6 July, 28 September, 28 October, 17 November and 24–26 December (zákon č. 245/2000 Sb.). Easter is computed. The Czech name-day calendar (one entry per day of a leap year) waits for a source whose licence allows redistribution (D16, §20), so `date.nameday` stays empty with `cs` for now. `en` has neither table, so `date.nameday` and `date.holiday` stay empty with it.
+- **Web UI.** English only in v1.
+
+## 6. Datastore
+
+- **Table.** An entry for each measured or fetched field: `env.*` and `bat.*` since M3a, weather from M5. From M7 the `mqtt.<key>` values and the message live in `ha_mqtt`'s own store (§12.5), kept through deep sleep in a second RTC block beside the snapshot. From M6d the PV forecast and the house's readings live in the app's solar state, outside the datastore like the radar's frames: in the snapshot and in `/fs/state/solar.bin` (§11.5, §11.6). Fields that follow from the clock (`time.*`, `date.*`, `moon.phase`) are computed by `ui` at render time and never stored.
+- **Entry contents.**
+  - A fixed-point value: 0.01 °C, 0.01 %, whole %, or 0.1 days. Short text (at most 48 bytes of UTF-8), times and weather structs arrive with the fields that need them.
+  - The trend and `updated` (UTC); a `ttl_s` per field. The battery entry also holds the voltage and the charging state.
+  - Units and labels live in the `ui` field catalogue.
+- **Derived values.** Each SHTC3 reading also sets:
+  - `env.dew`, from the Magnus formula (17.62 and 243.12 °C);
+  - today's `env.temp_min` and `env.temp_max`, restarted at local midnight;
+  - the trends: the change since the newest reading that is 60–90 min old, from a 16-point history spaced at least 5 min apart.
+- **Weather storage.** Kept compact: 72 hourly entries (int16 temperature ×10, uint8 code, uint8 precipitation %) and 3 daily entries.
+- **Air quality storage** (D25): 72 hourly entries (uint8 index, PM2.5 and PM10 in whole µg/m³, the UV index in tenths, each capped at 254), and each pollen type's peak for 3 days (uint16, 0.1 grains/m³). Weather and air quality together add about 700 bytes to the snapshot.
+- **Rain in the next 2 h** (M6, D27): 96 entries of 15 min (uint8 precipitation in 0.1 mm, capped at 25.4 mm, and uint8 probability %), 24 h from the forecast's fetch: 192 bytes, which keeps the snapshot under its 4 KB. The radar's frames are kept outside the datastore (§11.2).
+- **API.** Setters and getters, a freshness check (missing, fresh, stale) and a change mask. The app task owns the datastore (`AGENTS.md` §5.3). Other tasks reach it through events, and console commands through the app's executor, so it needs no mutex.
+- **Snapshot.** The datastore is plain data inside the app's RTC-RAM snapshot (magic, version, CRC32, at most 4 KB in total), sealed before every deep sleep. From M5 the forecast and the air quality are also written to `/fs/state/datastore.bin` after every sync that brought one (magic, version, CRC32), so they survive a power-off and come back at the next cold boot, marked as stale by their age.
+  - As built (M5): the snapshot is 3392 bytes (version 6), with the syncs' state (§9.3) beside the datastore.
+  - As built (M6): 3616 bytes (version 7) with the rain; `/fs/state/datastore.bin` is version 2. An older one is left out at the first M6 boot, and the missing forecast makes the board sync at once (outside sync mode `manual`).
+  - As built (M6b): 3896 bytes (version 8) with the split trees (15 bytes and two more slots a preset) and the mode before `always`.
+  - M6c and M6d: the 24-cell trees (32 more nodes and 18 more slots a preset, about 800 bytes for 16 presets) and the solar state (about 700 bytes) bring it to about 5.4 KB, so the cap rises to 6 KB. RTC slow memory has 8 KB, shared with `power`'s state and, from M7, `ha_mqtt`'s values. The plan reads the link map first; if M7's block wouldn't fit, the quarter-hour readings leave RTC and come back from `solar.bin` on a deep wake.
+  - As built (M6d): 5 680 bytes (version 10) with the solar state, then 5 856 (version 11) with the Developer API's plant (D37); RTC slow memory holds 6 008 of its 8 192 bytes with `power`'s state (the link map). The access token stays out of it, in PSRAM.
+  - As built (M6c): 4 664 bytes (version 9) with the 24-cell trees; the cap is 6 KB, and RTC slow memory holds 4 816 of its 8 192 bytes with `power`'s state (the link map). The first boot of a new image is cold, so the last sync's record waits for the next sync.
+  - As built (M6e): 5 968 bytes (version 12) with the cycle windows.
+  - D42: the presets' titles (a pool of 768 bytes) and the cells' force flags (4 bytes a preset) raise the cap to 7 KB. As built: 6 832 bytes (version 13), and RTC slow memory holds 6 984 of its 8 192 bytes (the link map). M7's plan, as built on its branch, adds about 1.2 KB to the snapshot as well (7 016 bytes without D42), so with both it passes 7 KB: M7's refresh moves the quarter-hour readings out of RTC, as planned above, or the titles' pool into RTC FAST beside M7's values block.
+  - As built (D43): the last good sync's time fits without a byte more: 6 832 bytes (version 14), and RTC slow memory holds 6 984 of its 8 192 bytes (the link map, 2026-10-19).
+  - As built (2026-10-19): the forecast's setup (§11.5) brings it to 6 840 bytes (version 15); RTC slow memory holds 6 992 of its 8 192. M8's refresh (MQTT, D44) numbers its versions after M7's.
+  - M7 (D44), as built: the whole presets block, with the titles, the PC ids and the visuals, moved to RTC FAST memory as a block with its own version and CRC: 4 440 of its 4 608-byte cap (`.rtc.force_fast` 4 444 bytes in the link map); a warm wake needs both blocks valid. The snapshot in RTC slow memory shrank to `.rtc.data` 4 120 bytes (version 17). M8's values block (about 4 KB), which this section kept in RTC FAST memory, no longer fits there; RTC slow memory has about 4 KB free, about M8's estimate, so M8's refresh plans the block there or makes room (§20). A PC session never deep-sleeps, so its values, catalogue and the history stay in RAM only.
+
+## 7. Timekeeping
+
+- The PCF85063 stores UTC. At boot and on every wake the firmware reads the RTC and sets the system time from it. If the oscillator-stop flag is set, the time counts as invalid until SNTP or a manual set.
+  - The running clock keeps its fraction of a second while it agrees with the RTC within a second; setting it to the RTC's whole second at every read lost each read's latency, and a seconds display skipped a second now and then. The RTC's minute alarm fires as the RTC's second begins, so that wake takes the phase.
+  - Seconds keep the panel refresh rate the user picked (D20); a user who sees them stutter raises it.
+- The time zone is a POSIX TZ string in the settings (default `CET-1CEST,M3.5.0,M10.5.0/3`), stored alongside its IANA name for display. The web UI maps IANA names to POSIX strings.
+- SNTP runs during each sync (servers `time.ntp`, default `cz.pool.ntp.org` and `pool.ntp.org`, 5 s timeout) and writes the result to the RTC.
+  - As built (M5): our own client (`sync_ntp`) instead of lwIP's, which would set the clock itself on its own task without taking out the round trip. One request per server; the reply must answer that request (its originate timestamp) and is refused for leap indicator 3, stratum 0 (a kiss-o'-death) or above 15. The sync task only reports the true time at a monotonic instant; the app task times the RTC's error, sets the system clock and sets the RTC to the millisecond. Measured from Brno: round trips of 13–27 ms to `cz.pool.ntp.org`.
+  - **To the millisecond.** The STOP bit holds the RTC's prescaler while the time is written, and is released 0.5078 s before the next whole second: the first tick comes 0.507813–0.507935 s after the release (datasheet §8.2.1.2), so the RTC's seconds begin with the true ones.
+  - Any other clock set goes through `app_clock_moved()`, as the menu's does: it shifts the battery history, restarts the schedule checks and the cycle interval, and renders.
+- **RTC trim** (D25). The crystal runs slow: about 3.4 s a day (40 ppm) at M2, as the board loads it with more than its rated capacitance (`AGENTS.md` gotcha 7).
+  - The Offset register (02h) corrects it. MODE 0 corrects once every two hours, 4.34 ppm a step, from −64 to +63; a positive value slows the clock. The correction comes in 1⁄32 s pulses, so the RTC's error swings by up to the step count × 1⁄32 s within each two hours.
+  - At each SNTP sync the RTC's error is read to the millisecond, by watching for its next second. Divided by the time since the last set to the millisecond, it is the drift; the crystal's own error is the drift plus 4.34 ppm × the offset in effect, and the new offset is that error ÷ 4.34 ppm, rounded.
+  - Only after at least 20 h, so the swing above weighs little: ±0.14 s over a day is ±1.6 ppm, against a step of 4.34 ppm.
+  - A manual set (menu, `rtc set`, phone) is only good to a second, so the next SNTP sync sets the RTC without measuring; so does a sync after the oscillator stopped.
+  - Kept in NVS `sys` (`rtc_trim`: the offset, when the RTC was last set to the millisecond, the last drift), as it belongs to the board: a factory reset keeps it. It is written to the chip at every cold boot, as the chip loses it with its power (D9); a deep-sleep wake keeps the chip's offset and loads the record when it is first used, once NVS is up (M5 review).
+  - As built (M5): every sync sets the RTC to the millisecond and starts a new measurement, so only syncs at least 20 h apart trim it: the default schedule does, `interval`, `always` and several daily times don't (§20).
+  - Cost: nothing while idle (the correction runs inside the RTC); up to 1 s of I²C reads per sync.
+- Manual set: the date/time editor in the menu, or "set time from phone" in the web UI (sends the epoch and time zone).
+- RTC configuration: CLKOUT is disabled (`COF = 111`) to save current. The RTC alarm serves the wake scheduler (§9.2). User alarms are evaluated in firmware.
+- **Without a backup cell (the current state, D9).**
+  - The RTC keeps time as long as the board has power: while running on battery, and through deep and light sleep.
+  - It loses the time when PWR switches the board off, or when the battery is removed or runs flat with no USB attached.
+  - On the next boot the oscillator-stop flag is set. With Wi-Fi configured, the firmware syncs at once to fetch the time, and while that fails, again after 15, 30 and 60 min and then every 60 min (M5 review). Without Wi-Fi it shows "Set time" and waits for a manual set.
+  - Alarms stay suspended until the time is valid.
+- **Fitting a cell later.**
+  - Use a rechargeable ML1220 with leads and a 2-pin 1.0 mm plug for connector J7. Never use a CR1220: the board charges the cell whenever it is powered.
+  - Per the schematic, J7 pin 1 is + (RTC_BAT) and pin 2 is GND. Pre-wired cells don't all share one pinout, so check the polarity with a multimeter before plugging one in.
+  - No firmware change is needed.
+
+## 8. Sensors and battery
+
+**SHTC3**
+
+- Sampled every 5 min (configurable 1–30 min) and on BOOT short. The sensor is sent to sleep after each reading.
+- Low-power measurement mode (about 0.8 ms instead of about 12 ms) is used if M2 shows its accuracy is good enough.
+- Temperature and humidity offsets are settings. The humidity with its offset stays within 0–100 %. The temperature offset defaults to −2.0 °C: the board warms the sensor by about 2 °C at all times (owner, 2026-09-30, D19). The user trims it against a reference thermometer in the menu or the web UI.
+- Readings are taken right after wake, before Wi-Fi or the CPU warm the board.
+
+**Battery gauge**
+
+- **Reading.** ADC1_CH3 one-shot at 12 dB with curve-fitting calibration. Average 16 samples, then multiply by 3 (the divider) and by a per-device factor (default 1.000).
+- **When.** Every 5 min and before each sync, in config mode too (D20): the radio's load pulls VBAT down, which errs on the safe side, as a battery that sags under it would brown out anyway. Not during audio.
+- **Level.** Voltage maps to % through a Li-ion open-circuit-voltage table (NCR18650B-like). The result is smoothed with an EMA and never jumps up unless charging is inferred.
+- **Calibration** (owner request, 2026-09-30; settings `battery.*`, the web UI's Device page).
+  - `curve`: the built-in table, 3.27 V for 0 % to 4.20 V for 100 %. The default.
+  - `manual`: the same table stretched between the owner's empty and full voltages (empty 3.0–4.0 V, full 3.6–4.4 V, at least 0.3 V apart), so the shape stays.
+  - A change applies at once: the level follows the new mapping, and the days-left estimate starts over, as its history is in the old levels.
+  - `learned`: a curve learned from one full discharge (D21), below. The critical thresholds stay in volts whatever the calibration.
+- **Learning the curve** (D21; the Device page, or `battery learn start|stop`).
+  - Started, it waits for a charge: readings while charging, or at the charger's plateau, set the start. The discharge begins when the smoothed voltage falls 10 mV below that plateau.
+  - It records the smoothed voltage once an hour, 256 readings at most; when they run out they thin to every other one, twice as far apart, so any length fits.
+  - It ends at the critical level (3.3 V). This board's load is steady, so the share of the time gone is the share of the charge used: the voltage at every 5 % of the time becomes a 21-point curve, saved as `battery.learned_mv` with `battery.learned_at`, and the level switches to it.
+  - A discharge shorter than 12 h is no curve: something drew far more than this board does. A charge on the way, or a gap of more than 2 h between readings, starts the wait again. A clock set moves the session with it; a clock that was never set (before 2020) records nothing.
+  - The session lives in the sensors' RTC-RAM state through deep sleep, and in `/fs/state/battery_learn.txt` (base64 with a CRC) whenever it gains a point, so a restart keeps it. Its cost: one LittleFS write an hour.
+- **Charging state (inferred; there is no hardware signal).**
+
+  | State | Rule |
+  |---|---|
+  | `charging` | VBAT rose at least 30 mV over the last 30 min while idle |
+  | `full` | VBAT at or above 4.15 V and steady |
+  | `discharging` | Otherwise |
+  | `unknown` | Not enough history yet |
+
+  `usb_serial_jtag_is_connected()` additionally marks external power when a PC is attached.
+- **Thresholds.**
+  - Low, 15 %: a "!" beside the status bar's battery; sync retries are skipped.
+  - Critical, 3.3 V or below while not charging: the critical screen. Only KEY wakes the device. If KEY is still held, usually the press that asked for the check, its release wakes the chip, with a 10-minute timer in case it is stuck. While a PC is attached the board stays awake on the critical screen, as a tethered board does (D14). The screen stays until the battery reads 3.4 V, or until charging is seen, so it doesn't flicker at the threshold.
+
+## 9. Power management and scheduling
+
+### 9.1 Power states
+
+| State | When | Panel | Leaves by |
+|---|---|---|---|
+| ACTIVE | Menu, config mode, alarm ringing, radio | HPM for menu and config mode; otherwise LPM | Timeout (menu 60 s, config 10 min, alarm auto-stop 10 min) or user action |
+| IDLE | Dashboard | LPM | Any event |
+| SYNC | Sync running | LPM, with a sync indicator | Sync done |
+| CRITICAL | Battery at or below 3.3 V | Final screen | KEY press, if the voltage has recovered |
+| NIGHT | A `night` schedule entry (§5.4), or `night <minutes>` on the console for measuring | Sleep-in: the image is blanked (datasheet §7.10: via HPM, then `SLPIN`) | The entry's end time, or KEY/BOOT |
+
+**Night sleep** (D15):
+
+- The chip deep-sleeps whatever the idle strategy, woken only by KEY, BOOT or the end time (the RTC alarm, with the usual backup timer). Nothing is sampled or drawn. It sleeps even while a PC is attached, so the console drops.
+- A button press wakes the panel (with the init sequence again, §4.2) and shows the dashboard.
+  - The press that woke it does nothing else.
+  - The board stays awake until 60 s after the last press, then night sleep resumes.
+  - KEY long still opens the menu. A night that comes due while the menu is open waits until it closes.
+  - A night that starts with a button held checks again every minute, so the button can wake it once released (D16).
+- At the end time the device renders the dashboard and carries on as usual.
+- The owner measures its current against the idle strategy, to see whether it saves enough to keep (M3 acceptance).
+
+### 9.2 Wake scheduler
+
+- `scheduler_next_wake(now, state)` returns the earliest of these:
+  - The next display update: every `display.update_min` minutes (1–15, default 1, aligned to the minute), every second when a preset shows seconds, and the next cycle switch.
+  - The next sensor sample.
+  - The next user alarm, including snoozes.
+  - The next sync.
+  - The next schedule entry (§5.4).
+  - Any running timeout.
+- It is a pure function. Host tests cover DST transitions.
+- **Minute-aligned wakes use the PCF85063 alarm.** When the alarm fires, the chip latches the AF flag and holds INT low until firmware clears it, which triggers the ext1 wake reliably. The alarm is programmed before each idle. Other wakes use the ESP timer. A backup ESP timer set about 5 s after the RTC alarm covers a missed INT.
+- **Held buttons** (D16). If KEY or BOOT is still low when the board goes to sleep, that sleep leaves it out of the wake sources and relies on the RTC alarm and its backup timer. The button becomes a wake source again at the first sleep after it is released, so a stuck button, or the board lying on one, can't keep it awake. A button still held after its gesture has fired doesn't keep the board awake either, and its release gives nothing.
+- **User alarms** are checked at minute ticks in local time.
+  - On spring-forward, a time that doesn't exist fires at the first valid minute after it.
+  - On fall-back, a repeated time fires once.
+
+### 9.3 Sync schedule and sequence
+
+The sync schedule (`settings.sync`) is fully configurable from the menu and the web UI:
+
+| Mode | Behaviour | Parameters |
+|---|---|---|
+| `times` (default) | Sync at fixed local times | 1–8 times of day; default `05:30` |
+| `interval` | Sync every N minutes, aligned to the clock | N = 15–1440 |
+| `always` | Wi-Fi stays up (from M5, D24), and MQTT with it (from M7). Weather and air quality refresh every 60 min, the weather radar every 5 min (M6), the house's energy every 5 min (M6d). State is published on change (at most every 30 s) and every 5 min. Commands and MQTT fields apply at once. Meant for USB power; not auto-detected | — |
+| `manual` | Sync only on demand | — |
+
+- The UI offers shortcuts: *Battery saver* = `times ["05:30"]`, *Balanced* = `interval 60`, *Always connected* = `always`.
+- In every mode a sync can also be started on demand: from the menu, the web UI or `sync now`.
+- **Expected sync interval.** Data freshness and MQTT `expire_after` depend on it:
+
+  | Mode | Expected interval |
+  |---|---|
+  | `times` | Largest gap between consecutive times (24 h for a single time) |
+  | `interval` | N |
+  | `always` | 60 min for weather and air quality; 10 min for MQTT (M7) |
+  | `manual` | None: data never expires and only shows its age |
+
+- **Quiet hours** (D25). `sync.quiet` sets a span of local time, such as 23:00–06:00, in which no sync starts by itself. Off by default.
+  - A scheduled time, an interval slot or a retry that falls inside moves to the span's end, so one sync runs as it ends and the morning starts with fresh data.
+  - In `always` mode Wi-Fi goes off at the span's start, so the board sleeps as usual, and comes back at its end.
+  - A sync on demand still runs, and so does the sync at boot that fetches a lost time, as the hour isn't known then.
+  - The span may cross midnight; a span of no minutes counts as off. The web UI says when a sync time falls inside it.
+- **In config mode** a sync that comes due runs over config mode's station, if it has one, and leaves Wi-Fi on; on the AP alone it waits until config mode ends. Leaving config mode in `always` mode keeps Wi-Fi and the web UI on.
+- **The `always` shortcut** (M6b, D31): BOOT double on the dashboard turns `always` on and off (§5.6); off returns to the mode kept in `sync.mode_before_always`.
+- **Radar refresh and flights** (M6): in `always` mode a radar-only refresh comes every 5 min (RainViewer: 10), without SNTP or the forecast and outside the sync's history and retries; the flight radar polls adsb.fi from its own task while its view is on screen (§11.3).
+  - As built (M6): the refresh comes a minute after each 5-minute step (`SYNC_RADAR_DELAY_S`), at once when `always` takes Wi-Fi, so the past hour arrives in one go (12 frames in 9.2 s on the board); one new frame took 0.6–0.8 s. It shows neither the status bar's sync mark nor the Sync page's "running". A sync asked for during a refresh starts when the refresh ends, 30 s at most, and shows as running from the moment it is asked.
+- **Steps on and off** (M6d, D35): `sync.steps` lists the data steps that run: `weather`, `air`, `radar`, `solar`, `energy`. Time always runs, as the clock and the RTC trim need it, for one UDP exchange; Wi-Fi carries the sync; MQTT (M7) has its own switch, `mqtt.enabled`. A step that is off makes no requests, the radar's and the energy's 5-minute refresh in `always` included, and its data age out as usual. Solar and Energy run only with their source set too (§11.5, §11.6). Default: all on.
+- **The house's energy in `always`** (M6d, D36): a reading every 5 min, in the radar's refresh when one runs then (RainViewer's comes every 10 min) and alone otherwise; it is no sync, so it isn't in the history or the retries.
+- **In `always` mode** the board stays awake, as neither sleep keeps Wi-Fi (D14), and netmgr keeps rejoining a network it lost. The web UI is reachable on the LAN (§10.4). A critical battery turns Wi-Fi off, as it ends config mode (§8).
+- **Results.** Each step's result and the sync's time are kept until the next sync, also through deep sleep. Info ▸ Last sync result shows the time and the first step that failed; the web UI's Sync page shows every step.
+- **Power** (measured at M5, §9.4): a sync wakes the radio for some seconds at about 100 mA; `always` keeps the chip awake with Wi-Fi in modem sleep, tens of mA.
+
+Sequence. The steps are independent and each has a timeout. The radio may be on for at most 45 s in total. The sync runs in its own task; the app task applies its results (§3.2).
+
+1. **Wi-Fi connect.** Saved networks, trying the cached BSSID and channel first. A sync never starts the AP.
+2. **SNTP.** 5 s. Sets the RTC to the millisecond and trims it (§7).
+3. **Weather.** 10 s.
+4. **Air quality** (D25). 10 s.
+5. **Radar** (M6, §11.2). 10 s: one ČHMÚ frame, or RainViewer's index and the view's tiles. As built: ČHMÚ's file is named from this sync's NTP time when its time step worked, as the app sets the clock only after the sync; else from the clock if it is valid; with neither, the step fails with "no time". A step that never ran, as Wi-Fi didn't come up, leaves the radar's status as it was.
+6. **Solar** (M6d, §11.5). 10 s a request: one a roof plane at Open-Meteo or Forecast.Solar, one a site at Solcast unless its budget says keep. Skipped while it is off or has no source.
+7. **Energy** (M6d, §11.6). 10 s a request: one SolaX Cloud reading by its Token ID; by the Developer API (D37) a login when no token is kept, the plant's search when none is kept (two requests at most, then one a device type), then a request a device and one for today's statistics. For the MQTT source (D40) it makes no request: its reading follows the MQTT step's values (§12.11). Skipped while it is off or has no source.
+8. **MQTT** (M7, §12.9). Up to 15 s; skipped while MQTT is off or has no broker host.
+   1. Connect with a persistent session, as `reflbo-XXXX`.
+   2. Subscribe at QoS 1 to `reflbo/<id>/cmd/#` and the mapped topics.
+   3. Collect retained and queued messages until every mapped topic has arrived, or 1 s passes with none.
+   4. Publish state, plus discovery if its hash changed.
+   5. Disconnect, unless sync mode `always` keeps the client connected; a sync then uses the open session.
+9. **Finish.** Wi-Fi off, unless config mode or `always` mode keeps it. Persist the datastore snapshot. Record each step's result (shown in Info and the web UI).
+
+A sync fails when any step fails, except the Energy step (D36) and the MQTT step (D32): their failures show on the Sync page and in Info, MQTT's also as the status bar's mark, but don't fail the sync. A Solar step that a provider answers with 429 keeps the forecast it has and doesn't fail the sync either; the next scheduled sync asks again (D35). On failure, retry after 15, 30 and 60 min, then wait for the next scheduled sync. At low battery there are no retries.
+
+As built (M6d):
+
+- **The PC step** (M7, D44): with PC stats on and an address set, a sync asks the PC app `GET /v1/info` with a 2 s timeout, after the time step (§12a.2). It can be switched off like the data steps. Its result is "ok" (a session starts), "off" (no answer, the PC asleep: not a failure), "wrong token", "protocol N" (an app this firmware doesn't know) or "HWiNFO …" (the app answers but HWiNFO doesn't: a session starts and says why its values are missing). Only "wrong token" and "protocol" fail the step, and like the Energy step (D36) it never fails the sync. As built (`pc_probe_result()`, host-tested): a refusal is also "HTTP 503" or "not reflbo-stats"; PC stats off or no address skip it with "no PC" or "no address" before any request; "off" means both the step switched off and the PC not answering. A `settings.json` from before M7, whose `sync.steps` never names `pc`, runs the step. The PC step's report is applied before the sync lets a new one start, so a session it starts can't run a nested sync over it.
+- **Results.** A step that is off is skipped with the detail "off", one without a source with "no source"; a Solar step that keeps its forecast is "kept", with Solcast's budget ("kept") or the provider's 429 ("HTTP 429") as its detail, and keeps the last call's error for the Solar page. Every step's detail goes to the Sync page (`sync.last.details`). A sync fails when a step other than Energy (or M7's MQTT) fails; the status bar's mark and the retries follow that, and the Sync page says "Synced; the house's energy failed" for an Energy failure alone (`sync.last.ok`). Info ▸ Last sync names the first step that failed, the Energy step too.
+- **The forecast's need follows the Weather step**: with Weather off, a missing forecast starts no sync, as no sync would bring one; the schedule decides.
+- **The energy refresh** in `always` comes a minute after each 5-minute step, as the radar's does, with the radar's refresh when both are due; it needs the Energy step on and a source. The radar's frames and status are applied only when its step ran or frames came, so a refresh for the house alone, or a check, leaves the loop playing.
+- **Check now** (`POST /api/solar/check`) runs the Solar and Energy steps whatever the switches say. It is no sync: no history, no retries, no mark in the status bar; it joins a saved network as a sync does and releases Wi-Fi after it. With both sources off it is refused (409, "nothing to check"); one that can't join shows why as both steps' errors on the Solar page. A new Solcast key or site starts its budget over, so the next step or check asks at once.
+- **Measured on the board** (2026-10-05, the owner's link): a sync with every step took 3 013 ms; the lowest internal heap stayed at 90.5 KB in config mode with a sync; the app task kept at least 3 504 B of its stack free, a Grid preset holding `pv.chart` included. The sync's request with its keys, its report, the Solar step's reply and the 32 KB body are in PSRAM (2.3 KB of internal RAM back).
+
+As built (M5):
+
+- **The 45 s.** The join starts no attempt that would end after 25 s (an attempt takes up to 8 s, two a saved network); each later step gets the time that is left, and one with less than 1 s left fails as "timeout".
+- **Syncs the device needs.** The lost time: at once, and while it fails after 15, 30, 60 and then every 60 min (§7). No forecast yet, as after saving the first network or a first boot: at once, unless a sync failed since. Sync mode `always` with Wi-Fi off, as after a night or quiet hours: at once, unless a sync failed since, so a router that is off follows the retries.
+- **A night** (§9.1) turns `always` mode's Wi-Fi off, like quiet hours, so the board sleeps; Wi-Fi comes back as the night ends.
+- **Leaving `always` mode** from the web UI: Wi-Fi goes off 3 s after the last request, so the page gets its reply; the board stays awake until it is off.
+- **Measured** on 2026-10-01, the board on the home network at −87 to −88 dBm: 3.2–4.4 s for a whole sync (the join about 2 s, SNTP 0.1–0.2 s, the forecast and the air quality about 1 s each); 13–27 s when the server or the weak link was slow; one forecast that timed out at 10 s. The lowest free internal heap with config mode and a sync together: 80 KB.
+
+### 9.4 Power budget and measurement
+
+**Measurement method** (owner, USB power meter):
+
+- Power the board from a USB charger, not a PC. The console then stays off, and the firmware uses its normal sleep policy.
+- Remove the 18650, or make sure it is fully charged, so charging current doesn't distort the readings.
+- For each idle scenario, use the meter's mAh counter over at least 1 h. For events (sync, alarm), record the mAh over N repetitions.
+- Estimate battery-side current as `I_bat ≈ I_5V × 5 V / V_bat`. This ignores converter losses; say so when reporting.
+- Scenarios:
+  - M2: deep sleep vs light sleep while idle.
+  - M5: energy per sync, and sync mode `always`.
+  - Config mode.
+  - M6: a radar frame per sync, and the flight radar in sync mode `always`.
+  - M6d: a sync with the Solar and Energy steps, on battery; sync mode `always` with the energy readings.
+  - M8: radio.
+- Record results in `docs/power.md` with the date, commit, settings and meter model. Many USB meters are inaccurate below 1 mA, so long accumulation windows matter.
+
+**Measured at M2:** a floor of about 60 mW at 5.24 V (11.5 mA) in either sleep, with the chip awake 0.1 % of the time. 0.87 mA of it is the USB side (charger and power latch, read with the board switched off). Most of the rest is the TPS63020 3V3 converter: its PS/SYNC pin is tied high, which forces PWM, and TI gives about 10 % efficiency at 1 mA in that mode. The converter loss stays on battery too, so the stretch goal (D6) needs a board rework: PS/SYNC to GND enables power-save mode (25–50 µA quiescent).
+
+**Rough budget for the stretch goal** (assumes the converter in power-save mode; to be replaced by measurements):
+
+| Consumer | Estimate | Basis |
+|---|---|---|
+| Panel in LPM | ~1 mA | Community driver report |
+| Board quiescent (converters, dividers, codecs in standby, RTC) | 0.1–0.3 mA | Estimate |
+| ESP32-S3 while idle | Deep sleep ~0.01 mA; light sleep ~0.3–1 mA | Estimate |
+| Once-a-minute wakes | ~0.17 mA | 1440 × ~0.2 s × ~50 mA ≈ 4 mAh/day |
+| Daily sync | ~0.01 mA | ~10 s × ~100 mA per day |
+
+Optimisation candidates (evaluated at M2/M5, not features): LPM frame rate, CPU frequency, SHTC3 mode and interval, Wi-Fi fast connect and TX power, fast-boot options, windowed panel pushes (§4.2), and skipping unchanged frames (already designed in).
+
+## 10. Networking and web configurator
+
+### 10.1 Wi-Fi manager
+
+- **Saved networks.** Up to 5 SSID/password pairs in NVS. They are tried in order of last success, 8 s per attempt.
+- **Fast connect.** BSSID and channel are cached in NVS, written only when they change, so frequent syncs don't wear the flash. A try with the cached BSSID that fails is repeated with a scan, as the router may have moved.
+- **Hostname.** mDNS `reflbo-XXXX.local`, advertising `_http._tcp`.
+- **AP.**
+  - SSID `reflbo-XXXX`, WPA2-PSK with a random 10-character password generated at first boot and kept in NVS.
+  - IP 192.168.4.1; at most 2 clients.
+  - Captive DNS answers every name with the AP IP, and OS connectivity-probe URLs redirect to `/`. DHCP offers `http://192.168.4.1/` as the captive portal (RFC 8910).
+  - The station shares the radio, so the AP must follow a network the station joins onto its channel, which drops the AP's clients. The AP therefore starts on the channel of the strongest saved network in sight, else of the strongest network, else 1: trying the likely network doesn't move it.
+- **Testing a network** (web UI). A scan comes first: a network out of reach is reported at once and never takes the AP off its channel. The device then joins by BSSID and channel, beside the AP. On success the network is saved first in the list and the device stays on it; on failure it returns to the network it was on. The test runs in the background, and the page polls for the result, as the phone may drop off the AP for a moment. Leaving the old network for the test never counts as the new one failing, however late its event comes.
+
+- As built (M5): a link that drops rejoins any AP of its network, not only the one it joined, as a mesh node or a new router may carry it. A station without an address counts as not joined: config mode then offers its own network, and a sync joins again. Saving the networks tells the app, which plans the syncs by them.
+
+### 10.2 Config mode
+
+- **Entry.** BOOT long (3 s) on the dashboard, the menu, or first run.
+- **Connecting.** With saved networks, it joins as a station and shows the LAN URL and IP. If that fails or no network is saved, it starts the AP and captive portal. While the owner tests a new network from the web UI it runs AP and STA together. While no web password is set, it runs the AP as well, because only a phone on the AP may choose the password (§10.4).
+- **Exit.** BOOT long, "Done" in the web UI, or 10 min without HTTP requests. Wi-Fi then switches off, unless sync mode `always` keeps it on the network (§9.3).
+  - Only requests for the device's own pages and API count: a joined phone's connectivity probes would otherwise keep config mode on for good.
+  - A critical battery (§8) ends it too; battery samples go on while it runs (D20).
+- **While it runs.** The board stays awake, as neither sleep keeps Wi-Fi, and the panel is in HPM. The screen shows the state, a QR code and the minutes left; KEY switches the QR code (§5.6).
+  - While a phone is logged in to the web UI, the screen shows the dashboard instead, with a globe in the status bar, so settings can be watched as they change (D20). KEY short brings the setup screen back for another phone ("KEY back"), and KEY again returns to the dashboard. Logging out, or the last session ending, brings the setup screen back.
+- **Restarts.** A restart the web UI asks for (a firmware update, Restart) comes back in config mode, so the page finds the device again; so does the image a rollback returns to (§10.5, D19). The flag is in NVS (`sys/resume_cfg`): another image lays out RTC RAM differently.
+
+### 10.3 Web UI and REST API
+
+- **Tech.** Plain HTML/CSS/JS, mobile-first. The files are gzipped and **embedded in the app image**, so OTA updates them and flashing never touches user data.
+- **Pages.** Status, Wi-Fi, Location & time, Device, Presets (editor with live preview), Firmware and Backup in M4; Sync (M5), Radar (M6), Solar (M6d), PC (M7), MQTT/HA (M8), Alarms and Radio (M9) join later.
+  - Status sets the device's clock from the phone at once when the device has lost the time (D9, D19).
+  - Device holds the menu's language, units, sensor offsets, sensor interval, update interval and refresh rate (D19), and the battery calibration (§8).
+  - Presets: the preview names each slot at its corner as the slot fields call it; a new preset joins the cycle; "Undo changes" asks first, as the save bar can float over other buttons (D20).
+  - Sync (M5): the mode with its shortcuts, the times or the interval, the quiet hours (D25), "Sync now" with its progress, the last sync's steps, the next sync, and the RTC's trim and drift (§7). M6d adds a switch for each data step (D35) and the Solar and Energy steps' results.
+  - Solar (M6d, D35, D36): the forecast's source, with only the fields that source needs (up to 2 planes of kWp, tilt and azimuth, the losses and the inverter's limit; Forecast.Solar's optional key; Solcast's key and 1–2 site ids); the house's energy (off, SolaX Cloud's Developer API with its Client ID, Client Secret and region, or SolaX Cloud by its Token ID with the token and registration number; the home battery: auto, on or off) and the plant the Developer API found; Check now, which runs the two steps and shows their results; the last forecast and reading with their times and errors; the credits. Keys, tokens and site ids are write-only: the page shows whether each is set.
+  - Presets (M6c, M6d): the editor allows 24 cells down to 40×20 and shows XS; the field list groups the Solar and Energy fields and marks fields whose sync step is off.
+  - Presets (M6e, D41): the edit card's "In the cycle": all day, or a window whose ends are each a time, sunrise or sunset with an offset of up to ±3 h, and its days. The preset list shows each window beside its cycle box ("sunrise – sunset"). The page checks a window as the device does, so a save it allows is one the device takes.
+  - Presets (D42): each slot and cell has a Title, cut to 23 bytes at a character, its placeholder the field's own label; a split cell with a field has "Always show the title". A title and its force go with their field when a cell splits or joins, when a ratio leaves the field no room, and when the layout changes. Export, in the edit card, downloads the preset as the editor holds it, as `<id>.json`: `{"reflbo": "preset", "version": 1, "preset": {…}}`. Import…, under the list, reads such a file or a bare preset with a `layout`, gives it an id no preset has, puts it in the cycle after the selected preset, and asks the device to render it in its place (`POST /api/preview.bmp`); one the device refuses (an unknown layout or field, a cell too small, as for another board's tree) isn't added, and the page shows the device's reason. Save keeps it. No new API: the device checks an import as it checks a save. Keys the device doesn't know go along and are dropped at the save.
+  - Presets (D43): "Last sync time" under Status bar, beside "A small clock", sets `status_sync`; unticked, the key is left out.
+  - Location & time (M5): a place search through `/api/geocode`, which fills in the name, latitude and longitude.
+  - Radar (M6): a card for each radar: its centre (the location, the place search or coordinates) and zoom or range, the flight radar's filters, a live preview through `/api/preview.bmp`, and the credits (§11.2, §11.3). The flight radar's card says it runs only in sync mode Always on.
+    - As built (M6): the previews draw the saved settings and refresh after each save; the zoom is a list with each step's width in km; the flight radar's card shows the last poll's failure ("Last poll: failed: too big") and adsb.lol's pause; below both cards, the map's credits: Natural Earth, OurAirports and GeoNames (CC BY 4.0, D29).
+  - PC (M7, D44): PC stats on or off; the PC's address and port (default 47123); the app's token, write-only; the interval (250 ms–10 s), with a warning beside it when it is shorter than the panel's frame time (the refresh rate's period, 1 s at 1 Hz), as faster values couldn't show; "When the PC is on": Switch to Always on, and Show preset (none, or a preset; PC by default); the session now (since when, the PC's name, HWiNFO's state, the last message) and the catalogue; Test, which asks `/v1/info` at once. As built, Test is a sync of its own kind (the PC step alone, joining Wi-Fi if need be, with no mark in the status bar), and a PC it finds starts a session. `GET /api/pc` gives the session, the catalogue, the last sync's PC step and the last Test, never the token; `POST /api/pc/test` starts the Test (202, or 409 with the reason).
+  - Presets (M7, D44): a slot or cell with a numeric field has "Show as" (Value, History chart, Bar, Ring, Gauge), with its minimum and maximum (Auto for a chart), the chart's span in seconds and Numbers over the chart; only the visuals that fit are offered. The field list has a PC group from the cached catalogue. As built, `GET /api/fields` says for every field whether a visual takes it (`numeric`) and its own range, and `GET /api/layouts` each visual's least room and the chart's spans; an empty bound is the field's own, a span not on the list stays as the file has it, and a slot whose reading the PC no longer sends keeps it as "pc.<id> (not sent now)".
+  - MQTT (M7, D32): the broker (on or off, host, port, user, a write-only password, discovery and its prefix); the last session and, in sync mode `always`, the connection; Test connection, which needs the board on the owner's network; and the field mappings (up to 32, §12.5), each with its kind (number, text or time), its state labels for a text (D40) and its last value, beside a note that publishers must retain their messages or go through HA statestream (§12.6). The Solar page gains the MQTT energy source (§12.11).
+  - Presets (M6b, D31): a split preset's tree as nested boxes under the live preview. A cell shows its size and class ("200×69 · S"), a field list with only the fields that fit, and Split into rows and Split into columns (at 1/2, the line on, the cell's field in the first part). A split shows its ratio (those that would make a part too small are disabled), Separator and Join, which keeps the first field found inside it. Switching a preset to Split starts from one cell holding its first field.
+    - As built (M6b): the preview numbers the cells as the boxes do; a cell whose field draws smaller than its class says so ("3 · 199×104 · M (Pollen at S)"); a ratio change or a split that leaves a field without room empties its cell, with "No room for …".
+- **API.** JSON. Mutating requests must send `Content-Type: application/json`, those without a body too.
+  - The server reads each body once, before any route and any login: at most 64 KB from M6c, in PSRAM (413; 24 KB before, 16 KB before M6b; each made room for the largest `presets.json` in a backup), nested at most 22 levels from M6c (18 before), a backup bundle's depth: a file's own 20 inside the bundle's two (400). Replies are up to 64 KB too.
+  - A client that sends nothing for 15 s gets 408, and the connection closes, so one phone that vanishes mid-request can't stop the server.
+
+| Method and path | Purpose |
+|---|---|
+| `GET /api/auth` · `POST /api/auth/setup` · `POST /api/auth/login` · `POST /api/auth/logout` · `POST /api/auth/password` | The web password (§10.4): whether one is set and the session is valid; choosing it (over the AP only); logging in and out; changing it. The only routes open without a session |
+| `GET /api/status` | Device, battery, sensors, time, Wi-Fi, firmware; from M5 `sync` (mode, running, the last one's time and steps, the next one and whether it is a retry, when the forecast and the air quality came) and `time.rtc` (the trim's steps, and the last drift once measured); from M6 `radar` (as built: `weather` with `source` "chmu" or "rainviewer", `frames`, `frame_at`, `fetched_at` and `error`; `flights` with `on`, `aircraft`, `updated`, `failed`, `error` and `routes_paused_until`); from M6d `solar` (`source`, `fetched_at`, `day`, `tried_at`, `error`, `kept` with Solcast's `next_at`, and `demo` while the sample day shows) and `energy` (`source`, `reading_at`, `tried_at`, `error`, and the Developer API's `plant` once found, D37), and in `sync.last` every step's detail (`details`) and whether the sync counts as done (`ok`); from M7 `mqtt` (`enabled`, `connected`, and the last session's time, result and detail) |
+| `GET/PATCH /api/settings` | Non-secret settings; secrets are accepted on write and never returned (from M6d `solar.fs_key`, `solar.solcast_key`, `solar.solcast_sites`, `energy.solax_token`, `energy.solax_sn`, and from D37 `energy.solax_client_id` and `energy.solax_client_secret`; GET says which are set, as `solar.keys` and `energy.keys`) |
+| `GET /api/wifi/scan` · `GET/POST/DELETE /api/wifi/networks` | Wi-Fi setup. A POST starts a test and answers 202 at once; GET reports its result with the saved names, never their passwords. `"test": false` saves without trying |
+| `GET /api/layouts` · `GET /api/fields` | Slot definitions; the field catalogue with current values |
+| `GET/PUT /api/mqtt_fields` · `POST /api/mqtt/test` | The MQTT field mappings (§12.5); a test session with the saved settings, refused while the board has only its own network (M7) |
+| `GET/PUT /api/presets` | The preset document (§5.4) |
+| `GET /api/preview.bmp?preset=<id>` · `POST /api/preview.bmp?preset=<id>` | Render a saved preset, or one from a presets document the editor posts (validated like `presets.json`), with live data, using the real renderer; a 1-bit BMP |
+| `GET /api/screenshot.bmp` | The current frame |
+| `POST /api/time` | Set time from the phone (epoch, IANA zone, POSIX TZ) |
+| `POST /api/battery/learn` | `{"start": true}` learns the battery curve from the next full discharge, `{"stop": true}` ends it (D21); `GET /api/status` reports its state and hours |
+| `GET /api/geocode?q=&lang=` | Proxy for the Open-Meteo geocoding search (M5): up to 5 places with name, region, country, latitude, longitude and time zone. Needs a session and the device on a network (503 otherwise); 400 for a name that is empty or doesn't decode, 502 when the search fails; manual latitude and longitude always work |
+| `POST /api/sync` | Sync now (M5): 202 once it starts; 409 while one runs, or with no saved network |
+| `POST /api/solar/check` | Run the Solar and Energy steps now (M6d): 202 once they start; 409 while a sync runs, with no saved network, or with both sources off ("nothing to check"); the results come in `GET /api/status` |
+| `GET/PUT /api/alarms` · `GET/PUT /api/stations` · `POST /api/radio/play` · `POST /api/radio/stop` | Audio (M8) |
+| `POST /api/ota` · `GET /api/ota/status` | Firmware upload, as `application/octet-stream`; the running version, its slot, whether it is still pending, and the slot of an update that was rolled back |
+| `GET /api/backup` · `POST /api/restore` | Settings bundle without secrets. As built (M6d): a bundle's keys are dropped on restore; one whose keys can't be taken out is refused, as a PATCH is; one with a second Forecast.Solar plane and no key set restores with a note in the reply, and the forecast uses the first plane until a key is set |
+| `POST /api/done` · `POST /api/reboot` · `POST /api/factory-reset` | End config mode; system. The reply goes out before the device acts |
+
+### 10.4 Security
+
+- The configurator is reachable only in config mode, or on the LAN in `always` sync mode.
+  - On the LAN (M5) it answers only requests that name the device: its address, `reflbo-XXXX`, `reflbo-XXXX.local`, or `reflbo-XXXX` under a router's domain (`reflbo-XXXX.fritz.box`). Any other name gets 421, so a page from elsewhere can't reach the API by pointing its own domain at the device (DNS rebinding).
+  - A client counts as on the AP when it reached the AP's own address, 192.168.4.1, not when its own address merely looks like the AP's subnet, which a LAN may share.
+- The AP uses WPA2.
+- Secrets are write-only and never logged. SolaX Cloud's Token ID API takes its token in the query (M6d), so `fetch` never logs a URL that has one: a failed request's log names its host alone. The Developer API's Client Secret goes only in the login's form body, and its access token only in a header (D37). A key whose characters its request couldn't carry as they are is refused when saved (M6d).
+- The JSON content-type check blocks cross-site form posts.
+- OTA images are checked for project name, chip and version before the device switches to them.
+- **Web UI password** (D18).
+  - The first visit asks for a new password, and only a client on the device's AP may set it; every visit after needs it.
+  - It is kept as a salted hash in NVS `secrets`, is never returned or logged, and a factory reset erases it. The record is `pbkdf2-sha256$10000$<salt>$<hash>` with a 16-byte random salt; a login takes about 2 s on the chip. 8–64 characters.
+  - A login starts a session that ends with config mode: at most 4, each a random 128-bit token in a cookie that is `HttpOnly` and `SameSite=Strict`. Phones also send cookies other gadgets set for 192.168.4.1, so the server takes 2 KB of request headers.
+  - In sync mode `always` (M5), where the web UI stays up, a session also ends after 1 h without a request.
+  - After 5 wrong passwords, logins wait 60 s.
+  - Menu ▸ Wi-Fi ▸ Reset web password clears it, for when it is forgotten.
+  - The page can also change it, given the current one, and log out (D19).
+
+### 10.5 OTA
+
+- Two app slots with rollback. A new image marks itself valid only after panel init, a first render, and 60 s without a panic. Otherwise the bootloader rolls back at the next reset. An image that fails to start rolls back at once.
+  - Until then the board doesn't deep-sleep: a deep-sleep wake is a reset, which would roll the image back.
+  - The upload streams into the other slot. Its header must name this project and chip, and the image's own checksum and hash must pass.
+  - Measured at M4: 1.3 MB in 11–15 s over the AP. A test build that crashed after 25 s rolled back to the previous image, which returned in config mode (§10.2) and reported it. After the M4 review, a test build that failed to start was back on the previous image within 6 s, in config mode.
+- Sources: upload through the web UI (M4). A file on microSD is an M9 candidate.
+
+## 11. Weather, air quality, astro and solar
+
+**Weather request** (once per sync, about 2.6 KB of JSON for 3 days; checked against the live API on 2026-09-25 and 2026-10-01):
+
+```
+GET https://api.open-meteo.com/v1/forecast?latitude=<lat>&longitude=<lon>
+  &current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m
+  &hourly=temperature_2m,weather_code,precipitation_probability
+  &daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset
+  &timezone=auto&timeformat=unixtime&forecast_days=3
+```
+
+- Always fetch metric units; convert for display according to the units setting.
+- WMO weather codes map to an icon and a language-pack string: clear, mainly clear, partly cloudy, overcast, fog, drizzle, rain, freezing rain, snow, showers, snow showers, thunderstorm.
+- Parser tests on the host use recorded fixtures (`test/host/fixtures/open-meteo/*.json`).
+- A provider interface allows other weather services later.
+
+**Air quality request** (D25, D26; once per sync, about 5 KB of JSON; checked against the live API on 2026-10-01):
+
+```
+GET https://air-quality-api.open-meteo.com/v1/air-quality?latitude=<lat>&longitude=<lon>
+  &hourly=european_aqi,pm2_5,pm10,uv_index,alder_pollen,birch_pollen,grass_pollen,mugwort_pollen,olive_pollen,ragweed_pollen
+  &timezone=auto&timeformat=unixtime&forecast_days=3
+```
+
+- CAMS data: the index and particles worldwide; pollen only in Europe and in its season. Values the API sends as `null` stay missing.
+- A second HTTPS request per sync: one more TLS handshake, under a second of radio (measured at M5).
+- The bands and levels are in §5.1; Open-Meteo's terms are the same as for the forecast (§20).
+
+- **Astro.** Sunrise, sunset and day length use the NOAA solar algorithm at the configured location. They work offline. Host tests compare them with the sunrise/sunset values in the Open-Meteo fixtures (±2 min). On a polar day or night the field shows that instead of times.
+
+### 11.1 Map (M6)
+
+- **Projection.** Web Mercator (EPSG:3857), the projection of both radar sources. A view is a centre and a zoom: at zoom z one ground pixel is 156 543 m × cos(latitude) ÷ 2^z, about 1.1 km at Brno at zoom 6.5. Each radar has its own view (D28): `radar.weather` and `radar.flights` (§14.3), whose centres default to `location.*`.
+- **Data, built in** (`map`, host-tested). `tools/gen_map.py` packs them at build time, as `gen_fonts.sh` and `gen_icons.sh` do (§4.4, §4.5):
+  - country borders from Natural Earth's 1:10 m boundary lines, simplified to about 200 m, delta-coded in a coarse grid of cells;
+  - towns from Natural Earth's populated places, with name and population rank; inside ČHMÚ's radar area (§11.2) also GeoNames' places of 1000 inhabitants or more, less those Natural Earth has and the districts of larger towns (D29);
+  - large and medium airports from OurAirports, with their IATA and ICAO codes.
+
+  Natural Earth and OurAirports are public domain. GeoNames is CC BY 4.0: it is credited in `THIRD_PARTY.md`, the README and the Radar page (D29). The whole world takes about 0.5–1 MB of the app image (859 KB as built), and any centre works offline.
+- As built (M6):
+  - **The pack** (`assets/map/map.bin`: 2324 line pieces, 11 426 towns, 5281 airports; the sources and their SHA-256 in `assets/map/sources.txt`). Lines are pieces of at most 128 points, each with its bounding box, delta-coded from an absolute first point. The coastline from Natural Earth's 1:50 m set joins the borders, as a view near a sea otherwise ends in blank paper. OurAirports' file of 2026-10-01 and GeoNames' of 2026-10-02 are pinned, as both change daily. The reader checks the header and the sections' bounds; the CRC-32 is the tests' (`map_data_verify()`), as the app image's own SHA-256 covers the blob on the device.
+  - **D29's towns.** GeoNames' `cities1000` inside ČHMÚ's data area, without sections of towns (PPLX and the like). A Natural Earth town's own entry is the nearest place within 10 km that goes by its name, so Natural Earth keeps its local names ("Praha", not "Prague"). A district is a place inside a larger one's administrative unit (the same country and the admin codes it has) within 0.0142 km × √(its inhabitants): 9 km of Brno, 15 km of Praha; neighbours stay, Sosnowiec beside Katowice, Zgorzelec across from Görlitz. Natural Earth's towns come first in the pack, so they lead the wide views and GeoNames fills in the closer ones. Four of Natural Earth's spellings are corrected: Plzeň, Ústí nad Labem, Wrocław, München.
+- **Drawing.** Borders as 1 px lines, clipped to the view; towns as dots with labels, the larger first and thinned by zoom; on the flight radar, airports as a short runway bar with the IATA code; home as ⊙. Labels keep clear of each other and of home, a label with no room is left out, and every label has a 1 px white halo, so it stays legible over rain.
+  - As built (M6): labels sit on white boxes a pixel larger than their text, as a glyph halo read poorly over dithered rain; lines get a 4-neighbour white halo where there is rain; lines and places project in single precision (the S3's FPU has no doubles), so where float and double round differently a line moves by a pixel. The flight radar reserves a box for each aircraft first (192 boxes at most).
+
+### 11.2 Weather radar (M6)
+
+- **Source** (D23): ČHMÚ when the view's centre lies inside its data area, otherwise RainViewer. Parts of a view outside ČHMÚ's coverage show its edge, not rain.
+  - **ČHMÚ** (CC BY 4.0, credited "Data: ČHMÚ, opendata.chmi.cz, CC BY 4.0"; checked 2026-10-01): `https://opendata.chmi.cz/meteorology/weather/radar/composite/maxz/png/pacz2gmaps3.z_max3d.YYYYMMDD.hhmm.0.png` (UTC), a 680×460 8-bit palette PNG every 5 min, about 3 KB on a dry day and tens of KB in rain, kept for a week. The image spans 11.267–20.770 E and 48.047–52.167 N; its data end at 19.624 E and 51.458 N, and the title and colour scale beyond are masked (ČHMÚ's documentation as MeteoPlaneRadar, MIT, reads it; checked on the board against ČHMÚ's own viewer). The file name comes from the clock, so the sync's time step comes first: the newest 5-min step at least 5 min old, then up to two steps back on a 404 (as built: from the sync's own NTP time, §9.3). ČHMÚ answers every request with `Connection: close`, so each file has its own TLS connection. The directory's index is 327 KB, too much to read.
+  - **RainViewer** (free for personal and educational use, with a link to rainviewer.com; checked 2026-10-01): `https://api.rainviewer.com/public/weather-maps.json` (about 2 KB) names the last 2 h of frames at 10-min steps; a frame's tiles are `{host}{path}/256/{z}/{x}/{y}/2/1_1.png` (as built: `2/0_0.png`, without smoothing or snow, as smoothing blends colours that no level of the table names), RGBA, at zoom 7 at most (a higher zoom answers a placeholder), so a closer view enlarges them. 100 requests a minute per IP. A view's tiles come over one kept-alive connection.
+- **Decoding** (`png`, host-tested): a reader for 8-bit palette and RGBA PNGs, non-interlaced, row by row, inflating with the ROM's `tinfl` on the device (ESP32-S3 ROM, `esp_rom/include/miniz.h`) and with miniz's `tinfl.c` (MIT) on the host (as built: the system zlib, which ships with macOS and every Linux, so nothing is vendored). It refuses a truncated file, a bad CRC, interlacing, other bit depths, more than 1024×1024 pixels, and more than 256 KB.
+- **Levels.** Each pixel becomes none, light (from about 20 dBZ), moderate (35) or heavy (45): ČHMÚ's palette through its colour scale (`scl/scl-dbz-mmh.png`), RainViewer's colours through its scheme. The levels are kept as a 2-bit grid in the source's own pixels (78 KB for ČHMÚ) in PSRAM, and every render reprojects the grid into its view: the frame is decoded once and drawn many times.
+  - As built (M6): ČHMÚ's frames keep only its data area (598 × 378 pixels, 56 KB); RainViewer's the view's tiles, 3 × 3 at most (147 KB). A render maps each screen column and row to the grid once, through two tables, so a pixel costs two lookups and no floating point.
+- **Dithering.** Light is a sparse dot pattern, moderate a checkerboard, heavy solid; the map and its labels go on top.
+- **Frames.** The latest frame's PNG is kept in `/fs/state/radar.png`, so a power-off or a deep sleep keeps it. In sync mode `always` the last 12 frames (1 h, D28) stay in PSRAM for the loop; when `always` begins, the past hour comes in one go, 12 small files from ČHMÚ (RainViewer: 6).
+  - As built (M6): the newest frame is kept as `/fs/state/radar.bin`: its levels behind a 48-byte header with a CRC-32 (56 KB for ČHMÚ, up to 147 KB for RainViewer), as RainViewer's frame is several tiles and a deep-sleep wake reads it back without decoding. It is written at once outside `always`, at most every 30 min in it, and read back the first time a preset draws the weather radar after a cold boot or a deep sleep (346 ms awake on such a wake, measured). A frame stays while it covers the view, the Radar layout's 400 × 279 (`radar_frame_covers()`): ČHMÚ's any view centred in its data, RainViewer's while it holds the tiles the view needs at its zoom.
+- **When frames come** (§9.3): a radar step in each sync, after air quality; in sync mode `always`, a radar-only refresh every 5 min (RainViewer: 10). It never turns Wi-Fi on by itself (D23).
+- **Where it shows** (D23): the Radar layout and the `rain.map` slot widget (§5.1, §5.2).
+  - The layout: the map with the rain; the frame's time and source at the bottom left, inverted with its age once older than 30 min ("21:05 · 3 h ago"); a legend of the three levels at the bottom right; "No radar frame yet" before the first.
+  - The widget, in M and L slots: the same, cropped to the slot around the weather view's centre at its zoom, with the frame's time.
+  - As built (M6): a refusal or any other missing frame shows "No radar frame yet" (not "No radar here"), the reason in `radar status` and on the Radar page.
+- **The loop** (D27, D28): BOOT short on the Radar layout switches the panel to HPM and plays the kept frames, oldest first, at about 3 a second with each frame's time and a row of progress dots, then stops on the newest and returns to LPM. Missing frames are skipped; KEY short still switches the preset and ends it. Outside sync mode `always` there is one frame, and BOOT short starts a sync on demand instead, for a fresh frame (D30; it refreshed the sensors before). As built (M6): a frame every 333 ms; the panel reads HPM while it plays and LPM after.
+
+### 11.3 Flight radar (M6)
+
+- **Source** (D22): adsb.fi's open data, `https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{nm}`, readsb JSON (`ac[]`: `hex`, `flight`, `lat`, `lon`, `alt_baro`, `gs`, `track`, `t`); for non-commercial use, at most 1 request a second, credited with a link to adsb.fi (checked 2026-10-01).
+- **When it runs** (D22): only in sync mode `always`, while Wi-Fi is up and the Flights view is on screen, and not in quiet hours or a night. Its own task polls every 5 s up to 25 km of range, 10 s up to 50 km and 15 s beyond, doubling the interval after a failure up to 60 s, over one kept-alive connection with a `reflbo/<version>` User-Agent.
+- **Bounded** (`adsb`, host-tested): a reply over 128 KB is refused, and its depth is checked first (`AGENTS.md` gotcha 30). At most `radar.flights.max` aircraft are kept (100 at most), the nearest first, from `min_alt_ft` up, and without those on the ground unless `ground` is set.
+- **Routes** (D27): when the nearest aircraft changes, one lookup at adsb.lol, `https://api.adsb.lol/api/0/route/{callsign}/{lat}/{lon}` (origin and destination with their codes and names; checked 2026-10-01), kept for 24 h in a 64-entry cache. A failed lookup counts as unknown for 1 h; a 403 or 429 backs off. adsb.lol is credited beside adsb.fi.
+- **The view** (§5.2): the map at the flight radar's centre and range, with rings at half the range and at the range; aircraft as 12 px arrows in 16 headings, labelled with the callsign and the flight level ("FL338", or feet below 10 000 ft), the nearest first and none overlapping; a panel for the nearest aircraft with its callsign, type, altitude, speed in km/h, distance and direction, its route once known, and the adsb.fi credit. "No aircraft within 50 km" when there are none, "No aircraft data (HH:MM)" after a failure.
+- As built (M6):
+  - The query reaches the map's farthest corner, in NM, and the parser keeps the aircraft that fall on the map. Before the first poll after the view comes up, the panel says "No aircraft data". The polling stops while the menu is open.
+  - A failed poll's reason shows in `radar status`, in `/api/status` (`error`) and on the Radar page; adsb.lol's pause after a 403 or 429 shows as `routes_paused_until`.
+  - On the board (2026-10-02, −85 dBm): around Brno at 50 km 8–19 aircraft, the polls on one kept TLS session; the first poll took 25–50 s on the weak link; Frankfurt at 100 km fit (100 aircraft kept), London at 100 km passed 128 KB ("too big"); the lowest internal heap with a sync and the polling together was 74 KB.
+
+### 11.4 Rain in the next 2 hours (M6, D27)
+
+- The forecast request also asks for `&minutely_15=precipitation,precipitation_probability&forecast_minutely_15=96`: 24 h of 15-minute values (checked 2026-10-01), as a daily sync's next 2 h are long past by evening.
+- `wx.rain2h` (§5.1) shows the 2 h from now as 8 bars, and a line: "Dry for 2 h", "Rain from 21:45" or "Rain now · 1.2 mm/h". It is missing past the 24 h stored.
+- As built (M6): each `minutely_15` amount is the sum of the 15 minutes before its time (Open-Meteo's docs), so the quarter hour now is the entry that ends at the next quarter-hour mark, and "Rain from 21:45" names where the first wet quarter hour starts.
+
+### 11.5 PV forecast (M6d, D35)
+
+- **Settings** (`solar` in `settings.json`, §14.3): `source` is `off` (the default), `open-meteo`, `forecast-solar` or `solcast`; `planes` holds 1–2 roof planes of `kwp` (0.1–100), `tilt` (0–90°) and `azimuth` (−180 to 180°: 0 south, −90 east, 90 west, the convention of Open-Meteo and Forecast.Solar); `losses_pct` (0–50, default 14, as PVGIS) and `inverter_kw` (0 for none) apply to our model. The location is the device's (`location.*`). Keys go to NVS `secrets` (§14.2): Forecast.Solar's optional key, Solcast's key and its 1–2 site ids.
+- **Open-Meteo**, the default (documentation checked 2026-10-04; the plan records a live reply as a fixture), a request a plane:
+
+  ```
+  GET https://api.open-meteo.com/v1/forecast?latitude=<lat>&longitude=<lon>
+    &minutely_15=global_tilted_irradiance,temperature_2m&tilt=<tilt>&azimuth=<azimuth>
+    &timezone=auto&timeformat=unixtime&forecast_days=3
+  ```
+
+  `global_tilted_irradiance` is the mean of the 15 minutes before its time in W/m² (native 15-minute data in Central Europe and North America, interpolated from hourly elsewhere). Our model, a quarter hour and a plane: P = kWp × GTI ÷ 1000 × (1 − 0.004 × (T_cell − 25 °C)) × (1 − losses), with T_cell = T_air + 0.031 × GTI; the planes add up, capped at `inverter_kw`. Open-Meteo's terms and credit are the weather's (§20).
+- **Forecast.Solar**: `GET https://api.forecast.solar/estimate/<lat>/<lon>/<tilt>/<azimuth>/<kwp>?time=utc`, with a key `https://api.forecast.solar/<key>/estimate/…` (checked 2026-10-04). Without a key: 1 plane, hourly values, today and tomorrow, 12 calls an hour per IP; with one, depending on the account, 2 planes, 15- or 30-minute values and more days. A second plane without a key is refused when saved. As built (checked live on 2026-10-05): `watts` is the power **at** each time, not the mean of the period before it (its `watt_hours_period` is the trapezoid between two points, and integrating the line gives its own day totals within 3 Wh), so the step integrates the line between the points; its zero points sit at sunrise and sunset. The step asks for `/estimate/watts/`, which carries only the points (1.2 KB against 3.1 KB for the whole estimate); with a key both planes go in one request (`…/<tilt>/<azimuth>/<kwp>/<tilt2>/<azimuth2>/<kwp2>`), without one the first alone. CC BY-SA 4.0: credited on the Solar page and in the guide.
+- **Solcast** (hobbyist accounts; checked 2026-10-04): `GET https://api.solcast.com.au/rooftop_sites/<site>/forecasts?format=json&hours=72` with `Authorization: Bearer <key>`: `pv_estimate` in kW for 30-minute periods ending at `period_end` (UTC), each filling its two quarter hours; up to 2 sites, added up. Tilt, azimuth and kWp are set on solcast.com, not here. 10 calls a UTC day: the step asks at most every 3 h with one site and every 6 h with two, failed calls included; a sync in between keeps the forecast it has and the step counts as done (the Sync page says "kept"), so waiting for the budget never fails a sync. Personal use only, as Solcast's terms say; the guide notes it.
+- **What is kept**: today and tomorrow by local quarter hour (W, 2 × 96 values), each day's total for three days (the third missing where the source has no third day), the fetch time and the local day of the first. Times map to local quarter hours by the device's time zone; a DST change falls in the night, when there is no output. At local midnight tomorrow becomes today, so a morning sync's forecast lasts the day and the night after. Kept in the snapshot (§6) and in `/fs/state/solar.bin`, written after each Solar step.
+- **Failures** show as the step's detail ("HTTP 401", "no data"). A 429 keeps the forecast and doesn't fail the sync (§9.3).
+- **As built (M6d)**: power is kept in tens of W (a `uint16_t`, 655 kW at most). Today's and tomorrow's totals are their quarter hours' sums, so `pv.today`, `pv.left` and the chart agree; the day after's comes from the reply. A reply's gaps keep the last forecast's quarter hours of the same local day (Solcast sends nothing before now), and from 2026-10-19 only a forecast with the same setup: a CRC-32 of the place, the source, the planes, the losses and the inverter's limit, never a key. Before that a move kept the old place's quarter hours wherever the new reply had none: after M6e's board checks moved the location to Sydney and back, Brno's Forecast.Solar reply (07:20–17:56) kept Sydney's day in the night before it. `/fs/state/solar.bin` is version 3 with it; an older file is left out at the first boot, the forecast and the house's reading coming back at the next sync. A provider's numbers are cut to reason, not refused: a period or line to the three days and a day to spare, power to 0–655.35 kW, an Open-Meteo time outside 1970–2286 left out. A refusal's detail is the provider's own words, cut between characters to the sync's 24 bytes. Solcast is asked when it never was, when the clock went back, or 3 h (one site) or 6 h (two) after its last call, failed calls included; there is no daily count (§20). Measured for Brno on 2026-10-05, a 35° south plane of 5 kWp: 16.6 kWh through our model with 14 % losses, against Forecast.Solar's 15.0 kWh for the same roof.
+- **The Solar layout** (§5.2): the forecast icon and "Forecast today" with the day's total; now, the peak with its time and what is still to come; the day's chart from the first hour with output to the last, with kW and every third hour; the next two days' totals with their weather icons, which come from the weather forecast (§11). "No solar forecast yet" before the first. The spike's renders, approved on 2026-10-04 (D33), become its goldens.
+
+### 11.6 The house's energy (M6d, D36)
+
+- **Settings** (`energy`, §14.3): `source` is `off` (the default), `solax-dev` (the Developer API, D37), `solax` (the Token ID) or `mqtt` (mapped MQTT values, D40, §12.11); `region` is `eu` (the default), `cn` or `in`, the Developer API's; `battery` is `auto` (the default), `on` or `off`. The SolaX token and the dongle's registration number, or the Developer API's Client ID and Client Secret, go to NVS `secrets` (§14.2).
+- **SolaX Cloud's Developer API** (D37; as SolaX's documentation and Home Assistant's SolaX Cloud integration use it, checked 2026-10-05): at `https://openapi-<region>.solaxcloud.com`, at most 100 calls a minute.
+  - *Login*: `POST /openapi/auth/oauth/token` with the form `client_id`, `client_secret`, `grant_type=client_credentials`; the reply's `code` 0 brings `result.access_token` and `result.expires_in` (s, 3600 without). The token goes with every other request as `Authorization: Bearer <token>`, is kept in RAM only (a deep-sleep wake or a reboot logs in again) and renewed 10 min before it runs out. It is never logged or stored, nor its reply.
+  - *The plant*, found once and kept with the solar state and in `solar.bin`, again when SolaX refuses it or the Client ID or Secret changes: `GET /openapi/v2/plant/page_plant_info?businessType=1&pageNo=1` (residential), else `businessType=4` (commercial); the first record's `plantId`. Then `GET /openapi/v2/device/page_device_info?businessType=&deviceType=&pageNo=1&plantId=` for deviceType 1 (the inverter), 2 (the battery) and 3 (the meter): the first record's `deviceSn`. A plant without an inverter is "no inverter".
+  - *A reading*: `GET /openapi/v2/device/realtime_data?snList=<sn>&deviceType=<type>&businessType=<type>` for each device found; the data replies' `code` is 10000, another code makes `message` the step's detail. Solar output, as the SolaX app shows it (D39), = what the panels give through the inverter: its output (below) and a battery's charge, at most the panels' DC power (the inverter's `MPPTTotalInputPower`, else its `mpptMap`'s `…Power` values added up), and 0 while a battery discharges through it at night; without the inverter's output, the panels' DC power; grid = −(the meter's `totalActivePower`, else the inverter's `gridPower`), SolaX's being positive while exporting; battery = `chargeDischargePower` (positive while charging) and `batterySOC`, the battery's where it has them, else the hybrid inverter's; home = the inverter's output less the export, else solar − battery − export, where the output is its phases `acPower1`–`acPower3` added up (the owner's X3-Hybrid sends `totalActivePower` 0 beside them, 2026-10-06), else `totalActivePower`, and the house also draws its backup port's `EPSL1ActivePower`–`EPSL3ActivePower`, as the Token ID's `peps1`–`peps3` count; produced today = `dailyYield`; the reading's time is the newest `dataTime`: ISO 8601 with its zone (with or without the offset's colon), the plant's local time with a space or slashes, or seconds or ms since 1970. A reply whose `dataTime` can't be read is refused ("unreadable dataTime"), as a reading of unknown age would look fresh for ever; only replies without one leave the sync's clock to date the reading, and the log says so (D37 review). A commercial plant reports kW. Only the inverter's failure fails the step; without the battery's or the meter's values the reading has what came. The signs follow SolaX's documentation and are checked on the owner's plant with `energy raw`.
+  - *Today's totals*: `POST /openapi/v2/plant/energy/get_stat_data` with `{"plantId", "dateType": 2, "date": "YYYY-MM", "businessType"}`; today's row of `plantEnergyStatDataList` (by its date, else by its place) gives `pvGeneration`, `exportEnergy` and `importEnergy` (kWh) as the day's produced, to and from the grid. Without the row they are missing for the day; the reading stands. Such a reading is never a midnight reading (below).
+  - *Refusals*: when SolaX answers a kept token or a kept plant with a refusal (HTTP 401 or 403, or a reply whose `code` isn't the OK one; never a timeout, the radio's budget, a rate limit, a server's error, or a reply that answered without the values: D37 review), the step logs in again if its token was kept, finds the plant again and reads once more.
+- **SolaX Cloud by its Token ID** (the user monitoring API V4.0 and the endpoint evcc uses; checked 2026-10-04; for accounts that have a Token ID, as solaxcloud.com issues no new ones): `GET https://www.solaxcloud.com/proxyApp/proxy/api/getRealtimeInfo.do?tokenId=<token>&sn=<registration no.>`, at most 10 a minute and 10 000 a day; the inverter uploads about every 5 min. A reply is `{"success": …, "exception": …, "result": {…}}`; `success: false` makes `exception` the step's detail.
+- **Mapping** (W unless named): solar output = `powerdc1` to `powerdc4` added up where given, else `acpower`; grid = −`feedinpower` (SolaX's feed-in is positive while exporting, ours positive while importing); home = `acpower` − `feedinpower`, plus `peps1`–`peps3` where given; battery = `batPower` (positive while charging) and `soc` (%); produced today = `yieldtoday` (kWh); `feedinenergy` and `consumeenergy` are the totals to and from the grid since installation (kWh); the reading's time is `uploadTime`, in local time.
+- **Today's totals** by the Token ID: to and from the grid are the totals less their values at local midnight, taken from the reading closest to it within an hour either side; without one they are missing for the day. In sync mode `always` that reading is always there. Own use is (produced − to the grid) ÷ produced.
+- **The battery** shows with `on`; with `auto` when the inverter is one of SolaX's hybrid types (X-Hybrid, X1-Hybrid, X3-Hybrid, A1-Hybrid, J1-ESS) or a reading has a charge above 0 %.
+- **When readings come**: the Energy step in each sync; in sync mode `always`, every 5 min (§9.3). A reading is fresh for 15 min. The readings' solar output averaged by local quarter hour (96 values) draws the chart's past bars; a quarter hour without a reading shows the forecast. The readings and the midnight totals go to `/fs/state/solar.bin` at most every 30 min, so a reboot keeps the day.
+- **As built (M6d)**: the reading taken as midnight's is the nearest within an hour either side; one before midnight waits for the day to turn; a day without one has no totals to or from the grid, and own use needs both. An upload counts once. SolaX's output is never below 0. An upload time past what a reading keeps is refused, and the step refuses a reading more than a day ahead of the clock ("upload time ahead"), as it would hold the day's totals until its own day; a reading ahead is fresh only within 15 min. A Developer API reading carries today's totals (`today`), which never become a midnight base, so a switch to the Token ID source the same day starts its count clean. The owner's account had no Token ID, so its reading comes by the Developer API (D37), which worked with the owner's keys on 2026-10-05; the detailed comparison with the SolaX app is part of the acceptance (§18).
+- **Failures** (a bad token, an unknown registration number, a refused login, no plant, an HTTP error) show on the Sync page, in Info and on the Solar page; they don't fail the sync or start a retry (D36).
+- **The Energy layout** (§5.2): "SolaX" and the reading's time at the top left; the panels at the top with their output; flow lines to a junction, the grid on the left ("Export" or "Import"), the house on the right, the battery below when it shows, its charge, state and power beside it; arrows where at least 20 W flow, dotted lines where less does; today's totals at the bottom (produced, to the grid, from the grid, own use), two by two, or in a row with a battery. "No data from the inverter yet" before the first reading.
+- **Local data**: from M7 an MQTT source fills the same values from mapped topics (§12.11, D40), for instance from Home Assistant's local SolaX integration or an inverter's own MQTT. The dongle's own local API is not used, as it depends on the dongle's firmware.
+
+## 12. MQTT and Home Assistant
+
+M7 (D5, D7, D32): the board publishes its state to Home Assistant through MQTT discovery, takes commands and messages from it, and shows values from HA and other local devices as fields. The owner has no broker or HA yet (2026-10-03, still none on 2026-10-06): M7 is built and host-tested, and its checks with HA wait for the owner's setup (§12.10). Its plan was refreshed on 2026-10-06 against M6c and M6d, with the additions of D40.
+
+### 12.1 Settings
+
+- `mqtt` in `settings.json` (§14.3): on or off (off by default), the broker's host and port (default 1883), the username, discovery on or off and its prefix (default `homeassistant`).
+- The password is a secret: `PATCH /api/settings` accepts it and writes it to NVS `secrets` (§14.2); no API returns it.
+- Client id and device id: `reflbo-XXXX`. Base topic `reflbo/<device id>`.
+- TLS and HA's REST API as a source stay deferred (§19).
+
+### 12.2 Topics
+
+| Topic | Direction | QoS / retain | Payload |
+|---|---|---|---|
+| `reflbo/<id>/state` | out | 1, retained | State JSON |
+| `homeassistant/<component>/<id>/<object>/config` | out | 1, retained | Discovery config |
+| `reflbo/<id>/cmd/<name>` | in | 1, not retained, persistent session | Command value (§12.4) |
+| `reflbo/<id>/action` | out | 0, not retained | A key press: `key_short` … `boot_long` (§12.8) |
+| Mapped field topics (§12.5) | in | subscribed at QoS 1 | Value or JSON |
+
+State example:
+
+```json
+{"temp":21.4,"hum":45.2,"bat_pct":78,"bat_v":3.92,"charging":"discharging","rssi":-61,
+ "preset":"home","last_sync":"2026-09-25T03:30:12Z","fw":"0.1.0","uptime_s":86400}
+```
+
+The sync's status (D41, built with M7) joins the state: `"sync_problem":true,"sync_error":"weather: HTTP 503; energy: no session","last_ok_sync":"2026-09-24T03:30:09Z","next_sync":"2026-09-25T15:30:00Z"`.
+- They describe the sync whose session carries them, its steps before the MQTT step. `sync_problem` is true when any of them failed, the ones that don't fail a sync (the house's energy, D36) included. `sync_error` names the failed steps and why, or says `"none"`.
+- `last_ok_sync` is the last sync that didn't fail (D32, D36). `next_sync` is the next planned one, `null` in manual mode.
+- In sync mode `always` they go out with the state when they change.
+- A sync that never reaches the broker (no Wi-Fi, the broker down) can't report itself. HA sees it as Last successful sync ageing at the next session, or as the entities going unavailable after `expire_after` (§12.3).
+
+### 12.3 Discovery entities
+
+| Entity | Details |
+|---|---|
+| Sensors | Temperature (°C), humidity (%), battery (%), charging state (enum); as diagnostics: battery voltage (V), Wi-Fi RSSI (dBm), last sync (timestamp); from D41, Sync error (text), Last successful sync and Next sync (timestamps) |
+| `binary_sensor` | Sync problem (D41), `device_class: problem`: on when any step of the last sync failed (§12.2) |
+| `select` | Active preset. Options are the preset names; `command_topic` is `.../cmd/preset`; `qos: 1` |
+| `button` | "Sync now" (`.../cmd/sync`) and "Next preset" (`.../cmd/next`), payload `PRESS`, `qos: 1` (D32) |
+| `notify` | "Message" (`.../cmd/message`, §12.7, D32) |
+| Device triggers | Six (§12.8, D32): `button_short_press`, `button_double_press` and `button_long_press`, each for `button_1` (KEY) and `button_2` (BOOT), on `.../action` with the payloads `key_short`, `key_double`, `key_long`, `boot_short`, `boot_double`, `boot_long` |
+
+- All entities share one `device` block: identifiers `reflbo-XXXX`, model "ESP32-S3-RLCD-4.2", manufacturer "Waveshare", software version.
+- **Sleepy-device settings.** Sensors set `expire_after` to twice the expected sync interval (§9.3) plus 10 min, and omit it in `manual` mode. There is no availability topic, so entities keep their last value while the device sleeps.
+- Discovery is published at the first session, and again whenever its hash changes: the preset names, the expected sync interval, the discovery prefix or the firmware. The hash is kept in NVS (`sys/mqtt_disc`). Turning discovery off stops publishing it; the entities stay in HA until they are deleted there.
+
+### 12.4 Commands
+
+- `cmd/preset` activates a preset by id or name, saved like a manual switch.
+- `cmd/next` activates the next preset in cycle order, saved like KEY short's (D32); like KEY short, it ignores the cycle windows (D41).
+- `cmd/sync` starts a sync at once in sync mode `always`. One that queued while the board slept arrives during a sync, which is already running, so it is ignored (D32).
+- `cmd/message` sets the message (§12.7).
+- Commands are applied on the app task in the order they arrive, and the new state is published in the same session. A command with an unknown preset or payload is logged and ignored.
+- Commands depend on QoS 1 and a persistent session (`disable_clean_session`). The broker then queues them while the device sleeps. Mosquitto keeps sessions by default. Discovery sets `qos: 1` so HA publishes commands at QoS 1.
+
+### 12.5 MQTT fields (HA entities and other devices, D7)
+
+Mappings live in `/cfg/mqtt_fields.json` (edited on the MQTT page, §10.3), up to 32:
+
+```json
+{
+  "schema": 1,
+  "fields": [
+    { "key": "outdoor_temp", "label": "Outside", "kind": "number", "unit": "°C", "precision": 1,
+      "topic": "ha/statestream/sensor/outdoor_temperature/state", "json_path": null, "ttl_s": 172800 },
+    { "key": "co2", "label": "CO2", "kind": "number", "unit": "ppm", "precision": 0,
+      "topic": "zigbee2mqtt/living_room", "json_path": "co2" },
+    { "key": "front_door", "label": "Door", "kind": "text",
+      "topic": "ha/statestream/binary_sensor/front_door/state", "states": { "on": "Open", "off": "Closed" } },
+    { "key": "next_alarm", "label": "Alarm", "kind": "time",
+      "topic": "ha/statestream/sensor/phone_next_alarm/state" }
+  ]
+}
+```
+
+- **Field id.** `mqtt.<key>`. The payload is parsed by the mapping's kind: a number, a text or a time (D40). `json_path` takes dotted keys (`a.b.c`); arrays are not supported in v1. HA's `unknown` and `unavailable`, and an empty payload, are no value for every kind: the slot draws as missing (D40).
+- **State labels** (text, D40). `states` turns up to 8 exact states into words of up to 23 bytes (`"on": "Open"`, `"not_home": "Away"`); a state without a label shows as it came. The MQTT page offers the common pairs of a binary sensor and a person.
+- **Time** (D40). The value is an ISO 8601 time with its zone (HA's timestamp sensors), or seconds or ms since 1970. It shows as the clock shows times: "14:30" today, the weekday and time within six days ("Wed 07:00"), the date beyond ("12 Oct"); a past time shows the same way. One that doesn't read is no value.
+- **Keys.** 1–23 bytes of `a`–`z`, `0`–`9` and `_`, unique in the file. Text values keep up to 47 bytes, cut at a character.
+- **In presets.** Presets name the fields as `mqtt.<key>`, at most 32 different keys between them, and keep those names, in `presets.json` and on the device: 32 field ids are reserved for the keys the presets name, and each slot finds its mapping by key when it draws. A key no mapping names draws as an empty slot, not an error, so editing or deleting a mapping never rewrites the presets (D32). A slot takes an `mqtt.<key>` wherever it takes a number or a text; one whose mapping's kind it can't show draws empty too, and the preset editor offers each mapped field only where its kind fits.
+- **Values.** `ha_mqtt` keeps each value with the time it arrived. Through deep sleep they stay in a second RTC block with its own magic, version and CRC (with the message, under 2 KB), beside the snapshot (§6). After a power-off the boot sync brings the retained values back. A value is stale after its `ttl_s` (default twice the expected sync interval) and shows its age as the preset's stale policy says.
+- **Delivery.** Values arrive during a sync as retained messages, or live in sync mode `always`.
+- **Where they draw.** Wherever a slot or split cell takes a number or a text, at every size from XS (M6c): a number as numbers draw, a text and a time as words do.
+- **Publisher requirement.** Publishers must retain their messages, or go through HA statestream, for a sleeping device to see them. Zigbee2MQTT needs `retain: true` per device; the MQTT page says so.
+
+### 12.6 Home Assistant side (example)
+
+```yaml
+# configuration.yaml
+mqtt_statestream:
+  base_topic: ha/statestream
+  include:
+    entities:
+      - sensor.outdoor_temperature
+```
+
+HA publishes `ha/statestream/<domain>/<object_id>/state` at QoS 1, retained. With `publish_attributes: true`, it also publishes attributes as `.../<attribute>` in JSON.
+
+### 12.7 The message (D32)
+
+- HA's notify entity sends text to `cmd/message` (`notify.send_message`). Up to 96 bytes are kept, cut at a character; an empty message clears it.
+- **The banner.** A black bar across the bottom of the dashboard with the message, until KEY short dismisses it (that press does nothing else), a new message replaces it, or 24 h pass. It isn't drawn over the menu, config mode or the critical-battery screen.
+- **The field.** `ha.message` (§5.1) shows the latest message until a new one replaces it or an empty one clears it; after 24 h it is stale, and the slot's stale policy shows its age.
+- The console's `field set ha.message <text>` raises it as HA's would (§15).
+
+### 12.8 Key-press triggers (D32)
+
+- While MQTT is connected (sync mode `always`, or a sync's own session), each dashboard gesture, KEY or BOOT, short, double or long, is published to `reflbo/<id>/action` (QoS 0, not retained), besides doing its own action (§5.6).
+- Presses at other times aren't reported, so no automation runs hours late.
+
+### 12.9 Sessions and failures
+
+- **In a sync**, step 8 (§9.3): connect, subscribe, collect, publish, disconnect; up to 15 s of the sync's 45 s.
+- **In sync mode `always`** the client stays connected while Wi-Fi is up; a lost connection is retried after 10 s, the wait doubling to at most 5 min. State is published on change (at most every 30 s) and every 5 min. Commands, values and key presses are live. A sync uses the open session.
+- **A failed session** (no broker, a refused login, a timeout) shows on the Sync page, in Info and as the status bar's MQTT mark until a session succeeds. It doesn't fail the sync, so it isn't retried; the next sync tries again (D32).
+- **Power:** a session adds the broker's connect, up to 1 s of quiet and the publishes to each sync; measured once HA exists (§9.4).
+
+### 12.10 Testing on the board (owner, 2026-10-03, D32)
+
+- **The stable firmware** is the M7 build, git tag `stable-m7` (from 2026-10-29, after the owner's acceptance; before it the M6d build, `stable-m6d`, `112aa30d3`, from 2026-10-06, D36, D39, and the M6b build, `stable-m6b`, `dcb35a7e3`); its binaries are kept in `captures/stable/stable-m7/` with `flash.sh <port>`, which writes the bootloader, partition table, OTA data and app, never the storage partition or NVS. It is the board's normal firmware: after every MQTT/HA test it is flashed back, and `version` must show its ELF hash (`30ff9c47b`).
+- **Backup and restore.** Before a board test that changes its data, the configuration is saved with `GET /api/backup`; after the test, and after the stable firmware is back (its parser refuses M7-only content such as `mqtt.<key>` slots), it is restored with `POST /api/restore` and compared.
+- **Presets made under M6c** can have up to 24 cells, which `stable-m6b`'s parser refuses: it then loads `presets.json.bak` if that parses, else its built-ins, and a KEY switch or a cycle toggle saves `presets.json` over the M6c file. Restoring the backup taken before the test, after the stable firmware is back, brings them back (M6c review).
+- **Presets made under M6d** hold the Solar and Energy presets, whose layouts `stable-m6b`'s parser refuses as it refuses 24 cells; once a preset switch on M6d has saved, `presets.json.bak` holds them too. The way back is `captures/stable/before-m6d-backup.json`, taken under the M6c image before M6d's first flash (M6d's Task 12, Step 0): after flashing `stable-m6b`, restore it. It is kept until `stable-m6d` is tagged after M6d's acceptance (D36).
+- **Presets made under M7** hold the PC layout, `pc.<id>` fields and visuals, which `stable-m6d`'s parser refuses, as it refuses a file over its 48 KB. The way back is `captures/stable/before-m7-backup.json`, taken under main's image before M7's first flash (2026-10-21): after flashing `stable-m6d`, restore it.
+- **Nothing is erased without asking:** not NVS (saved networks, the web password, secrets, the trim), the storage partition or flash.
+- Until the owner has a broker and HA, the board checks cover what needs neither: MQTT off, the MQTT page, `mqtt status` and the message banner through `field set`.
+
+### 12.11 The house's energy from MQTT (D40)
+
+A third source for the Energy layout, the `energy.*` fields and the chart's measured bars, beside SolaX Cloud's two (§11.6): values that HA, an inverter's own integration or another local device publish over MQTT.
+
+- **Settings** (`energy`, §14.3): `source` `mqtt`, and `mqtt` naming the number mappings (§12.5) that bring each value:
+
+  ```json
+  "energy": { "source": "mqtt", "battery": "auto",
+              "mqtt": { "pv": "pv_power", "grid": "grid_power", "load": "", "battery": "", "soc": "",
+                        "yield": "pv_today", "to_grid": "export_today", "from_grid": "import_today",
+                        "grid_sign": "import", "battery_sign": "charge", "totals": "today" } }
+  ```
+
+  `pv` and `grid` are needed; the rest may be "" (none). `grid_sign` says what a positive grid value means (`import`, the default, or `export`), `battery_sign` a positive battery value (`charge`, the default, or `discharge`). `totals` is `today` (counters that start at 0 each midnight, the default) or `lifetime` (counters since installation, which need a reading near midnight, as the Token ID's do).
+- **Units** come from each mapping: `kW` or `W` for powers, `kWh` or `Wh` for energies, `%` for the charge; another unit counts as W and kWh.
+- **A reading** is built from the newest values whose mappings are fresh (§12.5): solar, grid, home (the mapped value, else solar + import − export − charging + discharging), the battery's power and charge, and today's totals. Its time is the newest of the powers' arrivals. Without a fresh solar and grid value there is none ("no data").
+- **When:** after each sync's MQTT session (step 8, §9.3), which brought the retained values; the Energy step itself makes no request for this source. In sync mode `always`, whenever a mapped value arrives, at most once a minute: that also feeds the chart's measured bars. The 5-minute SolaX refresh doesn't run for it.
+- **Shown** as the other sources are; the Energy layout's corner reads "MQTT" and the reading's time. A failure (MQTT off, no session, no fresh values) shows on the Sync page and the Solar page and fails no sync (D36).
+- **The Solar page:** the source "MQTT (mapped fields)", a choice of the number mappings for each value, the two signs and the totals; a note that topics are mapped on the MQTT page first.
+
+## 12a. The PC's sensors (M7, D44)
+
+The owner's Windows PC runs **reflbo-stats**, a tray app in its own repository (`Vybo/reflbo-stats-win`, Go, Apache-2.0, with its own spec in `docs/spec.md`). It reads HWiNFO Pro's shared memory and serves the readings the owner picks to boards on the LAN. This section is the protocol both sides keep, and the board's half of it.
+
+### 12a.1 Settings
+
+- `pc` in `settings.json`: `enabled` (default off), `host` (an IP address or a name), `port` (default 47123), `interval_ms` (250–10 000, default 1 000), `auto_always` (default on) and `preset` (a preset id, or "" for none; default `pc`).
+- The token is a secret in NVS (`secrets/pc_token`, §14.2), write-only like the others (§10.4) and never in a backup. It is 128 random bits as 26 base32 characters (A–Z, 2–7); the app shows it in groups of five (`ABCDE-FGHIJ-…`, 31 characters) and takes it with or without the dashes and spaces, in either case. The board keeps it as typed, so its field takes at least 31 characters, and sends it in the header unchanged.
+- Menu ▸ Sync ▸ PC: PC stats on or off, and the session's state.
+
+### 12a.2 Finding the PC
+
+- The sync's PC step (§9.3) asks `GET http://<host>:<port>/v1/info` with `Authorization: Bearer <token>` and a 2 s timeout. The app answers `{"app":"reflbo-stats","protocol":1,"version":"1.0.0","name":"DESKTOP-…","hwinfo":"ok"}`, `hwinfo` being `ok`, `not running`, `shm off` or `stale`.
+- A 401 is "wrong token"; a `protocol` other than 1 is refused with its number.
+- Only a sync looks (D44): the PC is found up to one sync interval after it wakes.
+
+### 12a.3 The stream
+
+- A WebSocket to `ws://<host>:<port>/v1/stream`, with the same header; the messages are JSON text frames.
+- Board → app: `{"type":"hello","protocol":1,"interval_ms":1000}`, sent again when the interval changes.
+- App → board:
+  - `{"type":"catalog","readings":[{"id":"cpu_load","label":"CPU load","unit":"%","decimals":0,"min":0,"max":100}]}` first, and again whenever the owner changes the selection. At most 32 readings; `id` 1–15 characters of a-z, 0-9 and _; `label` at most 23 bytes; `unit` at most 7; `decimals` 0–3; `min` and `max` the usual range, optional.
+  - `{"type":"readings","seq":812,"values":{"cpu_load":12.5,"gpu_temp":null}}` each interval: every id of the catalogue, `null` for one HWiNFO can't deliver now.
+  - `{"type":"status","hwinfo":"stale"}` whenever HWiNFO's state changes.
+- A message of more than 8 KB, or JSON more than 4 levels deep (gotcha 30), closes the connection. A message the client delivers in fragments is put together first. A number no float holds (past ±3.4e38) is no value, as a `null` is.
+- The app clamps the interval to 250 ms–10 s, and serves several boards, each at its own.
+- **Heartbeat:** WebSocket pings every 5 s. After three intervals without a message (5 s at least) the board reconnects once; when that fails, the session ends, about 15 s after the PC went quiet.
+- **Closing** (as built, `pc_close_action()`): the app's Quit (close 1001 "quit"), its refusals (1008 with the reason: "new token", "protocol 2", "no hello", "too deep") and a refused upgrade (401 "wrong token"; another status, such as the 503 a ninth board gets, as "HTTP 503") end the session at once. A connection lost without a word, and the app's 1001 "no pong" (the board's answers to its pings lost), wait for the heartbeat's reconnect. esp_websocket_client 1.8.0 gives a refused upgrade's status with its error event, never with a handshake error type.
+- Both sides ignore keys they don't know. The board refuses another `protocol`, with the reason on the Sync page and in `pc status`.
+- The board keeps the last catalogue in `/fs/state/pc.json`, so the editor lists the PC fields while the PC is off. A reading whose id the owner renames shows "—" in presets that still name the old one.
+
+### 12a.4 The session
+
+- **Start:** a PC step with "ok" or "HWiNFO …". The session remembers the sync mode and the preset on screen; with `auto_always` it switches to sync mode `always` (as BOOT double does, keeping the mode before), and with `preset` it shows that preset. Without `auto_always`, a session starts only in sync mode `always`, which keeps Wi-Fi up; in another mode the step just reports the PC as found, as a session there would end with the sync.
+- **While it runs:**
+  - the screen redraws on each `readings` message while the preset on screen shows a PC value; the display update interval applies otherwise;
+  - the auto-cycle pauses while the session's preset is on screen;
+  - KEY, the menu's and the web UI's presets and the schedule's preset entries work as before; quiet hours don't end a running session;
+  - leaving sync mode `always` by hand (BOOT double, the menu, the Sync page) ends the session at once, giving back the preset if the session's is still on screen (D45); `always` turned on again by hand is the owner's own;
+  - a schedule's night entry waits for the session's end, and starts then if its end is still ahead (with its toast, "Night until 06:00"); the console's `night` is the owner's own hand and ends the session first;
+  - `settings.json`, `presets.json` and a backup (§14.4) keep the mode and the preset from before the session, so a restart, an update or a power cycle during one comes back as the owner left it;
+  - the status bar shows a small monitor (§5.2).
+- **End:** about 15 s without a message, the app's Quit or refusal, leaving `always` by hand, PC stats switched off or a new address or port, the console's `night`, or a critical battery (§8). What the session changed comes back only where the owner hasn't changed it since ("your hand wins"): the preset from before only if the session's preset is still on screen, the mode from before only if the mode is still the `always` the session set; the auto-cycle resumes. A later sync finds the PC again.
+- **Power:** a session with `auto_always` costs sync mode `always` and a redraw a second; the owner's checks measure it (§9.4).
+- **Console** (§15): `pc status`; `pc demo on|off`, a sample PC inside the board for screenshots and goldens, never a session.
+
+## 13. Audio
+
+### 13.1 Codec path
+
+- **Playback.** `esp_codec_dev` drives the ES8311 (I²C `0x18`) over I²S standard mode: MCLK GPIO16 (256 × fs), BCLK 9, WS 45, DOUT 8.
+- **Mics.** The ES7210 stays in standby, because v1 doesn't use the mics.
+- **Power.** PA_CTRL (GPIO46) is high only while playing, with a settle delay and a volume ramp to avoid pops. After playback the codecs go to standby and the I²S driver is removed.
+
+### 13.2 Alarms (M8)
+
+- **Storage.** Up to 8 alarms in `/cfg/alarms.json`: `{id, enabled, time "HH:MM", days (Mon–Sun bitmask; 0 = once), label, sound, volume, snooze_min (default 9), ramp_s (default 30)}`.
+- **Sounds.** Built-in generated patterns, and 16-bit PCM WAV files from LittleFS or microSD. MP3 files are added once the radio decoder exists.
+- **Ringing.** The ACTIVE state shows the alarm screen and ramps the volume up. It stops automatically after 10 min. A short press snoozes; a long press stops.
+- **Conditions.** Alarms work offline and from deep sleep, but need a valid time.
+- **Display.** The next alarm is shown in the status bar.
+
+### 13.3 Internet radio (M8)
+
+- **Start.** From the menu or the web UI. It needs Wi-Fi, which stays on while the radio plays.
+- **Pipeline.**
+  1. HTTP(S) stream via `esp_http_client`, sending `Icy-MetaData: 1`.
+  2. PSRAM ring buffer of about 256 KB.
+  3. Decoder task using Espressif `esp_audio_codec` (MP3, AAC).
+  4. PCM out to the ES8311.
+- **Stations.** The list lives in `/cfg/stations.json` (name, URL). Defaults are chosen at M8.
+- **Screen and controls.** The screen shows the station and the ICY title, with a battery warning when on battery. BOOT long, the menu or the web UI stops playback. A dropped stream reconnects with backoff.
+
+## 14. Storage
+
+### 14.1 Partition table (16 MB flash)
+
+| Name | Type | Offset | Size |
+|---|---|---|---|
+| nvs | data / nvs | 0x9000 | 64 KB |
+| otadata | data / ota | 0x19000 | 8 KB |
+| phy_init | data / phy | 0x1B000 | 4 KB |
+| ota_0 | app | 0x20000 | 4 MB |
+| ota_1 | app | 0x420000 | 4 MB |
+| coredump | data / coredump | 0x820000 | 64 KB |
+| storage | data / littlefs | 0x830000 | 7.8 MB (to end of flash) |
+
+`storage` has no partition image, so `idf.py flash` never writes it. It is formatted at first boot. The web assets live in the app image.
+
+### 14.2 NVS
+
+| Namespace | Contents |
+|---|---|
+| `sys` | Device id, AP password (`ap_pass`), schema version, idle strategy override (`idle`), come back in config mode after a web restart (`resume_cfg`, §10.2), the RTC trim (`rtc_trim`, §7), the MQTT discovery hash (`mqtt_disc`, §12.3, M7) |
+| `wifi` | Saved networks with their passwords and fast-connect cache (`nets`, one versioned blob) |
+| `secrets` | MQTT password; the web UI password's salted hash (`web_pass`, D18); from M6d Forecast.Solar's key (`fs_key`), Solcast's key and site ids (`solcast_key`, `solcast_site1`, `solcast_site2`), and SolaX's token and registration number (`solax_token`, `solax_sn`) or the Developer API's Client ID and Client Secret (`solax_client_id`, `solax_secret`; D37); from M7 the PC app's token (`pc_token`, D44) |
+| `ctr` | Counters: boots, sync statistics |
+
+### 14.3 LittleFS layout
+
+```
+/cfg/settings.json      non-secret settings
+/cfg/presets.json       §5.4
+/cfg/mqtt_fields.json   §12.5
+/cfg/alarms.json        §13.2 (M8)
+/cfg/stations.json      §13.3 (M8)
+/state/datastore.bin    last datastore snapshot (written after each sync)
+/state/radar.bin        the newest weather radar frame: its levels, a header and CRC-32 (M6, as built)
+/state/solar.bin        the PV forecast and today's readings and midnight totals (M6d, §11.5, §11.6); as built: a snapshot
+                        header (magic "rfsl", version 2, size, CRC), the forecast, Solcast's last call and site count,
+                        the last reading, the day's totals and quarter hours, and the Developer API's plant (D37;
+                        version 1 had no plant and is left out once)
+/sounds/                user sound files (M8)
+```
+
+- Every file carries a schema version, and migrations run at boot.
+- Writes are atomic: write `*.tmp`, fsync, rename, keeping the previous file as `*.bak`.
+- If a file is invalid, the firmware uses `*.bak`; if that is invalid too, it uses defaults and shows the toast "Using default settings".
+  - A file rejected in favour of its `.bak` is removed, so the next save keeps the good backup.
+  - A file nested deeper than 16 levels is rejected before it is parsed.
+- The partition is mounted at `/fs`, so the files are `/fs/cfg/settings.json` and so on.
+
+`settings.json` sketch:
+
+```json
+{
+  "schema": 1,
+  "language": "en",
+  "location": { "name": "Brno", "lat": 49.1951, "lon": 16.6068 },
+  "time": { "tz_iana": "Europe/Prague", "tz_posix": "CET-1CEST,M3.5.0,M10.5.0/3",
+            "clock_24h": true, "ntp": ["cz.pool.ntp.org", "pool.ntp.org"] },
+  "units": { "temp": "C" },
+  "sync": { "mode": "times", "times": ["05:30"], "interval_min": 60, "mode_before_always": "times",
+            "quiet": { "enabled": false, "from": "23:00", "to": "06:00" },
+            "steps": ["weather", "air", "radar", "solar", "energy"] },
+  "sensors": { "interval_min": 5, "temp_offset_c": 0.0, "hum_offset_pct": 0.0 },
+  "display": { "contrast": "default", "update_min": 1, "lpm_hz": 1 },
+  "battery": { "level_from": "curve", "empty_v": 3.27, "full_v": 4.2 },
+  "radar": { "weather": { "lat": 49.1951, "lon": 16.6068, "zoom": 6.5 },
+             "flights": { "lat": 49.1951, "lon": 16.6068, "range_km": 50, "min_alt_ft": 0,
+                          "ground": false, "max": 100 } },
+  "mqtt": { "enabled": false, "host": "", "port": 1883, "user": "",
+            "discovery_prefix": "homeassistant", "discovery": true },
+  "solar": { "source": "off", "planes": [ { "kwp": 5.0, "tilt": 35, "azimuth": 0 } ],
+             "losses_pct": 14, "inverter_kw": 0 },
+  "energy": { "source": "off", "battery": "auto" }
+}
+```
+
+Once a discharge is learned, `battery` also holds `learned_mv` (21 voltages, 0 % to 100 %) and `learned_at` (UTC seconds), and `level_from` can be `learned` (D21).
+
+M3a reads `language`, `time.tz_iana`, `time.tz_posix`, `time.clock_24h`, `units.temp`, `sensors.*`, `display.update_min` and `display.lpm_hz`; M4 adds `location.*`, with latitude and longitude clamped to the globe, and its acceptance `battery.*` (§8; a manual pair without 0.3 V between them, or a learned curve that doesn't rise, falls back to the built-in curve). M5 adds `time.ntp` (1–2 host names) and `sync.*`: `times` keeps 1–8 valid `HH:MM` times, sorted and without repeats, falling back to `["05:30"]`; `interval_min` is clamped to 15–1440. M6 adds `radar.*` (§11.1–§11.3): each centre defaults to `location.*`; `weather.zoom` is clamped to 4–9 in steps of 0.25; `flights.range_km` to 10–100 (from the centre to the map's top edge), `max` to 1–100, `min_alt_ft` to 0–60000. M6b adds `sync.mode_before_always` (D31): never `always`, `times` by default; any change into `always` (BOOT double, the menu, a page, a restore) remembers the mode it left, unless the document names its own. M7 adds `mqtt.*` (§12.1, D32): `enabled` (default false) and `discovery` (default true); `host` and `user` up to 63 bytes, empty by default; `port` clamped to 1–65535 (1883); `discovery_prefix` up to 31 bytes of topic characters, without `+`, `#` or a leading or trailing `/` (`homeassistant`); `mqtt.password`, accepted on write, goes to NVS `secrets` and never into the file. M6d adds `sync.steps` (D35): the data steps that run, any of `weather`, `air`, `radar`, `solar` and `energy`; a missing list is all of them, an unknown name is left out. It adds `solar.*` (§11.5): `source` one of `off`, `open-meteo`, `forecast-solar`, `solcast` (`off`); 1–2 planes, each `kwp` clamped to 0.1–100, `tilt` to 0–90, `azimuth` to −180–180 (5 kWp, 35°, south); `losses_pct` to 0–50 (14) and `inverter_kw` to 0–100 (0); and `energy.*` (§11.6): `source` `off`, `solax-dev`, `solax` or, from M7, `mqtt` (`off`), `region` `eu`, `cn` or `in` (`eu`; D37), `battery` `auto`, `on` or `off` (`auto`); from M7 `energy.mqtt` (§12.11, D40): the eight mapping keys, each "" or a key of `mqtt_fields.json` (a key no mapping names counts as ""), `grid_sign` `import` or `export` (`import`), `battery_sign` `charge` or `discharge` (`charge`), `totals` `today` or `lifetime` (`today`). The keys, the site ids, the token and the registration number, accepted on write, go to NVS `secrets` and never into the file. `PATCH /api/settings` merges into the file as an RFC 7396 merge patch, which must keep `"schema": 1`. The file must be a JSON object with `"schema": 1`; beyond that, a missing or mistyped key takes its default and an out-of-range number is clamped, so one bad value never resets the rest. Saving keeps the keys the firmware doesn't know.
+
+### 14.4 Backup, restore, factory reset
+
+- **Backup.** A JSON bundle of every `/cfg/*` file, without secrets: `{"reflbo_backup": 1, "device": …, "firmware": …, "files": {"settings.json": {…}, "presets.json": {…}}}`. Restore validates every file it knows before replacing anything, applies them at once, and leaves out files of a later firmware. From M7 the bundle holds `mqtt_fields.json` too. The solar keys and SolaX's token stay out of it (M6d), like every secret.
+- **Factory reset.** From the menu (System ▸ Factory reset, confirmed by holding KEY), or from M4 the web UI. The board restarts afterwards. It erases `storage` and the NVS namespaces `wifi`, `secrets` and `ctr`. It keeps `sys`, the device identity.
+
+### 14.5 microSD (M9)
+
+- FAT32 on SDMMC 1-bit. The card is mounted on demand and unmounted after use; a mount attempt detects whether one is present.
+- The feature set is agreed at the start of M9, from the candidates in §19.
+
+## 15. Diagnostics and tooling
+
+**Console** (`esp_console` over USB-Serial-JTAG):
+
+| Command | Purpose |
+|---|---|
+| `version` · `reboot` · `heap` · `tasks` | Basics |
+| `screenshot` | Framebuffer as base64 PBM between markers |
+| `panel status` · `panel test` · `panel clear` · `panel mode <hpm\|lpm>` · `panel rate <Hz>` · `panel fps [s]` · `panel sleep` · `panel wake` · `panel init <factory\|xiaozhi>` | Panel diagnostics: test pattern, power mode, LPM rate, measured frame rate, sleep-in and wake, init sequence |
+| `btn <key\|boot> <short\|double\|long>` | Inject button gestures |
+| `sensors` · `battery` · `battery learn start\|stop` | Readings; learning the battery curve from the next full discharge (D21) |
+| `rtc get` · `rtc set <ISO 8601>` | RTC |
+| `field list` · `field get <id>` · `field set <id> <value>` · `field clear <id>` | Inspect and inject data, e.g. fixtures on the device; from M7 `field set ha.message <text>` raises the message banner as HA's would (§12.7) |
+| `preset list` · `preset set <id>` · `preset window <id> <from> <until> [days]` · `preset window <id> off` | Presets. From M6e (D41) `preset list` shows each cycle window on a line of its own under its preset, `window sunrise - sunset-30: open until 17:55` (` on Mo Tu …` after the ends when it doesn't open every day; a weekday before a change that isn't today, `closed until Tue 12:11`; `open: the clock isn't set` without a valid time), and `preset window` sets or removes one, saved as the web page saves it and refused with the file's reasons |
+| `schedule list` · `schedule on\|off\|clear` · `schedule add <HH:MM> preset <id> [days]` · `schedule add <HH:MM> night <HH:MM> [days]` | The preset schedule (§5.4); `days` is the Mon–Sun mask, default 127 |
+| `pc status` · `pc demo on\|off` | The PC session (M7, D44): its state, the address, the interval, the last message and the catalogue (`field get` doesn't know `pc.*`, which are the session's, not the datastore's); the demo draws a sample PC's values without a session, as `solar demo` does |
+| `night <minutes>` | Night sleep now (§9.1), for measuring; the console drops until it ends |
+| `wifi status` · `wifi scan` | Wi-Fi: the state, network, address, AP clients and saved names; the networks in sight while Wi-Fi is on (config mode) |
+| `sync now` · `sync status` | Run a sync; the running or last sync's steps and the next one (M5). `rtc get` also prints the trim and the last drift (§7) |
+| `mqtt status` | MQTT (M7): the settings without the password, the connection, the last session, the discovery hash, the mapped fields' values |
+| `solar status` · `solar demo on\|off` | The PV forecast (source, fetch time, today's and tomorrow's totals, the last error) and the house's energy (source, the reading and its time, the midnight totals, the last error), without keys (M6d); `demo` loads the sample day of the goldens, so the layouts can be screenshotted without a provider. As built: the forecast's three days' totals rounded as the panel rounds them, its last step, a kept step's reason and Solcast's last call and sites; the reading's solar, grid, home and battery power, its charge and inverter type, its day's totals; the midnight reading's time, or "its day's totals: SolaX's own" for a Developer API reading; with the Developer API the plant and its devices, and when the kept token runs out (never the token) |
+| `energy raw` | The Developer API's last data replies (the inverter's, the battery's and the meter's real-time data, the month's statistics), never the token's, to check its fields and signs (D37) |
+| `radar status` · `radar loop` | The weather radar's source, frame time, frames kept and last error, and the flight radar's state with its last failure and adsb.lol's pause (M6); the loop as BOOT short plays it |
+| `sleep stats [reset]` · `sleep test <deep\|light> <n>` · `power idle [deep\|light]` | Power debugging: sleeps, wake causes, and per-cycle awake and slept times; `sleep test` forces sleep cycles while tethered |
+| `audio tone <Hz> <ms>` | Audio check (M8) |
+
+Screenshot framing:
+
+```
+-----BEGIN RLCD PBM-----
+<base64 of "P4\n400 300\n" + 15 000 bytes, in 76-character lines>
+-----END RLCD PBM-----
+```
+
+**Host tools:**
+
+| Tool | Purpose | Needs |
+|---|---|---|
+| `tools/idf.sh` | Source the IDF environment, then run `idf.py` | ESP-IDF |
+| `tools/devlog.py` | Capture the serial log for N seconds, reconnect when USB re-enumerates, optionally reset first | pyserial |
+| `tools/screenshot.py` | Request a screenshot and write a PNG (and the PBM) | pyserial, stdlib |
+| `tools/render.py` | Run the host renderers on every fixture, writing PNGs; `render_dashboard --list` and `render_screen --list` name them | Host build |
+| `tools/fontgen.py` · `tools/imggen.py`, run by `tools/gen_fonts.sh` · `tools/gen_icons.sh` | Turn fonts and icons into C sources | uv, Pillow |
+
+pyserial comes from the ESP-IDF Python environment. The generators run through `uv` with the pinned versions in `tools/requirements.txt`.
+
+## 16. Error handling and robustness
+
+- **Crashes.** The task watchdog is on. A panic writes a core dump to flash. The next boot that comes alive (not a routine wake, §3.3) reports the dump in the log; `idf.py coredump-info` reads it. Later the console and the web UI make it available, then erase it.
+- **Power.** The brownout detector is on. Critical battery is handled before a brownout happens (§8).
+- **Network.** Every network call has a timeout. Failures are recorded per sync step and shown in Info and the web UI. Network work never blocks the UI.
+- **Config files.** Atomic writes, `.bak` copies, schema validation, falling back to defaults (§14.3).
+- **Firmware updates.** OTA rollback (§10.5).
+- **Invalid time.** Alarms and time-dependent features are suspended, with a clear prompt to set the time.
+- **I²C.** A failed transfer is retried once, then the field is marked stale. A stuck SDA line is recovered with clock pulses.
+
+## 17. Testing strategy
+
+**Host.** CMake + Ninja + Apple clang, with Unity (MIT) vendored in `test/host/third_party/`.
+
+- **Unit tests.**
+  - gfx: primitives, clipping, UTF-8, text measure and wrap.
+  - Panel conversion, checked against the vendor formula.
+  - datastore: freshness, snapshot round trip, CRC.
+  - scheduler: next wake, DST, alarms, snooze.
+  - Gesture recogniser: timelines of button events.
+  - Battery curve and charging inference.
+  - astro: against fixture sunrise/sunset values.
+  - Weather and air quality parsers: against fixtures.
+  - Sync planning: the next sync in each mode, the quiet hours, the retries, the expected interval, the syncs the device needs (a lost clock, a first forecast, `always` mode's Wi-Fi) and each step's share of the 45 s; the RTC trim's arithmetic and the Offset register's codec; SNTP packets and their refusals.
+  - The forecast fields and widgets: the words, rounding and units, a two-digit high and low that must show whole, and the goldens of each new widget.
+  - M6: the PNG reader against real ČHMÚ frames and a RainViewer tile, and its refusals; the map's projection round trips through known points, clipping and label placement; `tools/gen_map.py` against small fixtures; ČHMÚ's file names from the time, its palette's levels, a known pixel landing on its place in a view, the coverage test; RainViewer's index and tile choice; the adsb.fi parser against a real reply, its caps, filters, distance and bearing; the route parser and cache; the 15-minute rain and its window; `radar.*` in the settings; the preset migration; goldens of the Radar layout (rain, stale, a loop frame), the rain map in M and L slots, the rain strip, and the Flights view (aircraft and a route, none, outside sync mode `always`).
+  - M6b: the split tree's JSON (a round trip, the limits, the refusals), its geometry (the ratios, the gaps, 8 cells, 90×40), each cell's size class and each field's size in it, separators on and off, goldens of the Weather example (its lines on, the bottom one off) and of an 8-cell tree; the editor's tree operations against the fake device; BOOT double's toggle and the remembered mode.
+    - As built (M6b): `test_ui_split` (13 tests); `test_ui_preset`'s split cases, the largest file among them; `test_ui_widget_fit` (every field in each of the 336 cell sizes a tree can make, in eight sets of data; a number in Classic's main slot; a number's size as its digits change); the goldens `dash_split_weather`, `dash_split_eight`, `dash_home_temp_main`, `dash_home_temp_main_cs`, `dash_weather_frost_cs` and `dash_weather_hot_f`; `test_ui_catalog`'s split rules against the renderer's; 9 page tests of the editor (34 in all); `test_settings`' remembered mode. On the board (2026-10-02): BOOT double on and off with its toasts, its guard after the menu, its quiet-hours toast (Wi-Fi came back and synced as the span ended); a split preset over the API, drawn on the panel as the preview draws it, and in the editor; the refusals; the mode a page leaves; the app task kept 3536 bytes of its stack free. A BOOT double that wakes the board stays the owner's check: a tethered board never sleeps.
+  - As built (M6): 60 host targets (53 at M5), with 17 new goldens (8 of the Radar layout and `rain.map`, 6 of the Flights view, 3 of the rain strip); the generator's 14 tests among the 67 tool tests; 25 page tests; the ASan/UBSan build passes them all.
+  - M6c (D34): split trees of 24 cells and their 40×20 limit; each cell's size class with XS; the property that more room never loses a field; every field drawn in every cell size a tree can make (the enumeration grows to fit); goldens of the spike's split presets (12 cells of 133×69 in English and Czech, 24 cells of 200×22, 66×69 and 50×93); the largest `presets.json` against its 48 KB; the catalogue's XS; the editor's 24 cells against the fake device.
+    - As built (M6c): `test_ui_widget_fit` draws every field in all 2451 cell sizes in fifteen sets of data (other skies, a charging battery, a holiday, polar day and night, a 12-hour clock, the largest values) and checks XS and short S cells for a cut number, time, battery, day's weather or sun time and for the stale mark, the age mark against the value at every size, a one-line XS sun's sunset and a stacked XS Moon's illumination; `test_ui_catalog` checks the published rules at every width and height; `test_storage_backup` the deepest file a bundle holds; `test_lang` the day form; five goldens of small-cell presets (`dash_split_compact`, `dash_split_compact_cs`, `dash_split_xs_rows`, `dash_split_xs_grid`, `dash_split_xs_narrow`). On the board (2026-10-04): the owner's M6b files load as they are; two small-cell presets over the API, drawn on the panel as the previews draw them, every cell clear of its edges; the refusal at 25 cells, the deepest tree and the largest file; a 34 KB backup restored; two deep sleeps carried the presets; the editor's 24 boxes and 12; the app task kept 3 120 bytes of its stack.
+  - M6d (D35, D36): the PV model against known irradiance and temperatures; each forecast parser on recorded replies (Open-Meteo, Forecast.Solar with and without a key, Solcast) and their refusals; the local quarter hours across DST, the midnight roll-over, Solcast's budget; the SolaX parser on recorded replies (a string inverter, a hybrid, `success: false`), the signs, the battery's auto rule, the midnight totals and the quarter-hour actuals; `sync.steps`, `solar.*` and `energy.*` in the settings and the steps that are off in the sync plan; the `pv.*` and `energy.*` fields and widgets; goldens of the spike's renders (the Solar and Energy layouts with their variants, the fields in Classic, Grid, Weather and Focus); the Solar page and the step switches against the fake device, the keys write-only.
+  - As built (M6d): `test_solar`, `test_energy`, `test_energy_dev` (D37: the requests, the token's, plants', devices', real-time and statistics replies and their refusals, the signs in a residential and a commercial plant, a hybrid's battery, the reading with and without today's row), `test_settings` (the steps, the sources, the region, the keys never in the file), `test_ui_fields`, `test_ui_solar`, `test_ui_widget_fit` (every cell size, fifteen sets of data, about 40 s, 4 min under ASan), `test_ui_preset`, `test_ui_menu`, `test_sync_plan`, `test_util_url`, `test_util_json` and twelve goldens; 66 host targets, all also under ASan and UBSan; 54 page tests. Task 12 checked on the board: the layouts with the sample day, Open-Meteo and Forecast.Solar through Check now, keys write-only through the API, a switched-off step making no request, the forecast through deep sleep and a cold boot, the heap, the stack and a sync's length, and a restore of the owner's configuration.
+  - M6e (D41): a cycle window's bounds (times, sunrise and sunset with offsets, across midnight, the days, a DST change, polar days and nights), the auto-cycle's rule (a closed window skipped, KEY short not, none open), `presets.json`'s windows (a round trip and the refusals), and the page's window editor.
+  - As built (M6e): `test_ui_window` (new: the bounds' words, the rules, open and change times in Brno, Reykjavik and Longyearbyen, across both DST changes, polar days and nights, a window opening the evening before, ends that swap order with the seasons) and `test_ui_preset` (the windows in the file and their refusals, the auto-cycle's step, Solar's window, the longest refusal whole in `UI_PRESET_ERR_LEN`); 67 host targets and 58 page tests at M6e, 69 and 73 with D42 and D43. Task 5 checked on the board (2026-10-19): the console's refusals; a window closing while the cycle ran every 10 s, after which the cycle kept the other preset and KEY still reached the closed one; Solar's state following a move to Sydney without a restart; the page's window editor and its refusal before a save; the windows through a restart, a deep sleep and `stable-m6d` reading the file; a restore of the owner's configuration. Then, with main's D42 and D43: titles and forced titles on the panel, Export and Import on the board's page, the last sync's time after a sync, and a refusal's whole reason in the preview.
+  - M7 (D44): `pcstats`' messages (hello, catalogue, readings, status), their refusals (bad JSON, too deep, an unknown protocol, more than 32 readings) and `null`s; the session's rules as pure logic (start, end, what comes back after KEY, BOOT double, the cycle, a night entry); the history's rings, every span and the columns' ranges; the visuals in `presets.json` (a round trip, the refusals, the pool's 48); goldens of each visual at each size and of the PC layout with and without a session; the PC page, Show as and the warning on the page. As built (r54): 8 new host targets (`test_pcstats`, `test_pc_session`, `test_ui_pc`, `test_ui_history`, `test_ui_visual`, `test_ui_visual_golden`, `test_ui_preset_visuals`, `test_ui_pc_layout`; 77 in all), 16 new goldens (10 `vis_*` sheets, 6 `dash_*`), 86 page tests; the close codes, a refused upgrade's status and leaving `always` by hand among them. The app's Go tests (its reader on the owner's dumps, the server, the stream, the demo source) live in its repository.
+  - Preset and settings JSON: validation and migrations.
+  - Config files: the atomic write and the `.bak` fallback, in a scratch directory.
+  - M7: `ha_mqtt`'s topics, golden JSON for every discovery entity and the state, payload parsing (numbers, text, `json_path`), commands, the mappings' codec and validation, the discovery hash and `expire_after`; the `mqtt.<key>` and `ha.message` fields, goldens of the message banner, presets with an unmapped key; the MQTT step not failing a sync; the MQTT page against the fake device (the write-only password, the mappings editor, Test connection).
+  - locale formatting.
+  - The web configurator: SHA-256, HMAC and PBKDF2 against published vectors; the password record, sessions and login throttle; the captive DNS reply; the saved-network list and the scan choices; the settings merge patch; the backup bundle; the preset editor's catalogue; the config screen's QR codes; `tools/gen_zones.py`; from M5 the device's name under a router's domain, the idle hour of a session, every status line the server sends, and the settings' sync defaults.
+- **Golden renders.** Each built-in preset, the menu and each special screen are rendered with fixture data at fixed times. Each render is compared with `test/host/golden/*.pbm`. After an intentional change, the renderer rewrites the golden (`build-host/render_dashboard <fixture> <file>`, or `render_screen` for the menu and the special screens), and the owner reviews the PNGs from `tools/render.py`.
+- **Sanitizers.** `-DREFLBO_SANITIZE=ON` builds the host tests with AddressSanitizer and UndefinedBehaviorSanitizer.
+- **JSON on the host.** cJSON is built from the ESP-IDF tree (`$IDF_PATH/components/json/cJSON`).
+
+**Device.**
+
+- Boot smoke test through `devlog.py`: no errors, and a "ready" log line.
+- Console checks, and `btn` + `screenshot` flows for each milestone.
+- The owner checks listed per milestone (§18).
+
+## 18. Milestones and acceptance
+
+Verification levels (1–4) are defined in `AGENTS.md` §7. From r51 (D44) the PC's sensors are M7, MQTT and Home Assistant M8, audio M9 and microSD M10; earlier sections and decisions call them by their old numbers.
+
+| M | Scope | Acceptance (level) |
+|---|---|---|
+| M0 | ESP-IDF v5.5.5 installed; project skeleton (CMake, `main`, `sdkconfig.defaults`, partition table); console (`version`, `heap`, `reboot`); `tools/idf.sh`, `tools/devlog.py`; host test skeleton with Unity; `LICENSE`, `NOTICE`, `THIRD_PARTY.md` | Clean build (1); host tests pass (2); boot log captured and the console answers (3) |
+| M1 | `st7305` (cold init, push, LPM/HPM), frame conversion, `gfx` core, `fontgen` and the first fonts, screenshot command and tool, host render tool, test pattern | Host tests (2); the test-pattern screenshot matches the host render (3); owner confirms orientation, contrast and the init sequence (4) |
+| M2 | `st7305` warm init for deep-sleep wakes (moved from M1), `board` (I²C, buttons, gestures), `rtc`, `sensors` (SHTC3, battery), `timekeeping` (RTC → system time; manual set through the console), Classic clock screen, `power` with both idle strategies, `scheduler` minute wakes | Screen values match the console (3); owner measures deep vs light sleep with the USB meter; the idle strategy is chosen and recorded (4) |
+| M3 | Two plans. **M3a:** `storage` (LittleFS config files), `datastore` with the extra fields, `locale` (en), fonts and icons, 4 layouts, widgets, status bar, presets JSON and defaults, cycling. **M3b:** menu v1, special screens, settings, schedule and night sleep, the LPM rate setting, the `cs` pack | Owner reviews golden renders (2); presets switch with KEY/`btn` and survive a reboot (3); owner measures night sleep (4); owner reviews the Czech renders (2) |
+| M4 | `netmgr` (STA/AP, captive portal, mDNS), config screen with QR, `webui` and REST API, preset editor with preview, set time from phone, OTA with rollback | Owner sets up Wi-Fi from a phone in AP mode (4); the preview matches a device screenshot (3); OTA upload and rollback work (3) |
+| M5 | One plan (D25): SNTP → RTC with the trim (D25), `weather` with air quality and pollen (D25), `astro`, `sync` with the configurable schedule, quiet hours (D25) and backoff, sync mode `always` with the web UI on the LAN (D24), the weather and air quality widgets, the status bar's sync and Wi-Fi state, the Sync page and the place search, power tuning | A sync on battery reports its results in Info (3); astro tests pass (2); the owner reviews the new widgets' goldens (2); the RTC trim brings the drift under 1 s a day (3); sync energy, `always`'s cost and the daily average are measured and `docs/power.md` is updated (4) |
+| M6 | One plan (D27): the radar views (D22, D23, D24, D28; §11.1–§11.4): `png`, the web-Mercator `map` with built-in borders, towns and airports; the weather radar (ČHMÚ, RainViewer outside its coverage) as the Radar layout and the `rain.map` widget, with a frame each sync, every 5 min in sync mode `always`, and the last hour's loop; the flight radar (adsb.fi, sync mode `always` only) as the Flights preset, with the nearest aircraft's route (adsb.lol); rain in the next 2 hours; the Radar page | Goldens of both radars and the new widgets (2); a ČHMÚ frame renders after a sync (3); the loop plays in sync mode `always` (3); aircraft from adsb.fi show in sync mode `always` (3); the owner checks both on the panel (4) |
+| M6b | One plan (D31): the split layout (§5.2, §5.4) in the renderer, `presets.json` and the web editor; BOOT double for sync mode `always` (§5.6) | Goldens of split presets (2); a split preset built in the web editor shows on the panel (3); BOOT double turns `always` on and back (3) |
+| M6c | One plan (D33, D34): split cells down to 40×20 and up to 24 (§5.2, §5.4), the XS size and S in short cells (§5.3), sizes that never shrink as a cell grows, the snapshot's cap, the editor | Goldens of small-cell presets (2); a 24-cell preset built in the editor shows on the panel (3); the owner checks XS cells' legibility on the panel (4) |
+| M6d | One plan (D33, D35, D36): `solar` (Open-Meteo with our model, Forecast.Solar, Solcast) and `energy` (SolaX Cloud, by its Token ID or, from D37, its Developer API), the Solar and Energy steps and the steps' switches (§9.3), the `pv.*` and `energy.*` fields, the chart and the flow, the Solar and Energy layouts and presets (§11.5, §11.6), the Solar page, `solar status`, `solar demo` and `energy raw`. Built 2026-10-05; its board checks passed the same day, and the Developer API's reading worked with the owner's keys | Goldens of the approved renders (2); a forecast from Open-Meteo and from Forecast.Solar renders after a sync (3); with the owner's keys, Solcast's forecast and a SolaX reading render, and the owner compares the reading with the SolaX app (3/4); a switched-off step makes no request (3); a sync's energy with both steps is measured on battery and `docs/power.md` updated (4) |
+| M6e | One plan (D41): cycle windows per preset (§5.4): `presets.json`, the auto-cycle, the console, the web editor. Built 2026-10-09; its board checks passed on 2026-10-19, with D42 and D43 on top | Host and page tests (2); a window set from the console closes on the board, and the auto-cycle skips its preset while KEY still reaches it (3); the owner sees the Solar preset leave the cycle after sunset and come back in the morning (4) |
+| M7 | Built 2026-10-21 (r54); its board checks against the app's demo passed that day; the owner accepted it on 2026-10-29 on the PC with HWiNFO Pro, and its build is `stable-m7` (§12.10). One plan per repository (D44): the protocol (§12a); `reflbo-stats-win` (HWiNFO Pro's shared memory, the picker page, units and scale, the token, auto-start and Quit, a demo source); on the board `pcstats`, the PC step and the session, the `pc.*` fields, Show as with its four visuals and the history for every numeric field, the PC layout and preset, the PC page; the visuals and the layout approved from a spike's renders first | Host and Go tests and goldens (2); with the app's demo source on this Mac, a session found at a sync, `always` and the PC preset on, charts moving each second, the end within 15 s and what comes back (3); on the owner's PC with HWiNFO Pro: the picker, auto-start, Quit, a session at the next sync after the PC wakes and its end when it sleeps; the visuals' legibility on the panel; a session's power (4) |
+| M8 | One plan (D32), refreshed against M6c and M6d (D33, D40): `ha_mqtt` (a session in every sync, kept connected in sync mode `always`), discovery, state, the preset select, HA buttons, key-press triggers, the message (banner and `ha.message`), the MQTT field mappings with state labels and the time kind, the MQTT page, the house's energy from MQTT (§12.11), the sync's status (D41, §12.2, §12.3); review minors where M7 touches their code | Host tests and goldens (2); MQTT off and the MQTT page on the board, which runs the stable firmware between tests (3, §12.10); with the owner's broker and HA: entities appear in HA, the select and buttons work at the next sync, a mapped HA value renders, a labelled state and a time read as words, a message shows, key presses trigger in sync mode `always`, an MQTT energy source draws the Energy layout, a failed step shows as Sync problem with its Sync error (3/4) |
+| M9 | `audio`: codec path, offline alarms (also from deep sleep), tones and WAV, radio (MP3/AAC, ICY) | An alarm fires from idle, and snooze and stop work (3/4); a radio stream plays (4) |
+| M10 | microSD features agreed at the start of M10 | Per the agreed list |
+
+## 19. Deferred proposals (discuss at the milestone)
+
+| Milestone | Proposal |
+|---|---|
+| M0 | GitHub Actions CI (firmware build and host tests) |
+| M1 | ~~Portrait orientation~~ (declined 2026-09-25, D13) |
+| M3 | Accepted (D15): the LPM refresh rate as a display setting; the preset schedule, with timed night sleep; extra fields (dew point, today's min/max, trends, week number, moon phase, battery days left); the Czech pack with name days and public holidays (name days deferred, D16). Still deferred: the Night layout; the change in day length (needs `astro`, M5) |
+| M4 | Accepted (D18): a web UI password, instead of the admin PIN. Accepted (D19): config mode after a web restart, the clock set from the phone when lost, changing the password and logging out, a Device page. Still deferred: web UI translations |
+| M5 | Accepted (D25): quiet hours; air quality and pollen (Open-Meteo); RTC offset calibration. Still deferred: static IP |
+| M6 | Accepted (D22, D23, D24): the ADS-B flight radar (§19.1) and the weather radar (§19.2), on one map renderer; together about the size of M3a and M3b. Designed in §11.1–§11.4 (D27, D28), with three extras: rain in the next 2 hours, the last hour's loop, the nearest aircraft's route |
+| M8 | Accepted (D32): HA buttons (sync now, next preset); device triggers for key presses; an HA message entity. Accepted at the refresh (D40): an MQTT source for the house's energy; state labels; a time kind. Declined: the `pv.*` and `energy.*` values as HA sensors. Still deferred: MQTT over TLS; HA REST pull as an alternative source |
+| M6c, M6d | The owner's requests of 2026-10-04 (D33–D36), designed in §5.2, §5.3, §11.5 and §11.6. Still deferred: the SolaX dongle's local API; an MQTT source for the house's energy (with M7); the chart's past bars from SolaX's own 5-minute history of the day (the Developer API's `/openapi/v2/device/history_data`), one more request a sync, instead of a snapshot a sync (owner, 2026-10-06: an option for later) |
+| M6e, M8 | The owner's requests of 2026-10-09 (D41): cycle windows per preset (M6e, §5.4) and the sync's status to HA (M8, then called M7, §12.2, §12.3). Sync now from the menu was there already (Menu ▸ Sync) |
+| M7 | The owner's request of 2026-10-19 (D44): the PC's sensors over the LAN from a Windows tray app, Show as for every numeric field, the PC layout (§12a). Proposals to raise at its plan: the app on macOS and Linux with other sources; several PCs; a session that also starts from a button |
+| M9 | Radio sleep timer; ESP-SR (echo cancellation, noise suppression, wake word) |
+| M10 | Config backup/provisioning file; sensor history CSV with graphs; sounds and station lists; 1-bit images; firmware file; logs and screenshots; from M6 (D28): radar and flight history over days, a detailed map pack, an aircraft registration database |
+| Later | IDS JMK departures; a remote 1-bit image slot; the VBUS-sense hardware mod; external I²C sensors on the header; BLE or ESP-NOW sources |
+
+### 19.1 ADS-B flight radar (M6)
+
+Designed in §11.1 and §11.3 (r28); the findings and answers below are its background.
+
+Owner request, 2026-10-01, naming viz1090 and MeteoPlaneRadar. Accepted for M6 with the weather radar (D23, D24); the owner answered the design questions the same day (D22, below). The milestone's plan settles the details.
+
+**Findings** (checked 2026-10-01)
+
+- **No reception on the board.** The ESP32-S3 has no 1090 MHz radio. A UART receiver module on the header would draw about 100 mA all the time, which a battery-first device can't afford. The data comes over Wi-Fi.
+- **viz1090** (github.com/nmatsuda/viz1090) is a desktop SDL2 app for a Raspberry Pi with an RTL-SDR running dump1090; it can't run on the ESP32, and its licence isn't stated. Worth borrowing as an idea: its map pipeline (`mapconverter.py`: Natural Earth and FAA shapefiles, simplified).
+- **MeteoPlaneRadar** (github.com/petus/MeteoPlaneRadar, MIT; Arduino on ESP32 core 3; a round 480×480 colour ST7701; USB power only):
+  - polls adsb.fi every 5, 10 or 15 s for ranges up to 25 km, up to 50 km and beyond (10–100 km selectable), doubling the interval after a failure;
+  - keeps at most 100 airborne aircraft, parsed through an ArduinoJson filter to bound memory;
+  - fetches a flight's route from adsb.lol (`https://api.adsb.lol/api/0/route`) only when its detail opens; adsb.lol answers 403 without a descriptive User-Agent;
+  - draws EU borders (about 31 000 points) and 1100 cities from a 518 KB embedded header.
+- **adsb.fi open data**: `https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{nm}`, up to 250 NM, readsb JSON compatible with ADS-B Exchange v2. At most 1 request a second; non-commercial use only; adsb.fi must be credited with a link to its site.
+- **A local receiver** (an RTL-SDR with readsb, dump1090-fa or tar1090 on a Pi) serves the same JSON as `aircraft.json` over plain HTTP: no rate limit, no internet.
+
+**Sketch**
+
+- **Data.** One parser for readsb / ADS-B Exchange v2 JSON (`ac[]`: `hex`, `flight`, `lat`, `lon`, `alt_baro`, `gs`, `track`), fed by adsb.fi by default or by a local `aircraft.json` URL. Bounded: a size cap and `util_json_depth()` before parsing (hardware gotcha 30), into a fixed aircraft table in PSRAM. Pure and host-tested: the parser, the distance and bearing projection, label placement.
+- **View.** A full-screen 1-bit radar: range rings around home; aircraft as arrows turned to their track (pre-rendered rotations) with callsign and altitude; a nearest-aircraft panel; an optional underlay of borders and towns, generated at build time by a `tools/` script like the fonts and icons (Natural Earth is public domain). Goldens and device screenshots verify it. LPM at 1–2 Hz suits updates every 5–15 s.
+- **Power, the main constraint.** The radar needs Wi-Fi on the whole time it shows, which is what sync mode `always` gives (D22). Estimate, to be measured: about 1 % of the battery per hour; nonstop it would cut the battery life from about a week to 2–3 days, so `always` suits USB power best (the firmware can only tell USB power reliably with the VBUS-sense mod, hardware gotcha 3).
+- **Settings.** `adsb.source` (adsb.fi or a local URL), range, maximum aircraft, filters (minimum altitude, aircraft on the ground). The adsb.fi credit goes in the web UI and the README.
+- **From MeteoPlaneRadar:** range-dependent polling with back-off, the User-Agent, routes on demand, the borders and cities. Rewritten in C for ESP-IDF rather than ported; adapted code would be credited in `THIRD_PARTY.md`.
+- **Fit.** It needs M5's HTTPS client, the certificate bundle and the sync framework, and sync mode `always`, which moves into M5 (D24), so it comes in M6.
+
+**Owner's answers** (2026-10-01, D22)
+
+1. **Source:** adsb.fi only; no local receiver.
+2. **When it runs:** only in sync mode `always` (D11, §9.3), which the user picks in the settings; not behind a separate switch, and no time-boxed radar sessions. The power estimate above is the price of that mode.
+3. **Map:** set in the web UI, centred on a point (default `location.*`) with a zoom level, and with towns and airports built in.
+   - Sources, both public domain, with no attribution required (terms checked 2026-10-01): OurAirports (`ourairports.com/data`; its `airports.csv` is 12.7 MB for every airport, so only the large and medium ones) and Natural Earth's populated places. GeoNames (CC BY) and OpenStreetMap (ODbL, share-alike) would need attribution, so they are left out.
+   - Proposed: a build-time `tools/` generator, like `gen_fonts.sh` and `gen_icons.sh`, packs the towns and the large and medium airports of the world into a compact table: about 12 000 entries of about 24 bytes, some 300 KB, which fits the 4 MB app slot beside the 1.3 MB image. The device picks what falls inside the configured map at render time, so it works offline for any centre. The alternative, the page fetching the area's data and uploading it to LittleFS, has more moving parts and depends on CORS.
+   - The radar's web settings could show a live preview through `/api/preview.bmp`, as the preset editor does.
+   - Settings this implies: the radar's centre (latitude and longitude) and zoom or range, and the filters above.
+
+
+### 19.2 Weather radar (M6)
+
+Designed in §11.1 and §11.2 (r28); the findings and answers below are its background.
+
+Owner question, 2026-10-01, after the flight radar; MeteoPlaneRadar shows one too. Accepted for M6 (D23, D24, below).
+
+**Sources** (checked 2026-10-01)
+
+- **ČHMÚ open data**, as in MeteoPlaneRadar: the composite of maximum reflectivity from the Brdy and Skalky radars, a new image every 5 minutes. `https://opendata.chmi.cz/meteorology/weather/radar/composite/maxz/png/pacz2gmaps3.z_max3d.YYYYMMDD.hhmm.0.png` (UTC): a 680×460 palette PNG, a few KB on a dry day, with the map at 1×1 km in web Mercator (EPSG:3857) beside side projections that get cropped away. `png_masked/` marks the echoes that reach the ground. Licence CC BY 4.0, commercial use included; the credit reads "Data: ČHMÚ, opendata.chmi.cz, CC BY 4.0". It covers Czechia and the land around it, so Brno sits well inside. A forecast for +10 to +60 min exists only as HDF5 in TAR files, too heavy for the device.
+- **RainViewer**, MeteoPlaneRadar's source outside Czechia: free for personal or educational use, with a link to rainviewer.com. Since 2026-01-01: zoom 7 at most (about 0.8 km a pixel at Brno's latitude), one colour scheme, no nowcast, 100 requests per IP per minute; 2 h of past frames at 10-minute steps, as 256 or 512 px tiles.
+
+**Sketch**
+
+- **Fetch and decode.** HTTPS through M5's client; the PNG decoded in PSRAM by a small streaming decoder (pngle, MIT, is a candidate; adapted code goes in `THIRD_PARTY.md`). Palette index to dBZ through ČHMÚ's colour scale (`scl/scl-dbz-mmh.png`), then two or three dither densities for light, moderate and heavy rain on the 1-bit panel.
+- **Map.** Both sources are web Mercator, the projection §19.1's map uses, so one map renderer with the same centre, zoom, borders and towns draws both radars. The aircraft stay on their own view, never over the rain (D23). The web UI previews it through `/api/preview.bmp`.
+- **Power: it never turns Wi-Fi on itself** (D23). Each normal sync takes one frame along, a few KB more and well under a second; in sync mode `always`, Wi-Fi is on anyway and a frame comes every 5 minutes, ČHMÚ's own step (RainViewer's is 10). So on battery it costs next to nothing beyond the sync; the frame is as old as the last sync.
+- **Where it shows** (D23): a full-screen radar layout and a smaller rain-map widget for a slot, both from the latest frame. A short loop of past frames on KEY would cost one download per frame, so it is left for the milestone's plan.
+- **A cheaper alternative**, inside M5's weather work: Open-Meteo's 15-minute precipitation forecast for the location, drawn as "rain in the next 2 hours". It needs no map and no images.
+
+**Owner's answers** (2026-10-01, D23)
+
+1. **Source:** ČHMÚ by default, and RainViewer where the map lies outside ČHMÚ's coverage.
+2. **Where:** both a full-screen layout and a slot widget. Aircraft are a separate view, not drawn on the weather radar.
+3. **Refresh:** by the board's mode at the time. The radar never starts Wi-Fi by itself: it fetches with the normal sync, and every 5 minutes while sync mode `always` is on.
+
+## 20. Risks and open items
+
+| Risk / item | Mitigation |
+|---|---|
+| The panel keeping its image through deep sleep is unverified | Test at M1/M2; fall back to light sleep |
+| Waking through BOOT (GPIO0, a strapping pin) might enter download mode | Verify at M2. If it does, wake only on KEY and the RTC |
+| Real currents are unknown (panel LPM, board quiescent, PSRAM in light sleep) | Measured at M2: the forced-PWM 3V3 converter dominates at about 60 mW. The panel and other 3V3 loads can only be split out after the PS/SYNC rework (M5) |
+| The stretch goal (D6) is out of reach on the board as built | Owner decision on the PS/SYNC rework (a VSON package with pins underneath); until then about 15 mA from the battery is expected (estimate) |
+| USB meters are inaccurate below 1 mA | Long mAh windows; note the limits in `docs/power.md` |
+| SHTC3 self-heating | Offset calibration; sample right after wake |
+| `esp_audio_codec` is distributed as prebuilt binaries, which may not suit an open-source repo | Check at M8; pick another decoder if needed |
+| Open-Meteo's free tier is for non-commercial use; it covers the forecast, air quality and geocoding APIs alike | Low request rate (two requests per sync); the provider can be swapped |
+| The RTC trim's measurement rides on the RTC's own correction swing, up to ±0.14 s within two hours at today's offset | It waits for at least 20 h between sets (±1.6 ppm against a step of 4.34 ppm); a trim one step off still leaves under 0.4 s a day |
+| The Czech name-day calendar needs a source whose licence allows redistribution in this repository | Checked 2026-09-29: the best list (`namedays-cs`, MIT) traces its data to Czech Wikipedia (CC BY-SA); others were incomplete, broken or unlicensed. Deferred (D16): `cs` ships the holidays only until a clean source turns up |
+| The critical-battery path has not met a really low battery: its thresholds are host-tested and its screen is a golden, but its KEY-only sleep has not run on the board | Watch the first time the board runs flat on battery (M5 power work) |
+| No RTC backup cell (D9): the time is lost at every PWR-off | Sync at boot when Wi-Fi is configured, otherwise a "Set time" prompt; the owner may fit an ML1220 (§7) |
+| The board's spot gets the home network at −87 to −88 dBm (M5): syncs of up to 27 s, and a step that times out now and then | The 45 s and the retries bound it; moving the board or the router helps. On 2026-10-02 the home network changed to another router, at −56 dBm from the board: a sync takes 1.6 s |
+| The RTC trim measures only across syncs at least 20 h apart (M5 review) | The default schedule trims; `interval`, `always` and several daily times keep the RTC untrimmed, which matters once syncs stop. Owner decision: a measurement that adds up each set's error instead (a §7 change) |
+| The deep-sleep idle strategy's syncs (a routine wake has no NVS) are fixed but unchecked on the board, which never deep-sleeps while tethered | Check with the power measurements on battery (§9.4) |
+| The ČHMÚ image's bounds come from MeteoPlaneRadar's reading of ČHMÚ's documentation (§11.2) | Constants, checked on the board with a rainy frame against ČHMÚ's own viewer; on 2026-10-02 a nearly dry frame's light rain at the view's corner drew where ČHMÚ's file has it, and a rainy frame is still to compare |
+| RainViewer's free use is personal and educational, 100 requests a minute per IP and zoom 7 at most, and its terms changed in 2026-01 | Used only outside ČHMÚ's coverage; a refusal shows "No radar here" |
+| adsb.fi's open data are for non-commercial use, at most 1 request a second, with credit; adsb.lol's rate limits move and may need an API key later | Caps, back-off and credits; routes are optional, and the flight radar works without them |
+| The map's data (0.5–1 MB) bring the image to about 2.5 of the app slot's 4 MB | The generator thins the data; OTA still fits. As built: 859 KB of map, an image of 2.47 MB, 41 % of the slot free |
+| The forecast's request line (451–454 B) sits about 10 B short of esp_http_client's 512 B transmit buffer, past which the request goes out empty and the step times out (M6 review) | Fixed with D37: `fetch` sets a 2 KB transmit buffer, which a bearer token's header needs too |
+| Open after M6's review: the radar refresh isn't a wake input (a display interval above 5 min slows it, a clock set back stops it until it catches up); a retry on a hung kept connection gets the full timeout again; "png:" details cut at 24 bytes and timeouts reading "ESP_FAIL"; `rain.map` shows "—" before the first frame; an older RainViewer frame from a smaller tile set can survive a second pan into the loop; `radar.bin`'s CRC covers only the levels; about 12 KB of new internal static buffers; no wrap at the antimeridian | Deferred minors, for the owner to choose |
+| Open after M6b's review (minors): the battery's voltage line ignores its comma's tail, which can touch an 82 px M cell's bottom row in Czech; wrapped small text ("Wed 30 Sep", "Svátek práce") loses 1–2 px of its descenders in 81–82 px narrow cells; the sun widget's polar text is cut in wide S cells 51–52 px tall; in a night the toggle names the night's end even when quiet hours end later; `test_ui_catalog` samples the sizes in steps that miss their boundaries; `webui.h` still says presets up to 16 KB | M6c fixed the wrapped text, the polar text, the catalogue's sampling and the comment; the rest is raised at M7's planning, where M7 touches their code (D25's rule) |
+| No broker or Home Assistant yet (2026-10-03): M7's checks with HA wait for the owner's setup | M7 is built and host-tested; between tests the board runs the stable firmware with its configuration restored (§12.10) |
+| Each sync's MQTT session adds radio time: the broker's connect, up to 1 s of quiet, the publishes | Measured once HA exists (§9.4); a broker that is down costs no retries (D32) |
+| A rollback or downgrade to M6 refuses a `presets.json` with split presets and starts from the built-ins | Only presets made after the update are at stake; forward compatibility isn't promised |
+| GeoNames' towns end at ČHMÚ's area: views beyond it show small towns crowding its edge (Teutschenthal, Boxberg) | Cosmetic, outside the home region |
+| A Rain radar wake is awake 287 ms on light sleep (346 ms on deep, with the file), against about 60 ms for the dashboards | The owner's power measurements (§9.4) decide; the town loop's doubles are the first saving |
+| Rain dithered on 1 bit over borders and labels | Label halos; the owner checks the panel |
+| SolaX Cloud's API (V4.0, 2021) has changed hosts before (`:9443/proxy`, `/proxyApp/proxy`, a V2 at `global.solaxcloud.com`) and puts its token in the query | The endpoint evcc uses today; the parser takes the same fields from either reply; the token never reaches a log (§10.4). As found at M6d's board checks: solaxcloud.com issues no new Token IDs, so new accounts use the Developer API (D37) |
+| The Developer API's field names and signs come from SolaX's documentation and Home Assistant's integration (D37); a plant whose replies differ would show wrong flows | `energy raw` prints the last replies to check them; the owner's plant worked on 2026-10-05, and its detailed comparison with the SolaX app is in the acceptance |
+| The Developer API's token lives in RAM only (D37): with `power idle deep`, each wake's sync logs in again, one more request | Light sleep, the default, keeps it; the login is one small POST |
+| Solcast's hobbyist accounts get 10 calls a day, down from 50, and could get fewer | The budget (§11.5) keeps the device under it; Open-Meteo needs no account |
+| Forecast.Solar's free tier counts 12 calls an hour per IP, which other devices behind the same router share | One call a sync; a 429 keeps the forecast (§9.3) |
+| Our PV model is simple: no shading, no horizon, a fixed temperature coefficient and losses | The owner compares it with Forecast.Solar or Solcast on the same days; `losses_pct` tunes it |
+| M6c and M6d bring the snapshot to about 5.4 KB of RTC slow memory's 8 KB, beside M7's values | The plan reads the link map first; the quarter-hour readings can leave RTC (§6). As built (M6c): 4 664 bytes, 4 816 of the 8 192 in use |
+| `presets.json` with 24-cell trees reaches about 36 KB, past the web server's 24 KB bodies | Bodies and replies up to 64 KB in PSRAM (§10.3); a rollback to M6b refuses such a file, loads its `.bak` if that parses, else the built-ins, and its next save overwrites the file: the backup around a test brings it back (§12.10) |
+| Open after M6c's review (minors): narrow one-line XS pollen cuts its word where its level bar fits; an XS date in a 40–43 px one-line cell cuts its weekday where the day alone fits; a 12-hour clock in narrow stacked XS cells loses AM/PM though there is room under it; S pollen's level word is cut in narrow short cells; the ↓/↑ mark crowds a negative value in narrow short S cells; the largest-values test data's PM is 255, which means none, so it isn't drawn; the cut and stale-mark checks run on sampled XS and short-S sizes, not on all 2451; Weather's 200×118 slots draw the air quality's word 2 px further left, and a Czech holiday whole without its icon, and Classic's slots draw polar words in sans 12; a cell 1 px wider can draw its value smaller across XS and S; the editor's 28 px a level crowds deep trees on a phone | Deferred (D25's rule): raised where a later milestone touches their code |
+| Open after M6d's reviews (minors): the plan's four: the battery's auto rule lists SolaX's V4.0 hybrid types 2, 3, 5, 10 and 13 but not the G4 ones (14, 15 and maybe more; a charge above 0 % covers a battery that reports one); "No solar forecast yet", and the Energy layout's "No data from the inverter yet", also show when an old forecast or reading has expired; Solcast's first fetch after sunrise makes today the rest of the day, so the morning comes from the last forecast or not at all; there is no daily count of Solcast's calls (the 3 h and 6 h waits keep under 10). The execution's five: SolaX's own refusal text can be cut inside a UTF-8 character (the panel's decoder stops cleanly at it); a Sync ▸ Steps switch in the menu plans no sync (turning Weather on with no forecast waits for the next scheduled one); Check now during `always`' 5-minute refresh answers 409 instead of waiting for it; the Sync page shows "kept: kept" for Solcast's budget; `solar.bin` is rewritten after a failed Open-Meteo or Forecast.Solar step though nothing in it changed | Raised at M7's planning, where M7 touches their code (D25's rule) |
+| Open after D37's review (minors, 2026-10-06): finding the battery and the meter is all or nothing, and a refusal on the residential plant page ends the search; credentials changed while a step runs can bring the old token and plant back, and a region change resets neither (a generation counter would tie them); `dev_login`'s form body, which holds the secret, isn't wiped after the POST; a numeric `plantId` is read from its first mention in the reply, and only its leading digits; a statistics row dated by its day number alone is missed; `mpptMap` adds every key ending in "Power", a total key included; the battery's auto rule ignores a battery device that was found; the sync task's stack (10 KB) hasn't been measured on the Developer API's deeper path; `energy raw` keeps the last Developer API replies after a switch to the Token ID, and cuts each at 2 KB without a mark; `read_solar` falls back to the constant region, and two comments are stale | Raised at M7's planning; the stack and the replies' forms are checked with `energy raw` and a high-water mark at M6d's acceptance |
+| Open after M6e's review (minors): a closed window still scans ahead for its opening when the cycle's step asks no change time; `ui_window.c` repeats `ui_forecast.c`'s sun cache, keyed without the zone; the page shows a stored end it can't read (an offset of 1.5, a cleared time) as 07:00 after a re-render, while Save refuses it; while any window is bad, every preview fails; "In the cycle: All day" shows on presets outside the cycle, and `preset window … off` says "always in the cycle" for one outside it; no host test of a location change, nor page tests of a copied windowed preset and an offset of 1.5; two compound literals leave a padding byte unspecified where a test compares memory; the console reads days in octal from a leading zero, as `schedule add` does | Fix where later work touches the code. The review's tenth, a refusal cut at 96 bytes, was fixed after the board checks found it in the preview too, for any id of four characters or more (`UI_PRESET_ERR_LEN`); the polar edges went with the midnight rule of 2026-10-19 (§5.4) |
+| Open after M6e's final review (minors, 2026-10-19): `preset window` prints the window as saved even when `presets.json` wasn't written; a window's `"days": null` is refused, where a missing key means every day; a change a week ahead prints like one today ("closed until Fri 07:00" on a Friday after it); switching both ends to a time on the page gives 07:00–07:00, which Save refuses; the list's window summary squeezes the preset's name at phone width | Fix where later work touches the code |
+| The auto-cycle's first step after the presets are replaced (the web page's save, a restore) waits for the next tick, the next display update at the default, plus the interval: the save clears the cycle's timer, which the next tick arms (found at M6e's board checks; older than M6e) | Up to a minute late at the default; noted, not changed |
+| The board went mute again at M6e's checks (2026-10-19), after a console `reboot` in config mode: the log ended in Wi-Fi's shutdown, then nothing; the port stayed, KEY didn't wake it, and esptool got no answer. The core dump partition held only an older image's dump, so it hung rather than panicked | A power cycle recovers it (`AGENTS.md` §6); the cause is still unknown |
+| HWiNFO's shared memory layout may change with a version, and the free HWiNFO stops it after 12 h | The app checks the header's version and sizes and refuses a layout it doesn't know, saying so on its page; the owner runs HWiNFO Pro (D44) |
+| The PC app's exe is unsigned, and Windows' firewall asks before the LAN reaches it | SmartScreen warns once; the app's page says to allow private networks; signing needs a certificate, not planned |
+| The PC's token travels in plain HTTP on the home network | LAN only, as the board's own web UI (§10.4); a new token from the app's page if it leaks |
+| A PC session starts up to one sync interval after the PC wakes (the owner's choice, D44) | A shorter sync interval, or sync mode `always`, finds it sooner |
+| RTC FAST memory holds the visuals' pool (M7) and M8's values block | As built, M7's presets block takes 4 444 bytes of RTC FAST memory, leaving no room for M8's values block (about 4 KB); RTC slow memory has about 4 KB free (`.rtc.data` 4 120 bytes). M8's refresh puts the block in RTC slow memory or makes room, reading the link map first |
+| Open after M7's reviews (minors): the editor's bounds for a power or an energy are in kW and kWh and don't say so (D38 shows W under 1 kW); `pc demo off` empties the PC preset even when the owner changed it, `pc demo on` during a session says "shows" and does nothing, a session that starts during the demo keeps its fill and stale values, "DEMO-PC" stays as the name after it, the demo's fill isn't saved across a reboot, and its history up to 59 s back can clear a series' minutes; the PC step can take longer than its 2 s (a name's lookup and a body that times out, read as "not reflbo-stats"); a deferred night started at a session's critical-battery end takes the critical screen's place; values near FLT_MAX overflow a visual's automatic range and draw "nan"; changing a layout or splitting a cell drops a "not sent now" reading without a toast; `/fs/state/pc.json` is rewritten on every catalogue; the editor accepts a bound such as 1e39 that the board refuses; a chart's automatic range dips below 0 for values that never do ("−10" under a CPU load); an automatic bar or ring with a value near 0 draws nearly full | Minors; raise at M8's planning |
+| A cold boot came alive before its presets loaded, so the charts' history was never taken and no chart drew a line (found at M7's board checks) | Fixed: the history is taken once the presets load when the board is already alive |
+| A PC session's power: Wi-Fi up and a redraw a second | The owner's checks measure it; the board by the PC is likely on USB |
+| `version`'s build date is the app description's, compiled once per clean build, so two builds can show the same date (M6d's board checks) | Only the ELF hash in the same line tells builds apart (`AGENTS.md`, gotcha 44) |
+| The web UI moving focus to a text box on a phone (owner, 2026-09-30) | Not reproduced in iOS 26 Safari; waiting for the phone and browser |
+| Homebrew Python 3.14 on this Mac (3.14.6 and 3.14.7 checked) can't load `pyexpat` (it expects a newer libexpat than macOS 26.2 has), which breaks pip and the ESP-IDF installer | ESP-IDF uses uv's Python 3.13 through `~/esp/python-shim` (`AGENTS.md` §6) |
+
+## 21. Revision history
+
+| Rev | Date | Changes |
+|---|---|---|
+| r1 | 2026-09-25 | First draft |
+| r2 | 2026-09-25 | Configurable sync schedule (`times` / `interval` / `always` / `manual`) and display update interval (D11, §9.2, §9.3); terms defined (§1.4); no RTC cell fitted, so a boot with invalid time syncs at once (§3.3, §7); ST7305 partial-update findings: RAM windows are supported but don't lower panel power, so v1 pushes full frames (§4.2) |
+| r3 | 2026-09-25 | Approved by the owner; licence confirmed (D8); Python toolchain risk recorded (§20) |
+| r4 | 2026-09-25 | M1 panel check: factory init sequence with a separate LPM rate, default 1 Hz, configurable at runtime (D12, §4.2); a 120 ms wait after a panel reset (datasheet §12.1.4); HPM/LPM switching delays from datasheet §7.11; `panel rate` and `panel fps` (§15); landscape only (D13); `display` and `util` components (§3.1) |
+| r5 | 2026-09-28 | M2: a tethered board stays awake and light sleep is entered explicitly (D14, §3.4), with measured wake costs; board, rtc and power rows updated (§3.1); NVS `sys/idle` (§14.2); `sleep test` (§15) |
+| r6 | 2026-09-28 | M2 review: routine wakes skip the console, NVS and info logs (§3.3), which cuts a deep wake from 168 to 63 ms of app time (§3.4); a failed boot keeps the console up while tethered, otherwise it sleeps 5 min and boots again (§3.3); `sleep stats` reports per-cycle slept times (§15); a boot that comes alive reports a stored core dump (§16) |
+| r7 | 2026-09-28 | M2 measurement: D3 is light sleep (§1.2, §3.4); the forced-PWM 3V3 converter sets a ~60 mW floor and puts the stretch goal out of reach without a board rework (§9.4, §20) |
+| r8 | 2026-09-28 | M3 scope: accepted proposals (D15): the LPM rate setting (§4.2), extra local fields and trends (§5.1), the schedule (§5.4), night sleep (§9.1, §9.2), the `cs` pack (§5.8); hidden menu items for later features (§5.7); M3 split into M3a and M3b (§18) |
+| r9 | 2026-09-29 | M3a as built: the status bar's `status_clock` and `status_battery` options and the built-in Indoor preset, from the owner's render review (§5.2, §5.4); preset validation (§5.4); widget sizing and ellipsis (§5.3); the datastore's scope, ownership and snapshot (§6); fonts and Material icons (§4.4, §4.5); the `lang_` prefix and storage's host-tested parts (§3.1); `power_plan()` in the runtime model (§3.2); the settings keys read and the `/fs` mount (§14.3); `field clear` (§15); golden updates and the sanitizer build (§17) |
+| r10 | 2026-09-29 | Owner decisions (D16): the `cs` pack ships the public holidays only for now (§5.8, §20); a held button is left out of the wake sources (§9.2) |
+| r11 | 2026-09-29 | M3b as built. The menu without Contrast and with the offset steps (D17, §5.7), and the menu's gesture timings (§5.6). Toasts and the critical screen (§5.5), the critical hysteresis and the humidity clamp (§8). The schedule's order and validation (§5.4), and night sleep (§9.1). Panel sleep and wake with NRDSLP (§4.2). The fallback toast, the kept backup and the nesting limit (§14.3, §5.4), and factory reset (§14.4). The `night`, `schedule` and `panel sleep\|wake` commands, and `--list` for the renderers (§15, §17). The sensor TTL (§5.1) and a critical-battery risk (§20) |
+| r12 | 2026-09-29 | M3b review: a held button no longer keeps the board awake, and an ignored press's release is debounced (§9.2); the critical sleep wakes on a held KEY's release and stays awake while a PC is attached (§8); schedule entries at a night's end run, and none run after a long gap or on the critical screen (§5.4); the date-time editor starts in 2026 (§5.7) |
+| r13 | 2026-09-30 | M4 scope (D18): a web UI password instead of the admin PIN (§10.2, §10.4, §14.2, §19), with Menu ▸ Wi-Fi ▸ Reset web password (§5.7); one M4 plan; no ELF hash in the snapshot |
+| r14 | 2026-09-30 | M4 spike review (D19): when the first-run screen appears, and its buttons (§5.5, §5.6); the status bar's Wi-Fi state moves to M5 and M6 (§5.2); web restarts return in config mode (§10.2); the M4 pages, with Device, and the clock set from the phone (§10.3); changing the web password and logging out (§10.4); the −2.0 °C default temperature offset (§8); accepted extras (§19) |
+| r15 | 2026-09-30 | M4 as built: the components (§3.1); the menu's Wi-Fi section and Info rows (§5.7); the AP's channel, testing a network, and the portal address (§10.1); what ends config mode and what runs meanwhile (§10.2); the API (§10.3); the password record, sessions and login throttle (§10.4); OTA checks and measurements (§10.5); NVS keys (§14.2); `location.*` and the merge patch (§14.3); the backup bundle (§14.4); `wifi` (§15); the new host tests (§17) |
+| r16 | 2026-09-30 | M4 review: long menu values are cut (§5.7); leaving a network for a test is never its failure (§10.1); config mode doesn't watch the battery, and the resume flag is in NVS (§10.2, §14.2); bodies are read once, nested at most 18 levels, and a stalled client gets 408 (§10.3); 2 KB of headers for other gadgets' cookies (§10.4); an image that fails to start rolls back at once (§10.5) |
+| r17 | 2026-09-30 | M4 acceptance (D20): the globe in the status bar and the dashboard in config mode while a phone is logged in (§5.2, §10.2); the running clock's phase and the seconds' refresh rate (§7); battery samples in config mode and the battery calibration (§8, §14.3); the Device page's battery card and the preset editor's slot names, new presets in the cycle and Undo (§10.3); two open items (§20) |
+| r18 | 2026-09-30 | D21: learning the battery curve from a full discharge (§8), `POST /api/battery/learn` (§10.3), `battery.learned_mv` (§14.3); the open item on a learned curve is closed (§20) |
+| r19 | 2026-10-01 | ADS-B flight radar proposal, for after M5, with three owner questions (§19, §19.1) |
+| r20 | 2026-10-01 | The owner's answers on the ADS-B radar (D22, §19.1): adsb.fi only, the always-on client mode, a centred and zoomed map with built-in towns and airports; one question left |
+| r21 | 2026-10-01 | The ADS-B radar runs in sync mode `always` (D22); its last question is closed (§19.1) |
+| r22 | 2026-10-01 | Weather radar proposal: ČHMÚ and RainViewer, a map shared with the ADS-B radar, three owner questions (§19, §19.2) |
+| r23 | 2026-10-01 | Both radars join the roadmap as M7 (D23): the milestone table (§18), the weather radar's answers and power (§19.2), the flight radar's slot (§19.1); Audio becomes M8 and microSD M9 (§5.2, §5.7, §9.4, §10.3, §10.5, §13, §14, §15, §19, §20) |
+| r24 | 2026-10-01 | D24: sync mode `always` moves into M5, the radars become M6 and MQTT/HA M7 (§5.1, §5.2, §9.4, §10.3, §18, §19) |
+| r25 | 2026-10-01 | M5 scope (D25): air quality and pollen fields with their bands and levels (§5.1, §6, §11); the status bar's sync and Wi-Fi state (§5.2); the Weather preset in the cycle (§5.4); the menu's Sync section (§5.7); SNTP to the millisecond and the RTC trim (§7, §14.2, §20); quiet hours, config mode and `always` mode in the sync, its steps and results (§9.3, §10.2); fast connect without RTC RAM (§10.1); the Sync page, the place search and their API (§10.3); the web UI on the LAN (§10.4); `time.ntp` and `sync.*` (§14.3); `sync status` (§15); the tests (§17); the M5 row (§18, §19) |
+| r26 | 2026-10-01 | M5 spike review (D26): Weather Icons beside Material Icons (§4.5); `aq.uv` and the UV bands, the day length's change, "None" for pollen (§5.1, §6, §11) |
+| r27 | 2026-10-01 | M5 as built: the components (§3.1); the menu's Sync section and Info row (§5.7); the snapshot's size and the forecast file (§6); our own SNTP client, the lost clock's retries and the trim's loading and reach (§7); the 45 s, the syncs the device needs, nights and leaving `always` mode, and the measured syncs (§9.3); rejoining by name and a station without an address (§10.1); the place search's and the status's final shape (§10.3); the new tests (§17); three open items (§20) |
+| r28 | 2026-10-01 | M6 design (D27, D28): the map, the weather radar with its loop, the flight radar with routes, and rain in the next 2 hours (§11.1–§11.4); their fields, layouts, presets and control (§5.1, §5.2, §5.4, §5.6); the 15-minute rain's storage (§6); the radar step, refresh and flights in the sync (§9.3, §9.4); the Radar page and status (§10.3); `radar.*` and the frame file (§14.3); `radar` commands (§15); the tests (§17); the M6 row (§18); M6's place in §19 and M9's new candidates; five risks (§20) |
+| r29 | 2026-10-02 | D29, the owner's answers to the M6 plan: GeoNames' towns in ČHMÚ's radar area, with their credit (§1.2, §11.1) |
+| r30 | 2026-10-02 | M6 as built: the components (§3.1); `wx.rain2h`, `rain.map` and the two layouts (§5.1, §5.2); the snapshot (§6); the refresh, a sync on demand behind it and ČHMÚ's names from NTP (§9.3); the Radar page and the status API (§10.3); the map's pack and D29's towns, labels on boxes (§11.1); the frame file, coverage, `2/0_0`, zlib on the host (§11.2); the flight radar's failures and board figures (§11.3); the 15-minute convention (§11.4); `radar.bin` (§14.3); `radar status` (§15); the tests (§17); open items (§20) |
+| r31 | 2026-10-02 | D30: BOOT short on the Radar layout syncs for a fresh frame when the loop can't play (§1.2, §5.6, §11.2) |
+| r32 | 2026-10-02 | M6b design (D31): the split layout (§5.2), split presets in `presets.json` (§5.4), BOOT double for sync mode `always` (§5.6, §9.3), the editor (§10.3), `sync.mode_before_always` (§14.3), the tests (§17), the M6b row (§18) |
+| r33 | 2026-10-02 | M6b as built: each kind's least heights in split cells (§5.2), numbers fitted to the height, the weather widgets' smaller digits in frost and heat (§5.3), split presets' JSON as written and `presets.json` up to 20 KB (§5.4), the toggle's toasts and its guard after the menu (§5.6), the snapshot's version 8 (§6), the editor's numbered cells and the API's 24 KB (§10.3), `sync.mode_before_always` (§14.3), the tests (§17), the review's open items (§20) |
+| r34 | 2026-10-03 | M7 design (D32): §12 rewritten (settings, topics with key-press triggers, discovery with buttons, a notify entity and device triggers, commands, field ids and the values' RTC block, the message, sessions and failures, testing on the board with the stable firmware); the `ha.message` field (§5.1); the MQTT mark (§5.2); `mqtt.<key>` in presets (§5.4); the message banner (§5.5); KEY and the banner (§5.6); the values outside the datastore (§6); the MQTT step and its failures (§9.3); the MQTT page and its API (§10.3); `ha_mqtt` (§3.1); `sys/mqtt_disc`, `mqtt.*`, the backup's `mqtt_fields.json` (§14); `mqtt status` (§15); the tests (§17); the M7 row (§18); the M7 proposals (§19); two open items (§20) |
+| r35 | 2026-10-04 | M6c and M6d design (D33–D36), M7 on hold: requirements R12–R14 (§1.1); services and the sync's steps (§1.3, §1.4); `solar` and `energy` (§3.1); the new icons (§4.5); the `pv.*` and `energy.*` fields (§5.1); the Solar and Energy layouts, cells down to 40×20 and up to 24, XS, sizes that never shrink (§5.2); XS, S in short cells, the chart and the flow (§5.3); the larger `presets.json`, the Solar and Energy presets (§5.4); Sync ▸ Steps (§5.7); the solar state and the snapshot's cap (§6); the steps' switches, the Solar and Energy steps, the energy in `always` (§9.3, §9.4); the Solar page, the editor, 64 KB bodies, `/api/solar/check` and the status (§10.3, §10.4); the PV forecast and the house's energy (§11.5, §11.6); `stable-m6d` (§12.10); NVS keys, `solar.bin`, `sync.steps`, `solar.*`, `energy.*` (§14); `solar` commands (§15); the tests (§17); the M6c and M6d rows (§18); §19; six risks (§20) |
+| r36 | 2026-10-04 | M6c as built: the 16 px icons (§4.5); S's measured heights, 2451 cell sizes and a 24-cell wake's 77 ms (§5.2); what gives way before a cut in XS and S, the date's day form, the sun's line with both times, polar day and night, the age mark only where it has room (§5.3); the largest file (§5.4); the snapshot at 4 664 bytes, version 9 (§6); 22 levels (§10.3); `stable-m6b` and M6c's presets (§12.10); the tests and the board checks (§17); M6c's review minors (§20) |
+| r37 | 2026-10-05 | A sun cell with room for one time shows the next event (owner): §5.3 |
+| r38 | 2026-10-05 | M6d as built, and SolaX Cloud's Developer API (D37): §1.2; `solar` and `energy` need `timekeeping`, `ui` both, `fetch`'s POSTs and bearer header (§3.1); the fields' short forms, the grid's label and arrow, freshness (§5.1); the layouts as built, the stale warning and the dashes, a Solar wake's 107 ms (§5.2); the fit test's three fixes, the chart's past (§5.3); the built-ins and the marker (§5.4); Sync ▸ Steps as a section (§5.7); the snapshot at 5 680 bytes (version 10), then 5 856 (version 11), RTC slow memory 6 008 of 8 192 (§6); the steps' results, which failures fail a sync, the forecast's need, the energy refresh, Check now, the measured sync, heap and stack, the Developer API's requests (§9.3); the API as built, the restore's keys and second plane, Check now's 409 (§10.3); `fetch`'s logs and the Developer API's secrets (§10.4); Forecast.Solar's watts as a line and `/estimate/watts/`, the forecast's bounds and budget, the measured Brno day (§11.5); the Developer API's login, plant, reading, today's totals and refusals, the midnight rule as built (§11.6); the way back to `stable-m6b` (§12.10); the Developer API's NVS keys and `energy.region`, `solar.bin`'s layout, version 2 (§14.2, §14.3); `solar status` as built, `energy raw` (§15); the tests (§17); M6d built (§18); the transmit buffer fixed, the Developer API's risks, M6d's open minors, the stale build date (§20) |
+| r39 | 2026-10-06 | D37's review: a refusal is HTTP 401 or 403 or another code, and an unreadable `dataTime` refuses the reply (§11.6); D37's open minors (§20) |
+| r40 | 2026-10-06 | Powers under 1 kW in watts (D38): §1.2, §5.1, §5.3 |
+| r41 | 2026-10-06 | The house's use from the inverter's phases and its backup port, as the owner's X3-Hybrid reports them (§11.6) |
+| r42 | 2026-10-06 | Solar as the SolaX app shows it (D39): §1.2, §11.6; the 5-minute history as a later option (§19) |
+| r43 | 2026-10-06 | `stable-m6d` is the stable firmware (§12.10) |
+| r44 | 2026-10-06 | M7's refresh (D40): §1.2; the fields' kinds, state labels, time, no value, where they draw (§5.1, §12.5); the house's energy from MQTT (§9.3, §11.6, §12.11, §14.3); the MQTT and Solar pages (§10.3); the M7 rows (§18, §19) |
+| r45 | 2026-10-09 | The owner's requests (D41): §1.2; cycle windows per preset (§5.4, §10.3, §15, §17), built as M6e (§18); the sync's status to HA, built with M7 (§12.2, §12.3, §12.4, §18); §19 |
+| r46 | 2026-10-12 | The owner's request in the T5 fork (D42): §1.2; a slot's and cell's own title and a cell's forced title (§5.2, §5.4); the snapshot's cap at 7 KB (§6); the Presets page's titles, Export and Import (§10.3) |
+| r47 | 2026-10-13 | The owner's request in the T5 fork (D43): §1.2; the last good sync's time in the status bar (§5.2), the `status_sync` option (§5.4), its box on the Presets page (§10.3) |
+| r48 | 2026-10-19 | M6e as built (D41): the cycle windows' polar nights, clock ends across midnight, the evening before, the bounds' bytes, the shared words and the largest file (§5.4); the snapshot with M6e and D43 (§6); `preset list`'s window lines (§15); the tests and the board checks (§17); M6e built (§18); the review's minors and the checks' findings (§20) |
+| r49 | 2026-10-19 | The owner's midnight rule after M6e's final review (D41): a window with a sun end runs past midnight only from evening to morning (§1.2, §5.4, §17, §20) |
+| r50 | 2026-10-19 | A forecast's gaps keep only a forecast for the same place, source and roof (§11.5); the snapshot with it (§6) |
+| r51 | 2026-10-19 | The owner's request (D44): the PC's sensors as the new M7 (§1.2, §1.3, §1.4, §3.1, §5.1, §5.2, §5.3, §5.4, §6, §9.3, §10.3, §12a, §15, §17, §18, §19, §20); MQTT and Home Assistant become M8, audio M9, microSD M10 |
+| r52 | 2026-10-19 | The visuals and the PC layout as the owner approved them from the spike's renders (§5.2, §5.3) |
+| r53 | 2026-10-19 | The PC app's review: the token's form (§12a.1) and its NVS key (§14.2) |
+| r54 | 2026-10-21 | M7 as built (D44, D45): the history with each value's time, its size and when it is taken (§5.3); the presets' 64 KB, the PC ids, the visuals' pool of 20-byte entries, the PC preset filled while empty (§5.4); the presets in their own RTC FAST block and no room left there for M8 (§6, §20); the PC step as built (§9.3); the PC page, Test and the API (§10.3); the close codes, leaving `always` by hand (D45), the deferred night and the files during a session (§12a); `pc status` and `field` (§15); the tests (§17); M7 built (§18); M7's open minors (§20) |
+| r55 | 2026-10-21 | The licence: GPL-3.0-only with a permission for ESP-IDF's object-only libraries, in place of Apache-2.0 (D8, D46) |
+| r56 | 2026-10-29 | M7 accepted (§18); `stable-m7` is the stable firmware (§12.10) |

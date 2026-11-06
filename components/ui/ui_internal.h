@@ -1,0 +1,86 @@
+#pragma once
+
+#include "gfx.h"
+#include "ui_fields.h"
+#include "ui_layout.h"
+#include "ui_preset.h"
+
+/* Shared by the ui sources; not part of the component's API. */
+
+#define UI_BATTERY_LOW_PCT 15 /* spec §8: the status bar marks a low battery */
+
+/* "20:48" or "8:48 PM": a UTC time in local time, as the clock setting shows it (ui_forecast.c). */
+void ui_clock_text(const ui_context_t *ctx, time_t t, char *out, size_t size);
+/* An age as the stale mark shows it: "45 min", "3 h", "2 d" (ui_widget.c). */
+void ui_format_age(const lang_t *lang, uint32_t age_s, char *out, size_t size);
+/* The pattern's one "%s" replaced by `value`, as the packs' LS_AGO has it ("%s ago", "před %s"). */
+void ui_fill(const char *pattern, const char *value, char *out, size_t size);
+/* rain.map (ui_radar.c, M6); false for any other field. */
+bool ui_resolve_radar(const ui_context_t *ctx, ui_field_id_t field, ui_value_t *out);
+/* Its widget in an M or L slot; false for any other kind. */
+bool ui_radar_widget(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v);
+/* pv.* and energy.* (ui_solar.c, M6d); false for any other field. */
+bool ui_resolve_solar(const ui_context_t *ctx, ui_field_id_t field, ui_value_t *out);
+/* pc.<id> (ui_pc.c, M7); false for any other field. */
+bool ui_resolve_pc(const ui_context_t *ctx, ui_field_id_t field, ui_value_t *out);
+/* pv.chart and energy.flow in an M or L slot (ui_solar.c); false for any other kind. */
+bool ui_solar_widget(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, const lang_t *lang);
+
+/* The weather, air quality, pollen and sun fields (ui_forecast.c, D25); false for any other field. */
+bool ui_resolve_forecast(const ui_context_t *ctx, ui_field_id_t field, ui_value_t *out);
+/* Their widgets; false for a kind they don't draw. */
+bool ui_forecast_draw(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v);
+/* A sky's icon at 16, 24 or 48 px, its night variant where it has one. */
+const gfx_bitmap_t *ui_sky_icon(int sky, bool night, int size);
+
+/* XS draws the symbol over the value in a cell narrower than 120 px and at least 44 tall, else one line
+ * (ui_widget.c, D34). */
+bool ui_tiny_stacked(gfx_rect_t r);
+/* How far `text`'s ink reaches above and below the baseline in `f` (ui_widget.c). */
+int ui_ink_above(const gfx_font_t *f, const char *text);
+int ui_ink_below(const gfx_font_t *f, const char *text);
+/* Draws `v` in r at `size`; returns whether it drew its label (ui_label()). */
+bool ui_widget_draw(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, ui_stale_policy_t policy,
+                    const lang_t *lang);
+/* Whether ui_widget_draw() with these arguments would draw `v`'s label (spec §5.4, D42): a dry run into `fb` with
+ * nothing to draw on, so its pixels stay as they are. */
+bool ui_widget_labelled(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, ui_stale_policy_t policy,
+                        const lang_t *lang);
+/* Whether the stale policy leaves the slot empty: nothing drawn, not even a title. */
+bool ui_widget_hidden(const ui_value_t *v, ui_stale_policy_t policy);
+/* A widget's label, where it draws it: notes it for ui_widget_labelled() (D42). */
+/* M7: a numeric value's number, and its own range (spec §5.3). */
+static inline void ui_set_num(ui_value_t *v, float num)
+{
+    v->has_num = true;
+    v->num = num;
+}
+
+static inline void ui_set_range(ui_value_t *v, float lo, float hi)
+{
+    v->has_range = true;
+    v->range_min = lo;
+    v->range_max = hi;
+}
+
+static inline const char *ui_label(const ui_value_t *v)
+{
+    if (v->label_shown != NULL) {
+        *v->label_shown = true;
+    }
+    return v->label;
+}
+void ui_status_draw(gfx_fb_t *fb, const ui_context_t *ctx, const ui_preset_t *preset, bool any_stale);
+/* The last good sync's time for the status bar (spec §5.2, D43): today "14:05", earlier in the week "Mon 14:05",
+ * else (a week or more, or a later day) the language's short date. `brief` drops an earlier day's time ("Mon"). */
+void ui_sync_time_text(const ui_context_t *ctx, time_t at, bool brief, char *out, size_t size);
+/* The longest of those forms that fits `room` px in `font`; false and "" when none does. */
+bool ui_sync_time_fit(const ui_context_t *ctx, time_t at, const gfx_font_t *font, int room, char *out, size_t size);
+/* Splits text that is wider than max_w into two lines at the last space that lets the first
+ * line fit; each line is then cut with an ellipsis if it is still too wide. line2 is empty when
+ * the text fits on one line. */
+void ui_split_two_lines(const gfx_font_t *font, const char *text, int max_w, char *line1, char *line2, size_t size);
+/* A battery outline w x h with a nub, filled to `pct` (no fill if pct < 0). */
+void ui_draw_battery(gfx_fb_t *fb, int x, int y, int w, int h, int pct);
+/* The Moon's disc in a thin outline, its shadow inked. */
+void ui_draw_moon(gfx_fb_t *fb, int cx, int cy, int r, double age);

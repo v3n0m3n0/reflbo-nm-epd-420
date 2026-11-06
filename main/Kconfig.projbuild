@@ -1,0 +1,87 @@
+menu "reflbo"
+
+    config REFLBO_TZ
+        string "Time zone (POSIX TZ string)"
+        default "CET-1CEST,M3.5.0,M10.5.0/3"
+        help
+            Default time zone, Europe/Prague (spec §7). settings.json overrides it.
+
+    config REFLBO_TZ_NAME
+        string "Time zone name (IANA)"
+        default "Europe/Prague"
+        help
+            The name shown for REFLBO_TZ; settings.json keeps both (spec §7).
+
+    config REFLBO_LOCATION_NAME
+        string "Location name"
+        default "Brno"
+        help
+            Default location (spec §1): its name, shown in the web UI. settings.json overrides it.
+
+    config REFLBO_LOCATION_LAT_E4
+        int "Location latitude (1e-4 degrees, north positive)"
+        range -900000 900000
+        default 491951
+
+    config REFLBO_LOCATION_LON_E4
+        int "Location longitude (1e-4 degrees, east positive)"
+        range -1800000 1800000
+        default 166068
+
+    config REFLBO_TEMP_OFFSET_C10
+        int "SHTC3 temperature offset (0.1 °C)"
+        range -100 100
+        default -20
+        help
+            Added to every reading. The board warms the sensor by about 2 °C at all times
+            (AGENTS.md gotcha 10; the owner's measurement, 2026-09-30), so the default is -2.0 °C.
+            Trim it against a reference thermometer in the menu or the web UI (spec §8).
+
+    config REFLBO_HUM_OFFSET_PCT10
+        int "SHTC3 humidity offset (0.1 %RH)"
+        range -200 200
+        default 0
+
+    config REFLBO_BATTERY_FACTOR_PERMILLE
+        int "Battery voltage calibration factor (per mille)"
+        range 900 1100
+        default 1000
+        help
+            Per-device correction for the ADC and the 200k/100k divider (spec §8).
+
+    choice REFLBO_PANEL_INIT
+        prompt "Panel init sequence"
+        default REFLBO_PANEL_INIT_FACTORY
+        help
+            ST7305 vendor init sequence (decision D12). XiaoZhi's stays available for diagnostics.
+        config REFLBO_PANEL_INIT_FACTORY
+            bool "Factory firmware (better contrast)"
+        config REFLBO_PANEL_INIT_XIAOZHI
+            bool "XiaoZhi firmware"
+    endchoice
+
+    config REFLBO_DISPLAY_UPDATE_MIN
+        int "Display update interval (minutes)"
+        range 1 15
+        default 1
+        help
+            Compile-time default for display.update_min (spec §9.2). Updates run at local wall-clock
+            slots: every N minutes counted from midnight.
+
+    config REFLBO_SENSOR_INTERVAL_MIN
+        int "Sensor sample interval (minutes)"
+        range 1 30
+        default 5
+
+    choice REFLBO_IDLE_DEFAULT
+        prompt "Default idle strategy (D3: light sleep, chosen at M2)"
+        default REFLBO_IDLE_DEFAULT_LIGHT
+        help
+            `power idle deep|light` overrides this at runtime and keeps the choice in NVS.
+        config REFLBO_IDLE_DEFAULT_LIGHT
+            bool "Light sleep"
+        config REFLBO_IDLE_DEFAULT_DEEP
+            bool "Deep sleep"
+    endchoice
+
+endmenu
