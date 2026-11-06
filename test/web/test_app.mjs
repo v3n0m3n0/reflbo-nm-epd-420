@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
 const APP_JS = fileURLToPath(new URL('../../web/app.js', import.meta.url));
+const INDEX_HTML = fileURLToPath(new URL('../../web/index.html', import.meta.url));
 
 /* ---- a DOM just big enough for app.js ---- */
 
@@ -1546,7 +1547,11 @@ const LORA_STATUS = {
 
 function loraDevice(patches, customSettings = {}, customStatus = {}, resetCalls = []) {
   const settings = { ...LORA_SETTINGS, ...customSettings, lora: { ...LORA_SETTINGS.lora, ...(customSettings.lora || {}) } };
-  let currentStatus = { ...LORA_STATUS, ...customStatus, lora: { ...LORA_STATUS.lora, ...(customStatus.lora || {}) } };
+  let currentStatus = {
+    ...LORA_STATUS,
+    ...customStatus,
+    lora: customStatus.lora === null ? undefined : { ...LORA_STATUS.lora, ...(customStatus.lora || {}) },
+  };
   return {
     'GET /api/settings': () => reply(200, settings),
     'GET /api/status': () => reply(200, currentStatus),
@@ -1558,6 +1563,11 @@ function loraDevice(patches, customSettings = {}, customStatus = {}, resetCalls 
     },
   };
 }
+
+test('web/index.html includes LoRa nav link between PC and Device', () => {
+  const html = fs.readFileSync(INDEX_HTML, 'utf8');
+  assert.match(html, /<a href="#pc">PC<\/a>\s*<a href="#lora">LoRa<\/a>\s*<a href="#device">Device<\/a>/);
+});
 
 test('navigating to #lora displays status facts and settings', async () => {
   const patches = [];
@@ -1593,6 +1603,11 @@ test('statusPage shows LoRa row when present in status', async () => {
   const uninitPage = await load(uninitDevice);
   await uninitPage.ctx.statusPage();
   assert.match(text(uninitPage.main), /LoRaModule not detected/);
+
+  const noLoraDevice = loraDevice([], {}, { lora: null });
+  const noLoraPage = await load(noLoraDevice);
+  await noLoraPage.ctx.statusPage();
+  assert.equal(/LoRa/.test(text(noLoraPage.main)), false);
 });
 
 test('reset counter resets packet count via POST /api/lora/reset', async () => {
@@ -1606,6 +1621,44 @@ test('reset counter resets packet count via POST /api/lora/reset', async () => {
 
   assert.equal(resetCalls.length, 1);
   assert.match(text(main), /Packets0/);
+});
+
+test('LoRa Refresh button updates facts from fresh status', async () => {
+  let statusCount = 42;
+  const dev = {
+    'GET /api/settings': () => reply(200, LORA_SETTINGS),
+    'GET /api/status': () => reply(200, {
+      ...LORA_STATUS,
+      lora: { ...LORA_STATUS.lora, packet_count: statusCount },
+    }),
+  };
+  const { ctx, main } = await load(dev);
+  await ctx.loraPage();
+  assert.match(text(main), /Packets42/);
+
+  statusCount = 43;
+  await buttonNamed(main, 'Refresh').click();
+  await settle();
+  assert.match(text(main), /Packets43/);
+});
+
+test('LoRa reset counter and save handle API error replies', async () => {
+  const failDevice = {
+    'GET /api/settings': () => reply(200, LORA_SETTINGS),
+    'GET /api/status': () => reply(200, LORA_STATUS),
+    'POST /api/lora/reset': () => reply(500, { error: 'radio busy' }),
+    'PATCH /api/settings': () => reply(400, { error: 'frequency rejected' }),
+  };
+  const { ctx, main } = await load(failDevice);
+  await ctx.loraPage();
+
+  await buttonNamed(main, 'Reset counter').click();
+  await settle();
+  assert.match(text(main), /Radio busy/i);
+
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.match(text(main), /Frequency rejected/i);
 });
 
 test('LoRa preset buttons update form controls', async () => {
@@ -1651,6 +1704,7 @@ test('changing LoRa settings saves via PATCH /api/settings', async () => {
   await buttonNamed(main, 'Save').click();
   await settle();
 
+  assert.match(text(main), /Saved\./);
   assert.deepEqual(patches.at(-1), {
     lora: {
       enabled: false,
@@ -1731,6 +1785,35 @@ test('LoRa boundary values, hex variations and missing settings/status', async (
   await buttonNamed(main, 'Save').click();
   await settle();
   assert.equal(patches.length, 2);
+});
+
+test('LoRa handles string sync_word in settings and formats age/signal metrics', async () => {
+  const hexDevice = {
+    'GET /api/settings': () => reply(200, {
+      schema: 1,
+      lora: { freq_khz: 868000, sync_word: '0x2B24' },
+    }),
+    'GET /api/status': () => reply(200, {
+      device: { id: 'reflbo-bb94', firmware: '0.4.0', uptime_s: 3600, free_heap: 4194304 },
+      preset: { name: 'Home', cycle: false },
+      time: { valid: true, epoch: 1790880000, local: '2026-10-01T12:00:00' },
+      battery: {}, wifi: { state: 'off' }, sensors: {},
+      lora: {
+        enabled: true,
+        initialized: true,
+        packet_count: 5,
+        last_packet_at: 1790879850,
+        age_s: 150,
+        last_rssi_dbm: -80,
+        last_snr_db: 7,
+      },
+    }),
+  };
+  const { ctx, main } = await load(hexDevice);
+  await ctx.loraPage();
+  assert.equal(control(main, 'Sync word').value, '2B24');
+  assert.match(text(main), /2 min ago/);
+  assert.match(text(main), /-80 dBm \/ 7 dB/);
 });
 
 

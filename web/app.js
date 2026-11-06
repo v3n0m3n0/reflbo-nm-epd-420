@@ -1072,10 +1072,11 @@ async function loraPage() {
     const l = (status && status.lora) || {};
     const ageText = !l.last_packet_at
       ? 'none yet'
-      : l.age_s !== undefined
+      : (l.age_s !== undefined && l.age_s >= 0)
         ? `${l.age_s < 60 ? Math.round(l.age_s) + ' s' : duration(l.age_s)} ago (${when(l.last_packet_at)})`
         : when(l.last_packet_at);
-    const rssiSnr = (l.last_packet_at || l.packet_count)
+    const hasSignal = l.last_rssi_dbm !== undefined && l.last_snr_db !== undefined && (l.last_packet_at || l.packet_count);
+    const rssiSnr = hasSignal
       ? `${l.last_rssi_dbm} dBm / ${l.last_snr_db} dB`
       : '—';
     summary.replaceChildren(facts([
@@ -1108,7 +1109,8 @@ async function loraPage() {
   const sf = choose(LORA_SF, String(lora.sf || 7));
   const bw = choose(LORA_BW, String(lora.bw_khz || 250));
   const cr = choose(LORA_CR, String(lora.cr || 5));
-  const initialSw = (lora.sync_word !== undefined ? lora.sync_word : 0x1424).toString(16).toUpperCase();
+  const swVal = lora.sync_word !== undefined ? lora.sync_word : 0x1424;
+  const initialSw = (typeof swVal === 'number' ? swVal.toString(16) : String(swVal).replace(/^0x/i, '')).toUpperCase();
   const syncWord = h('input', { type: 'text', value: initialSw, autocapitalize: 'characters', spellcheck: 'false' });
   const wakeOnRx = h('input', { type: 'checkbox', checked: !!lora.wake_on_rx });
 
@@ -1120,7 +1122,7 @@ async function loraPage() {
     syncWord.value = swVal;
   };
 
-  const presetActions = h('div', { class: 'actions' },
+  const presetActions = actions(
     button('EU868 Default', () => applyPreset(868, 7, 250, 5, '1424')),
     button('MeshCore EU868', () => applyPreset(868, 11, 250, 5, '1424')),
     button('Meshtastic EU868 LongFast', () => applyPreset(869.525, 11, 250, 5, '2B24')),
