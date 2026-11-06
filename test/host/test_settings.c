@@ -894,11 +894,31 @@ static void test_the_lora_settings_parse_clamp_and_round_trip(void)
     TEST_ASSERT_TRUE(again.lora.wake_on_rx);
 }
 
+static void test_the_lora_settings_patch_and_partial_updates(void)
+{
+    const char *base = "{\"schema\":1,\"lora\":{\"enabled\":true,\"freq_khz\":868000,\"sf\":7,\"bw_khz\":250,\"cr\":5,\"sync_word\":5156,\"wake_on_rx\":false}}";
+    const char *patch = "{\"lora\":{\"sf\":12,\"freq_khz\":869525,\"wake_on_rx\":true,\"sync_word\":\"2B24\"}}";
+    char patched[SETTINGS_FILE_MAX];
+    size_t len = settings_patch(base, patch, patched, sizeof(patched), s_err, sizeof(s_err));
+    TEST_ASSERT_TRUE_MESSAGE(len > 0, s_err);
+
+    settings_t out;
+    TEST_ASSERT_TRUE(settings_from_json(patched, &s_defaults, &out, s_err, sizeof(s_err)));
+    TEST_ASSERT_TRUE(out.lora.enabled); /* unchanged by patch */
+    TEST_ASSERT_EQUAL_UINT32(869525, out.lora.freq_khz);
+    TEST_ASSERT_EQUAL_UINT8(12, out.lora.sf);
+    TEST_ASSERT_EQUAL_UINT16(250, out.lora.bw_khz); /* unchanged by patch */
+    TEST_ASSERT_EQUAL_UINT8(5, out.lora.cr);        /* unchanged by patch */
+    TEST_ASSERT_EQUAL_HEX16(0x2B24, out.lora.sync_word);
+    TEST_ASSERT_TRUE(out.lora.wake_on_rx);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_the_lora_defaults_are_the_specs);
     RUN_TEST(test_the_lora_settings_parse_clamp_and_round_trip);
+    RUN_TEST(test_the_lora_settings_patch_and_partial_updates);
     RUN_TEST(test_the_spec_sketch_parses);
     RUN_TEST(test_missing_keys_take_the_defaults);
     RUN_TEST(test_bad_values_are_clamped_or_ignored_one_by_one);

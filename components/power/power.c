@@ -271,6 +271,7 @@ power_wake_t power_sleep_light(time_t until_utc)
     lora_stats_t lstats = lora_widget_get_stats();
     bool lora_wake = lstats.enabled && lstats.wake_on_rx;
     if (lora_wake) {
+        gpio_intr_disable(BOARD_PIN_LORA_DIO1);
         gpio_wakeup_enable(BOARD_PIN_LORA_DIO1, GPIO_INTR_HIGH_LEVEL);
     }
     esp_sleep_enable_gpio_wakeup();
@@ -285,6 +286,11 @@ power_wake_t power_sleep_light(time_t until_utc)
     }
     if (lora_wake) {
         gpio_wakeup_disable(BOARD_PIN_LORA_DIO1);
+        gpio_set_intr_type(BOARD_PIN_LORA_DIO1, GPIO_INTR_POSEDGE);
+        gpio_intr_enable(BOARD_PIN_LORA_DIO1);
+        if (gpio_get_level(BOARD_PIN_LORA_DIO1) == 1) {
+            lora_widget_notify();
+        }
     }
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
     if (err == ESP_OK) {

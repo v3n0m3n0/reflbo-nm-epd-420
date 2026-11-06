@@ -20,11 +20,12 @@ static TaskHandle_t s_task;
 
 static bool lora_wait_busy(uint32_t timeout_ms)
 {
-    uint32_t waited = 0;
+    uint32_t waited_us = 0;
+    uint32_t max_us = timeout_ms * 1000;
     while (gpio_get_level(BOARD_PIN_LORA_BUSY) == 1) {
-        vTaskDelay(pdMS_TO_TICKS(1));
-        waited++;
-        if (waited >= timeout_ms) {
+        esp_rom_delay_us(50);
+        waited_us += 50;
+        if (waited_us >= max_us) {
             return false;
         }
     }
@@ -33,7 +34,7 @@ static bool lora_wait_busy(uint32_t timeout_ms)
 
 static esp_err_t lora_write_cmd(uint8_t cmd, const uint8_t *params, size_t len)
 {
-    if (!lora_wait_busy(30)) {
+    if (!lora_wait_busy(50)) {
         return ESP_ERR_TIMEOUT;
     }
     gpio_set_level(BOARD_PIN_LORA_NSS, 0);
@@ -51,13 +52,14 @@ static esp_err_t lora_write_cmd(uint8_t cmd, const uint8_t *params, size_t len)
         err = spi_device_polling_transmit(s_lora_spi, &t2);
     }
     gpio_set_level(BOARD_PIN_LORA_NSS, 1);
-    lora_wait_busy(30);
+    esp_rom_delay_us(10);
+    lora_wait_busy(50);
     return err;
 }
 
 static esp_err_t lora_read_cmd(uint8_t cmd, uint8_t *out, size_t len)
 {
-    if (!lora_wait_busy(30)) {
+    if (!lora_wait_busy(50)) {
         return ESP_ERR_TIMEOUT;
     }
     gpio_set_level(BOARD_PIN_LORA_NSS, 0);
@@ -77,14 +79,17 @@ static esp_err_t lora_read_cmd(uint8_t cmd, uint8_t *out, size_t len)
     err = spi_device_polling_transmit(s_lora_spi, &td);
 
     if (err == ESP_OK && len > 0 && out != NULL) {
+        uint8_t zeros[8] = {0};
         spi_transaction_t t2 = {
             .length = 8 * len,
+            .tx_buffer = (len <= sizeof(zeros)) ? zeros : NULL,
             .rx_buffer = out,
         };
         err = spi_device_polling_transmit(s_lora_spi, &t2);
     }
     gpio_set_level(BOARD_PIN_LORA_NSS, 1);
-    lora_wait_busy(30);
+    esp_rom_delay_us(10);
+    lora_wait_busy(50);
     return err;
 }
 
@@ -149,6 +154,11 @@ static void lora_rx_task(void *arg)
             uint8_t clr[2] = { irq_stat[0], irq_stat[1] };
             lora_write_cmd(0x02, clr, 2);
         }
+
+        /* If DIO1 is still high (e.g. back-to-back packet arrived), re-trigger processing */
+        if (gpio_get_level(BOARD_PIN_LORA_DIO1) == 1) {
+            xTaskNotifyGive(xTaskGetCurrentTaskHandle());
+        }
     }
 }
 
@@ -158,12 +168,20 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         s_stats_mutex = xSemaphoreCreateMutex();
     }
 
+    /* Pause RX and disable interrupts during reconfiguration */
+    gpio_intr_disable(BOARD_PIN_LORA_DIO1);
+    if (s_task != NULL) {
+        ulTaskNotifyTake(pdTRUE, 0); /* drain any stale notifications */
+    }
+
     if (cfg == NULL || !cfg->enabled) {
-        gpio_intr_disable(BOARD_PIN_LORA_DIO1);
         if (s_stats.initialized && s_lora_spi != NULL) {
             uint8_t sleep_cfg = 0x00; /* cold start, config not retained (0x84) */
             lora_write_cmd(0x84, &sleep_cfg, 1);
         }
+        /* Bring outputs low to prevent parasitic ESD leakage into unpowered chip */
+        gpio_set_level(BOARD_PIN_LORA_NSS, 0);
+        gpio_set_level(BOARD_PIN_LORA_RST, 0);
         gpio_set_level(BOARD_PIN_LORA_EN, 0);
 
         if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -183,6 +201,12 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         return ESP_OK;
     }
 
+    /* Mark uninitialized while reconfiguring */
+    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_stats.initialized = false;
+        xSemaphoreGive(s_stats_mutex);
+    }
+
     /* GPIO configuration for outputs (NSS, RST, EN) */
     gpio_config_t out_conf = {
         .pin_bit_mask = (1ULL << BOARD_PIN_LORA_NSS) | (1ULL << BOARD_PIN_LORA_RST) | (1ULL << BOARD_PIN_LORA_EN),
@@ -192,22 +216,30 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&out_conf), TAG, "output gpio");
+    gpio_set_level(BOARD_PIN_LORA_EN, 1);
     gpio_set_level(BOARD_PIN_LORA_NSS, 1);
     gpio_set_level(BOARD_PIN_LORA_RST, 1);
-
-    /* Power up SX1262 */
-    gpio_set_level(BOARD_PIN_LORA_EN, 1);
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    /* GPIO configuration for inputs (BUSY, DIO1) */
-    gpio_config_t in_conf = {
-        .pin_bit_mask = (1ULL << BOARD_PIN_LORA_BUSY) | (1ULL << BOARD_PIN_LORA_DIO1),
+    /* GPIO configuration for inputs: BUSY (polling only, NO interrupt) */
+    gpio_config_t busy_conf = {
+        .pin_bit_mask = (1ULL << BOARD_PIN_LORA_BUSY),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_ENABLE, /* pull down so unpopulated bus stays LOW */
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&busy_conf), TAG, "busy gpio");
+
+    /* GPIO configuration for DIO1: rising edge interrupt */
+    gpio_config_t dio1_conf = {
+        .pin_bit_mask = (1ULL << BOARD_PIN_LORA_DIO1),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type = GPIO_INTR_POSEDGE,
     };
-    ESP_RETURN_ON_ERROR(gpio_config(&in_conf), TAG, "input gpio");
+    ESP_RETURN_ON_ERROR(gpio_config(&dio1_conf), TAG, "dio1 gpio");
 
     /* Hardware reset */
     gpio_set_level(BOARD_PIN_LORA_RST, 0);
@@ -215,8 +247,10 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
     gpio_set_level(BOARD_PIN_LORA_RST, 1);
     vTaskDelay(pdMS_TO_TICKS(20));
 
-    if (!lora_wait_busy(30)) {
+    if (!lora_wait_busy(50)) {
         ESP_LOGW(TAG, "SX1262 BUSY timeout after reset (LoRa module not populated or unresponsive) - disabled");
+        gpio_set_level(BOARD_PIN_LORA_NSS, 0);
+        gpio_set_level(BOARD_PIN_LORA_RST, 0);
         gpio_set_level(BOARD_PIN_LORA_EN, 0);
         if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             s_stats.enabled = true;
@@ -259,6 +293,8 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
     uint8_t standby_rc = 0x00; /* STDBY_RC (0x80) */
     if (lora_write_cmd(0x80, &standby_rc, 1) != ESP_OK) {
         ESP_LOGW(TAG, "SX1262 SetStandby failed (module not populated) - disabled");
+        gpio_set_level(BOARD_PIN_LORA_NSS, 0);
+        gpio_set_level(BOARD_PIN_LORA_RST, 0);
         gpio_set_level(BOARD_PIN_LORA_EN, 0);
         if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             s_stats.enabled = true;
@@ -319,7 +355,7 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
     uint8_t sf = cfg->sf >= 7 && cfg->sf <= 12 ? cfg->sf : 7;
     uint8_t bw = cfg->bw_khz == 125 ? 0x04 : (cfg->bw_khz == 500 ? 0x06 : 0x05);
     uint8_t cr = cfg->cr >= 5 && cfg->cr <= 8 ? (cfg->cr - 4) : (cfg->cr >= 1 && cfg->cr <= 4 ? cfg->cr : 1);
-    uint16_t bw_val = cfg->bw_khz ? cfg->bw_khz : 250;
+    uint16_t bw_val = (cfg->bw_khz == 125 || cfg->bw_khz == 500) ? cfg->bw_khz : 250;
     /* Auto compute LowDataRateOptimize: Ts = 2^SF / BW_kHz > 16.38 ms <=> (2^SF * 100) > (1638 * BW_kHz) */
     uint8_t ldro = (((uint32_t)(1u << sf) * 100u) > (1638u * bw_val)) ? 0x01 : 0x00;
     uint8_t mod_params[4] = { sf, bw, cr, ldro };
@@ -406,7 +442,21 @@ void lora_widget_sleep(void)
         uint8_t sleep_cfg = 0x00; /* cold start, config not retained (0x84) */
         lora_write_cmd(0x84, &sleep_cfg, 1);
     }
+    gpio_set_level(BOARD_PIN_LORA_NSS, 0);
+    gpio_set_level(BOARD_PIN_LORA_RST, 0);
     gpio_set_level(BOARD_PIN_LORA_EN, 0);
+
+    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_stats.initialized = false;
+        xSemaphoreGive(s_stats_mutex);
+    }
+}
+
+void lora_widget_notify(void)
+{
+    if (s_task != NULL) {
+        xTaskNotifyGive(s_task);
+    }
 }
 
 void lora_widget_reset_stats(void)

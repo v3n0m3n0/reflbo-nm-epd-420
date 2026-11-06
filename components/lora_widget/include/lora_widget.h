@@ -45,5 +45,8 @@ void lora_widget_sleep(void);
 /* Resets packet counters and last signal metrics */
 void lora_widget_reset_stats(void);
 
+/* Wakes the background RX task if a packet is pending */
+void lora_widget_notify(void);
+
 /* Returns latest packet reception statistics for UI display */
 lora_stats_t lora_widget_get_stats(void);
