@@ -4,4 +4,4 @@
 idf_component_register(SRCS "radar_frame.c" "radar_chmu.c" "radar_rainviewer.c" "radar_store.c" "radar_fetch.c"
                        INCLUDE_DIRS "include"
                        REQUIRES gfx map png esp_common
-                       PRIV_REQUIRES json util fetch esp_timer heap log)
+                       PRIV_REQUIRES cjson util fetch esp_timer heap log)

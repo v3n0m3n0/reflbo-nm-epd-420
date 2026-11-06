@@ -3,4 +3,4 @@
 idf_component_register(SRCS "weather_url.c" "weather_parse.c" "weather_levels.c" "weather_http.c"
                        INCLUDE_DIRS "include"
                        REQUIRES datastore esp_common
-                       PRIV_REQUIRES json util fetch)
+                       PRIV_REQUIRES cjson util fetch)

@@ -1,3 +1,3 @@
 idf_component_register(SRCS "lora_widget.c"
                        INCLUDE_DIRS "include"
-                       PRIV_REQUIRES board esp_driver_gpio esp_timer)
+                       PRIV_REQUIRES board esp_driver_gpio esp_driver_spi freertos esp_timer log)

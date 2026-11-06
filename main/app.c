@@ -124,7 +124,7 @@ static int64_t s_peek_until_ms; /* night: the dashboard shows until then (app_up
 static bool s_ota_pending;      /* this image came from an upload and is not yet marked valid */
 static bool s_rendered;         /* the first frame went out since boot */
 
-static void IRAM_ATTR on_rtc_int(void *arg)
+static void IRAM_ATTR __attribute__((unused)) on_rtc_int(void *arg)
 {
     (void)arg;
     app_event_t ev = { .type = EV_RTC_ALARM };
@@ -523,14 +523,8 @@ static void enter_critical_sleep(void)
 
 static esp_err_t start_rtc_int(void)
 {
-    gpio_config_t io = {
-        .pin_bit_mask = 1ULL << BOARD_PIN_RTC_INT,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE, /* open drain, no external pull-up */
-        .intr_type = GPIO_INTR_NEGEDGE,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&io), TAG, "RTC INT pin");
-    return gpio_isr_handler_add(BOARD_PIN_RTC_INT, on_rtc_int, NULL);
+    /* NM-EPD-420 uses internal ESP32-S3 RTC / timer wakeups; no external RTC INT pin */
+    return ESP_OK;
 }
 
 /* The RTC alarm or its backup timer: back to sleep in a fraction of a second, unless the board

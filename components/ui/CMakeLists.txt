@@ -5,4 +5,4 @@ idf_component_register(SRCS "ui_fields.c" "ui_layout.c" "ui_preset.c" "ui_preset
                             "ui_flights.c" "ui_split.c" "ui_solar.c" "ui_window.c" "ui_pc.c" "ui_history.c" "ui_visual.c"
                        INCLUDE_DIRS "include"
                        REQUIRES gfx locale datastore util map radar adsb solar energy pcstats
-                       PRIV_REQUIRES json scheduler weather astro)
+                       PRIV_REQUIRES cjson scheduler weather astro)

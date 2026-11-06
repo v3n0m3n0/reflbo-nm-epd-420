@@ -273,7 +273,7 @@ power_wake_t power_sleep_light(time_t until_utc)
     int64_t woke_us = esp_timer_get_time(); /* esp_timer counts light sleep too */
     for (size_t i = 0; i < sizeof(k_wake_pins) / sizeof(k_wake_pins[0]); i++) {
         gpio_wakeup_disable(k_wake_pins[i]);
-        gpio_set_intr_type(k_wake_pins[i], k_wake_pins[i] == BOARD_PIN_RTC_INT ? GPIO_INTR_NEGEDGE : GPIO_INTR_ANYEDGE);
+        gpio_set_intr_type(k_wake_pins[i], GPIO_INTR_ANYEDGE);
         gpio_intr_enable(k_wake_pins[i]);
     }
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
@@ -288,8 +288,7 @@ power_wake_t power_sleep_light(time_t until_utc)
         wake = POWER_WAKE_KEY;
     } else if (!(held & POWER_BUTTON_BOOT) && gpio_get_level(BOARD_PIN_BOOT) == 0) {
         wake = POWER_WAKE_BOOT;
-    } else if (gpio_get_level(BOARD_PIN_RTC_INT) == 0) {
-        wake = POWER_WAKE_RTC;
+    
     } else if (err == ESP_OK && (esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_TIMER))) {
         wake = POWER_WAKE_TIMER;
     }

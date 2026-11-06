@@ -2,4 +2,4 @@
 # the stream to it (pc_ws.c, device only).
 idf_component_register(SRCS "pc_msg.c" "pc_session.c" "pc_ws.c"
                        INCLUDE_DIRS "include"
-                       PRIV_REQUIRES json util esp_websocket_client esp_timer)
+                       PRIV_REQUIRES cjson util esp_websocket_client esp_timer)

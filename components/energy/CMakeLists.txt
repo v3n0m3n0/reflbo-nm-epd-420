@@ -3,4 +3,4 @@
 # cJSON, also built on the host; the sync task fetches.
 idf_component_register(SRCS "energy.c" "energy_dev.c"
                        INCLUDE_DIRS "include"
-                       PRIV_REQUIRES json util timekeeping)
+                       PRIV_REQUIRES cjson util timekeeping)
