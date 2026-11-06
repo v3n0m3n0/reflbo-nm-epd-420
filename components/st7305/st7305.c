@@ -351,6 +351,8 @@ esp_err_t st7305_push(const uint8_t *canonical)
         send_command(0x26);
         write_bytes(s_panel, ST7305_FRAME_BYTES);
 
+        power_off();
+
         memcpy(s_prev_panel, s_panel, ST7305_FRAME_BYTES);
         s_partial_count++;
     }

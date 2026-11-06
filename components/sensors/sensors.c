@@ -21,7 +21,9 @@
 #define AHT20_CMD_INIT      0xBE  /* AHT20 strictly requires 0xBE, 0x08, 0x00 */
 #define AHT20_CMD_MEASURE   0xAC
 #define AHT20_INIT_DELAY_MS 80
-#define AHT20_MEAS_DELAY_MS 80
+#define AHT20_MEAS_DELAY_MS 55
+#define AHT20_MEAS_STEP_MS  10
+#define AHT20_MEAS_RETRIES  3
 #define I2C_TIMEOUT_MS      50    /* >= two 10 ms ticks */
 
 #define LEARN_MIN_EPOCH     1577836800 /* 2020-01-01 */
@@ -71,10 +73,21 @@ static esp_err_t aht20_read(int *temp_c100, int *hum_pct100)
     vTaskDelay(pdMS_TO_TICKS(AHT20_MEAS_DELAY_MS));
 
     uint8_t raw[6] = {0};
-    ESP_RETURN_ON_ERROR(i2c_master_receive(s_aht20, raw, sizeof(raw), I2C_TIMEOUT_MS),
-                        TAG, "read measurement");
+    esp_err_t err = ESP_OK;
+    bool ready = false;
+    for (int retry = 0; retry <= AHT20_MEAS_RETRIES; retry++) {
+        err = i2c_master_receive(s_aht20, raw, sizeof(raw), I2C_TIMEOUT_MS);
+        if (err == ESP_OK && (raw[0] & 0x80) == 0) {
+            ready = true;
+            break;
+        }
+        if (retry < AHT20_MEAS_RETRIES) {
+            vTaskDelay(pdMS_TO_TICKS(AHT20_MEAS_STEP_MS));
+        }
+    }
+    ESP_RETURN_ON_ERROR(err, TAG, "read measurement");
 
-    if (raw[0] & 0x80) {
+    if (!ready || (raw[0] & 0x80)) {
         ESP_LOGW(TAG, "AHT20 still busy after measurement wait");
         return ESP_ERR_INVALID_STATE;
     }
@@ -125,7 +138,7 @@ esp_err_t sensors_init(i2c_master_bus_handle_t bus, bool cold)
             ESP_LOGW(TAG, "AHT20 not ready: %s", esp_err_to_name(err));
         }
     }
-    return adc_init();
+    return ESP_OK;
 }
 
 esp_err_t sensors_sample_env(time_t now)
@@ -149,6 +162,10 @@ esp_err_t sensors_sample_env(time_t now)
 
 esp_err_t sensors_sample_battery(time_t now)
 {
+    if (s_adc == NULL) {
+        ESP_RETURN_ON_ERROR(adc_init(), TAG, "ADC init");
+    }
+
     /*
      * Battery ADC protocol for NM-EPD-420:
      * 1. Drive PIN_ADC_EN (IO43) HIGH.

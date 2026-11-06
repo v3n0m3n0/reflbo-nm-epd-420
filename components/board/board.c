@@ -86,7 +86,7 @@ esp_err_t board_init(bool cold)
     gpio_set_level(BOARD_PIN_ADC_EN, 0);
 
     /* Allow power rails & sensors to settle */
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(cold ? 50 : 10));
 
     i2c_master_bus_config_t bus = {
         .i2c_port = -1,
@@ -103,13 +103,15 @@ esp_err_t board_init(bool cold)
 
     if (cold) {
         report_devices();
-        err = write_codec(0x18, k_es8311_standby, sizeof(k_es8311_standby) / sizeof(k_es8311_standby[0]));
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "ES8311 standby failed: %s", esp_err_to_name(err));
-        } else {
-            ESP_LOGI(TAG, "ES8311 audio codec in standby");
-        }
     }
+
+    err = write_codec(0x18, k_es8311_standby, sizeof(k_es8311_standby) / sizeof(k_es8311_standby[0]));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ES8311 standby failed: %s", esp_err_to_name(err));
+    } else if (cold) {
+        ESP_LOGI(TAG, "ES8311 audio codec in standby");
+    }
+
     return ESP_OK;
 }
 
@@ -120,6 +122,15 @@ i2c_master_bus_handle_t board_i2c(void)
 
 void board_prepare_deep_sleep(void)
 {
+    /*
+     * Disable pullups on I2C SDA and SCL before pulling TEMP_CTL and CODEC_EN low
+     * to prevent parasitic ESD diode leakage to GND.
+     */
+    gpio_reset_pin(BOARD_PIN_I2C_SDA);
+    gpio_reset_pin(BOARD_PIN_I2C_SCL);
+    gpio_pullup_dis(BOARD_PIN_I2C_SDA);
+    gpio_pullup_dis(BOARD_PIN_I2C_SCL);
+
     gpio_set_level(BOARD_PIN_TEMP_CTL, 0);
     gpio_set_level(BOARD_PIN_CODEC_EN, 0);
     gpio_set_level(BOARD_PIN_LORA_EN, 0);
