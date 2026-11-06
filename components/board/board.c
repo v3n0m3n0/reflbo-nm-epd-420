@@ -123,13 +123,19 @@ i2c_master_bus_handle_t board_i2c(void)
 void board_prepare_deep_sleep(void)
 {
     /*
-     * Disable pullups on I2C SDA and SCL before pulling TEMP_CTL and CODEC_EN low
+     * Disable pullups on I2C SDA (IO39) and SCL (IO38), as well as I2S lines
+     * to ES8311 (IO15, IO16) before pulling TEMP_CTL and CODEC_EN low
      * to prevent parasitic ESD diode leakage to GND.
      */
     gpio_reset_pin(BOARD_PIN_I2C_SDA);
     gpio_reset_pin(BOARD_PIN_I2C_SCL);
     gpio_pullup_dis(BOARD_PIN_I2C_SDA);
     gpio_pullup_dis(BOARD_PIN_I2C_SCL);
+
+    gpio_reset_pin(BOARD_PIN_I2S_SCLK);
+    gpio_reset_pin(BOARD_PIN_I2S_DIN);
+    gpio_pullup_dis(BOARD_PIN_I2S_SCLK);
+    gpio_pullup_dis(BOARD_PIN_I2S_DIN);
 
     gpio_set_level(BOARD_PIN_TEMP_CTL, 0);
     gpio_set_level(BOARD_PIN_CODEC_EN, 0);

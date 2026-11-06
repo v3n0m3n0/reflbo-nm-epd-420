@@ -72,23 +72,30 @@ static esp_err_t aht20_read(int *temp_c100, int *hum_pct100)
 
     vTaskDelay(pdMS_TO_TICKS(AHT20_MEAS_DELAY_MS));
 
-    uint8_t raw[6] = {0};
+    uint8_t status = 0x80;
     esp_err_t err = ESP_OK;
-    bool ready = false;
     for (int retry = 0; retry <= AHT20_MEAS_RETRIES; retry++) {
-        err = i2c_master_receive(s_aht20, raw, sizeof(raw), I2C_TIMEOUT_MS);
-        if (err == ESP_OK && (raw[0] & 0x80) == 0) {
-            ready = true;
+        err = i2c_master_receive(s_aht20, &status, 1, I2C_TIMEOUT_MS);
+        if (err == ESP_OK && (status & 0x80) == 0) {
             break;
         }
         if (retry < AHT20_MEAS_RETRIES) {
             vTaskDelay(pdMS_TO_TICKS(AHT20_MEAS_STEP_MS));
         }
     }
-    ESP_RETURN_ON_ERROR(err, TAG, "read measurement");
+    ESP_RETURN_ON_ERROR(err, TAG, "read status");
 
-    if (!ready || (raw[0] & 0x80)) {
+    if (status & 0x80) {
         ESP_LOGW(TAG, "AHT20 still busy after measurement wait");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t raw[6] = {0};
+    ESP_RETURN_ON_ERROR(i2c_master_receive(s_aht20, raw, sizeof(raw), I2C_TIMEOUT_MS),
+                        TAG, "read measurement");
+
+    if (raw[0] & 0x80) {
+        ESP_LOGW(TAG, "AHT20 busy during measurement read");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -104,9 +111,17 @@ static esp_err_t aht20_read(int *temp_c100, int *hum_pct100)
 static esp_err_t adc_init(void)
 {
     adc_oneshot_unit_init_cfg_t unit = { .unit_id = ADC_UNIT_1 };
-    ESP_RETURN_ON_ERROR(adc_oneshot_new_unit(&unit, &s_adc), TAG, "ADC unit");
+    adc_oneshot_unit_handle_t adc = NULL;
+    ESP_RETURN_ON_ERROR(adc_oneshot_new_unit(&unit, &adc), TAG, "ADC unit");
+
     adc_oneshot_chan_cfg_t chan = { .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT };
-    ESP_RETURN_ON_ERROR(adc_oneshot_config_channel(s_adc, BAT_CHANNEL, &chan), TAG, "ADC channel");
+    esp_err_t err = adc_oneshot_config_channel(adc, BAT_CHANNEL, &chan);
+    if (err != ESP_OK) {
+        adc_oneshot_del_unit(adc);
+        ESP_LOGE(TAG, "ADC channel config: %s", esp_err_to_name(err));
+        return err;
+    }
+    s_adc = adc;
 
     adc_cali_curve_fitting_config_t cali = {
         .unit_id = ADC_UNIT_1,
