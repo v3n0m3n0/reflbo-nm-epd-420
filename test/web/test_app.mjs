@@ -1504,3 +1504,233 @@ test('a slot\'s PC reading the PC no longer sends stays, named, with its visual'
   await settle();
   assert.deepEqual(saved.at(-1).presets[0].visuals, { s1: { as: 'ring' } });
 });
+
+/* ---- LoRa (spec §10.3) ---- */
+
+const LORA_SETTINGS = {
+  schema: 1,
+  lora: {
+    enabled: true,
+    freq_khz: 868000,
+    sf: 7,
+    bw_khz: 250,
+    cr: 5,
+    sync_word: 0x1424,
+    wake_on_rx: false,
+  },
+};
+
+const LORA_STATUS = {
+  device: { id: 'reflbo-bb94', firmware: '0.4.0', uptime_s: 3600, free_heap: 4194304 },
+  preset: { name: 'Home', cycle: false },
+  time: { valid: true, epoch: 1790880000, local: '2026-10-01T12:00:00', tz_iana: 'Europe/Prague' },
+  battery: { percent: 90, mv: 4100, state: 'discharging', days_left: 20 },
+  sensors: { temp_c: 21.5, hum_pct: 50, age_s: 30 },
+  wifi: { state: 'station', ssid: 'Home', ip: '192.168.1.50', ap_on: false },
+  lora: {
+    enabled: true,
+    initialized: true,
+    freq_khz: 868000,
+    sf: 7,
+    bw_khz: 250,
+    cr: 5,
+    sync_word: 0x1424,
+    wake_on_rx: false,
+    packet_count: 42,
+    last_rssi_dbm: -74,
+    last_snr_db: 9,
+    last_packet_at: 1790879950,
+    age_s: 50,
+  },
+};
+
+function loraDevice(patches, customSettings = {}, customStatus = {}, resetCalls = []) {
+  const settings = { ...LORA_SETTINGS, ...customSettings, lora: { ...LORA_SETTINGS.lora, ...(customSettings.lora || {}) } };
+  let currentStatus = { ...LORA_STATUS, ...customStatus, lora: { ...LORA_STATUS.lora, ...(customStatus.lora || {}) } };
+  return {
+    'GET /api/settings': () => reply(200, settings),
+    'GET /api/status': () => reply(200, currentStatus),
+    'PATCH /api/settings': (init) => { patches.push(JSON.parse(init.body)); return reply(200, settings); },
+    'POST /api/lora/reset': () => {
+      resetCalls.push(true);
+      currentStatus = { ...currentStatus, lora: { ...currentStatus.lora, packet_count: 0 } };
+      return reply(200, { ok: true });
+    },
+  };
+}
+
+test('navigating to #lora displays status facts and settings', async () => {
+  const patches = [];
+  const { ctx, main } = await load(loraDevice(patches));
+  ctx.location.hash = '#lora';
+  ctx.route();
+  await settle();
+
+  assert.match(text(main), /Listening on 868\.000 MHz · SF7 · 250 kHz · CR 4\/5/);
+  assert.match(text(main), /42/);
+  assert.match(text(main), /-74 dBm \/ 9 dB/);
+
+  assert.equal(checkNamed(main, 'Enabled').checked, true);
+  assert.equal(control(main, 'Frequency (MHz)').value, '868.000');
+  assert.equal(control(main, 'Spreading factor').value, '7');
+  assert.equal(control(main, 'Bandwidth').value, '250');
+  assert.equal(control(main, 'Coding rate').value, '5');
+  assert.equal(control(main, 'Sync word').value, '1424');
+  assert.equal(checkNamed(main, 'Wake from sleep on packet').checked, false);
+});
+
+test('statusPage shows LoRa row when present in status', async () => {
+  const { ctx, main } = await load(loraDevice([]));
+  await ctx.statusPage();
+  assert.match(text(main), /LoRaListening on 868\.000 MHz · SF7 · 250 kHz · CR 4\/5/);
+
+  const offDevice = loraDevice([], {}, { lora: { enabled: false } });
+  const offPage = await load(offDevice);
+  await offPage.ctx.statusPage();
+  assert.match(text(offPage.main), /LoRaOff/);
+
+  const uninitDevice = loraDevice([], {}, { lora: { enabled: true, initialized: false } });
+  const uninitPage = await load(uninitDevice);
+  await uninitPage.ctx.statusPage();
+  assert.match(text(uninitPage.main), /LoRaModule not detected/);
+});
+
+test('reset counter resets packet count via POST /api/lora/reset', async () => {
+  const resetCalls = [];
+  const { ctx, main } = await load(loraDevice([], {}, {}, resetCalls));
+  await ctx.loraPage();
+
+  assert.match(text(main), /42/);
+  await buttonNamed(main, 'Reset counter').click();
+  await settle();
+
+  assert.equal(resetCalls.length, 1);
+  assert.match(text(main), /Packets0/);
+});
+
+test('LoRa preset buttons update form controls', async () => {
+  const patches = [];
+  const { ctx, main } = await load(loraDevice(patches));
+  await ctx.loraPage();
+
+  await buttonNamed(main, 'MeshCore EU868').click();
+  assert.equal(control(main, 'Frequency (MHz)').value, '868.000');
+  assert.equal(control(main, 'Spreading factor').value, '11');
+  assert.equal(control(main, 'Bandwidth').value, '250');
+  assert.equal(control(main, 'Coding rate').value, '5');
+  assert.equal(control(main, 'Sync word').value, '1424');
+
+  await buttonNamed(main, 'Meshtastic EU868 LongFast').click();
+  assert.equal(control(main, 'Frequency (MHz)').value, '869.525');
+  assert.equal(control(main, 'Spreading factor').value, '11');
+  assert.equal(control(main, 'Bandwidth').value, '250');
+  assert.equal(control(main, 'Coding rate').value, '5');
+  assert.equal(control(main, 'Sync word').value, '2B24');
+
+  await buttonNamed(main, 'EU868 Default').click();
+  assert.equal(control(main, 'Frequency (MHz)').value, '868.000');
+  assert.equal(control(main, 'Spreading factor').value, '7');
+  assert.equal(control(main, 'Bandwidth').value, '250');
+  assert.equal(control(main, 'Coding rate').value, '5');
+  assert.equal(control(main, 'Sync word').value, '1424');
+});
+
+test('changing LoRa settings saves via PATCH /api/settings', async () => {
+  const patches = [];
+  const { ctx, main } = await load(loraDevice(patches));
+  await ctx.loraPage();
+
+  checkNamed(main, 'Enabled').checked = false;
+  await type(control(main, 'Frequency (MHz)'), '915.000');
+  await change(control(main, 'Spreading factor'), '10');
+  await change(control(main, 'Bandwidth'), '125');
+  await change(control(main, 'Coding rate'), '7');
+  await type(control(main, 'Sync word'), '0x2B24');
+  checkNamed(main, 'Wake from sleep on packet').checked = true;
+
+  await buttonNamed(main, 'Save').click();
+  await settle();
+
+  assert.deepEqual(patches.at(-1), {
+    lora: {
+      enabled: false,
+      freq_khz: 915000,
+      sf: 10,
+      bw_khz: 125,
+      cr: 7,
+      sync_word: 0x2b24,
+      wake_on_rx: true,
+    },
+  });
+});
+
+test('LoRa settings form validates frequency and sync word', async () => {
+  const patches = [];
+  const { ctx, main } = await load(loraDevice(patches));
+  await ctx.loraPage();
+
+  await type(control(main, 'Frequency (MHz)'), '300.000');
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.equal(patches.length, 0);
+  assert.match(text(main), /Frequency must be between 430 and 928 MHz/);
+
+  await type(control(main, 'Frequency (MHz)'), '868.000');
+  await type(control(main, 'Sync word'), 'NOT_HEX');
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.equal(patches.length, 0);
+  assert.match(text(main), /Sync word must be a valid hex value/);
+
+  await type(control(main, 'Sync word'), '12345');
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.equal(patches.length, 0);
+  assert.match(text(main), /Sync word must be a valid hex value/);
+});
+
+test('LoRa boundary values, hex variations and missing settings/status', async () => {
+  const patches = [];
+  const bareDevice = {
+    'GET /api/settings': () => reply(200, { schema: 1 }),
+    'GET /api/status': () => reply(200, { device: { id: 'reflbo-bb94', firmware: '0.4.0', uptime_s: 10, free_heap: 1000000 },
+                                          preset: { name: 'Home', cycle: false }, time: { valid: true, epoch: 1000, local: '2026-10-01T12:00:00' },
+                                          battery: {}, wifi: { state: 'off' }, sensors: {} }),
+    'PATCH /api/settings': (init) => { patches.push(JSON.parse(init.body)); return reply(200, { schema: 1 }); },
+  };
+  const { ctx, main } = await load(bareDevice);
+  await ctx.loraPage();
+
+  assert.equal(control(main, 'Frequency (MHz)').value, '868.000');
+  assert.equal(control(main, 'Sync word').value, '1424');
+  assert.match(text(main), /StateOff/);
+  assert.match(text(main), /Packets0/);
+  assert.match(text(main), /Last packetnone yet/);
+  assert.match(text(main), /RSSI \/ SNR—/);
+
+  await type(control(main, 'Frequency (MHz)'), '430.000');
+  await type(control(main, 'Sync word'), '0');
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.equal(patches.at(-1).lora.freq_khz, 430000);
+  assert.equal(patches.at(-1).lora.sync_word, 0);
+
+  await type(control(main, 'Frequency (MHz)'), '928.000');
+  await type(control(main, 'Sync word'), 'FFFF');
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.equal(patches.at(-1).lora.freq_khz, 928000);
+  assert.equal(patches.at(-1).lora.sync_word, 65535);
+
+  await type(control(main, 'Frequency (MHz)'), '429.999');
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.equal(patches.length, 2);
+
+  await type(control(main, 'Frequency (MHz)'), '928.001');
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.equal(patches.length, 2);
+});
+
+

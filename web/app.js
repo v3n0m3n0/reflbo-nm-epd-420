@@ -224,7 +224,7 @@ document.getElementById('done').onclick = async () => {
 /* ---- pages ---- */
 
 const pages = { status: statusPage, wifi: wifiPage, place: placePage, sync: syncPage, radar: radarPage,
-                solar: solarPage, pc: pcPage, device: devicePage, presets: presetsPage, firmware: firmwarePage,
+                solar: solarPage, pc: pcPage, lora: loraPage, device: devicePage, presets: presetsPage, firmware: firmwarePage,
                 backup: backupPage };
 
 function route() {
@@ -248,6 +248,13 @@ function wifiText(w) {
   }
 }
 
+function loraState(l) {
+  if (!l || !l.enabled) return 'Off';
+  if (!l.initialized) return 'Module not detected';
+  const mhz = ((l.freq_khz || 868000) / 1000).toFixed(3);
+  return `Listening on ${mhz} MHz · SF${l.sf || 7} · ${l.bw_khz || 250} kHz · CR 4/${l.cr || 5}`;
+}
+
 async function statusPage() {
   let s = await api('GET', '/api/status');
   let clockNote = null;
@@ -268,6 +275,7 @@ async function statusPage() {
       ['Running for', duration(s.device.uptime_s)],
       ['Free memory', `${(s.device.free_heap / 1048576).toFixed(1)} MB`],
       ['Preset', `${s.preset.name}${s.preset.cycle ? ', cycling' : ''}`],
+      s.lora ? ['LoRa', loraState(s.lora)] : null,
     ])),
     card('Time', facts([
       ['On the device', s.time.local.replace('T', ' ')],
@@ -1039,6 +1047,128 @@ async function pcPage() {
       h('p', { class: 'muted small', text: 'Without it, a session starts only in sync mode Always on.' }),
       field('Show preset', preset, 'When the PC goes quiet, what you haven\'t changed comes back.')),
     save, nowCard);
+}
+
+/* ---- LoRa (spec §10.3) ---- */
+
+const LORA_SF = [
+  ['7', 'SF7'], ['8', 'SF8'], ['9', 'SF9'], ['10', 'SF10'], ['11', 'SF11'], ['12', 'SF12'],
+];
+const LORA_BW = [
+  ['125', '125 kHz'], ['250', '250 kHz'], ['500', '500 kHz'],
+];
+const LORA_CR = [
+  ['5', '4/5'], ['6', '4/6'], ['7', '4/7'], ['8', '4/8'],
+];
+
+async function loraPage() {
+  const [s, st] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/status')]);
+  const lora = s.lora || {};
+
+  /* Card 1: Now (Live status) */
+  const summary = h('div');
+  const nowNote = h('p');
+  const showNow = (status) => {
+    const l = (status && status.lora) || {};
+    const ageText = !l.last_packet_at
+      ? 'none yet'
+      : l.age_s !== undefined
+        ? `${l.age_s < 60 ? Math.round(l.age_s) + ' s' : duration(l.age_s)} ago (${when(l.last_packet_at)})`
+        : when(l.last_packet_at);
+    const rssiSnr = (l.last_packet_at || l.packet_count)
+      ? `${l.last_rssi_dbm} dBm / ${l.last_snr_db} dB`
+      : '—';
+    summary.replaceChildren(facts([
+      ['State', loraState(l)],
+      ['Packets', String(l.packet_count ?? 0)],
+      ['Last packet', ageText],
+      ['RSSI / SNR', rssiSnr],
+    ]));
+  };
+  showNow(st);
+
+  const nowCard = card('Now', summary, nowNote, actions(
+    button('Refresh', () => busy(nowCard, nowNote, async () => {
+      const fresh = await api('GET', '/api/status');
+      showNow(fresh);
+    })),
+    button('Reset counter', () => busy(nowCard, nowNote, async () => {
+      await api('POST', '/api/lora/reset');
+      const fresh = await api('GET', '/api/status');
+      showNow(fresh);
+      toast('Counter reset');
+    })),
+  ));
+
+  /* Card 2: LoRa radio (Settings) */
+  const enabled = h('input', { type: 'checkbox', checked: lora.enabled !== false });
+  const freqKhz = lora.freq_khz || 868000;
+  const freq = h('input', { type: 'number', min: '430', max: '928', step: '0.001',
+                           value: (freqKhz / 1000).toFixed(3) });
+  const sf = choose(LORA_SF, String(lora.sf || 7));
+  const bw = choose(LORA_BW, String(lora.bw_khz || 250));
+  const cr = choose(LORA_CR, String(lora.cr || 5));
+  const initialSw = (lora.sync_word !== undefined ? lora.sync_word : 0x1424).toString(16).toUpperCase();
+  const syncWord = h('input', { type: 'text', value: initialSw, autocapitalize: 'characters', spellcheck: 'false' });
+  const wakeOnRx = h('input', { type: 'checkbox', checked: !!lora.wake_on_rx });
+
+  const applyPreset = (f, sfVal, bwVal, crVal, swVal) => {
+    freq.value = Number(f).toFixed(3);
+    sf.value = String(sfVal);
+    bw.value = String(bwVal);
+    cr.value = String(crVal);
+    syncWord.value = swVal;
+  };
+
+  const presetActions = h('div', { class: 'actions' },
+    button('EU868 Default', () => applyPreset(868, 7, 250, 5, '1424')),
+    button('MeshCore EU868', () => applyPreset(868, 11, 250, 5, '1424')),
+    button('Meshtastic EU868 LongFast', () => applyPreset(869.525, 11, 250, 5, '2B24')),
+  );
+
+  const note = h('p');
+  const radioCard = card('LoRa radio',
+    presetActions,
+    h('label', { class: 'check' }, enabled, 'Enabled'),
+    field('Frequency (MHz)', freq, '430.000 to 928.000 MHz.'),
+    field('Spreading factor', sf),
+    field('Bandwidth', bw),
+    field('Coding rate', cr),
+    field('Sync word', syncWord, 'Hexadecimal (e.g. 1424 or 0x1424).'),
+    h('label', { class: 'check' }, wakeOnRx, 'Wake from sleep on packet'),
+    note,
+    actions(button('Save', () => busy(radioCard, note, async () => {
+      const f = Number(freq.value);
+      if (freq.value === '' || isNaN(f) || f < 430 || f > 928) {
+        throw new ApiError('Frequency must be between 430 and 928 MHz.');
+      }
+      const swStr = (syncWord.value || '').trim().replace(/^0x/i, '');
+      if (!/^[0-9a-fA-F]{1,4}$/.test(swStr)) {
+        throw new ApiError('Sync word must be a valid hex value (0 to FFFF).');
+      }
+      const sw = parseInt(swStr, 16);
+      await api('PATCH', '/api/settings', {
+        lora: {
+          enabled: enabled.checked,
+          freq_khz: Math.round(f * 1000),
+          sf: Number(sf.value),
+          bw_khz: Number(bw.value),
+          cr: Number(cr.value),
+          sync_word: sw,
+          wake_on_rx: wakeOnRx.checked,
+        },
+      });
+      note.className = 'good';
+      note.textContent = 'Saved.';
+      toast('Saved');
+      try {
+        const freshStatus = await api('GET', '/api/status');
+        showNow(freshStatus);
+      } catch (_) {}
+    }), 'primary')),
+  );
+
+  main.replaceChildren(h('h1', { text: 'LoRa' }), nowCard, radioCard);
 }
 
 /* ---- Show as (spec §5.3, §10.3, M7, D44) ---- */
