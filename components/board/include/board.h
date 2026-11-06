@@ -12,3 +12,4 @@
  */
 esp_err_t board_init(bool cold);
 i2c_master_bus_handle_t board_i2c(void);
+void board_prepare_deep_sleep(void);

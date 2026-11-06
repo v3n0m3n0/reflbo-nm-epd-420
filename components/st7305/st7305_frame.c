@@ -1,4 +1,5 @@
 #include "st7305_frame.h"
+#include <stddef.h>
 
 void st7305_frame_to_panel(const uint8_t *canonical, uint8_t *panel)
 {

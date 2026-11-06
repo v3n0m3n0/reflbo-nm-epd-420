@@ -209,8 +209,8 @@ static void test_a_rainviewer_tile_decodes_by_its_colour_table(void)
     TEST_ASSERT_EQUAL_INT(PNG_OK, radar_rv_decode_tile(png, len, NULL, &t, 4, 2, &f));
     long n[4];
     count_levels(&f, n);
-    TEST_ASSERT_EQUAL_INT32(62286, n[RADAR_NONE]);
-    TEST_ASSERT_EQUAL_INT32(2575, n[RADAR_LIGHT]);
+    TEST_ASSERT_EQUAL_INT32(61155, n[RADAR_NONE]);
+    TEST_ASSERT_EQUAL_INT32(3706, n[RADAR_LIGHT]);
     TEST_ASSERT_EQUAL_INT32(629, n[RADAR_MODERATE]);
     TEST_ASSERT_EQUAL_INT32(46, n[RADAR_HEAVY]);
     radar_frame_free(&f, NULL);

@@ -19,12 +19,13 @@ static const struct {
 } k_colours[] = {
     { 0x004768, 1 }, { 0x004a70, 1 }, { 0x004e78, 1 }, { 0x005180, 1 }, { 0x005588, 1 }, { 0x005b8e, 1 },
     { 0x006295, 1 }, { 0x00699c, 1 }, { 0x0070a3, 1 }, { 0x0077aa, 1 }, { 0x007fb4, 1 }, { 0x0088bf, 1 },
-    { 0x0091ca, 1 }, { 0x009ad5, 1 }, { 0x00a3e0, 1 }, { 0x00ff00, 3 }, { 0x5d0000, 3 }, { 0x760000, 3 },
-    { 0x8f0000, 3 }, { 0xa80000, 3 }, { 0xc10000, 3 }, { 0xcd0d00, 3 }, { 0xd91b00, 3 }, { 0xe62800, 3 },
-    { 0xf23600, 3 }, { 0xff4400, 3 }, { 0xff4eff, 3 }, { 0xff58ff, 3 }, { 0xff62ff, 3 }, { 0xff6cff, 3 },
-    { 0xff77ff, 3 }, { 0xff8100, 2 }, { 0xff81ff, 3 }, { 0xff8b00, 2 }, { 0xff8bff, 3 }, { 0xff9500, 2 },
-    { 0xff95ff, 3 }, { 0xff9f00, 2 }, { 0xff9fff, 3 }, { 0xffaa00, 2 }, { 0xffaaff, 3 }, { 0xffb700, 2 },
-    { 0xffc500, 2 }, { 0xffd200, 2 }, { 0xffe000, 2 }, { 0xffee00, 2 }, { 0xffffff, 3 },
+    { 0x0091ca, 1 }, { 0x009ad5, 1 }, { 0x00a3e0, 1 }, { 0x00ff00, 3 }, { 0x1baee2, 1 }, { 0x36bae5, 1 },
+    { 0x51c5e8, 1 }, { 0x5d0000, 3 }, { 0x6cd1eb, 1 }, { 0x760000, 3 }, { 0x88ddee, 1 }, { 0x8f0000, 3 },
+    { 0xa80000, 3 }, { 0xc10000, 3 }, { 0xcd0d00, 3 }, { 0xd91b00, 3 }, { 0xe62800, 3 }, { 0xf23600, 3 },
+    { 0xff4400, 3 }, { 0xff4eff, 3 }, { 0xff58ff, 3 }, { 0xff62ff, 3 }, { 0xff6cff, 3 }, { 0xff77ff, 3 },
+    { 0xff8100, 2 }, { 0xff81ff, 3 }, { 0xff8b00, 2 }, { 0xff8bff, 3 }, { 0xff9500, 2 }, { 0xff95ff, 3 },
+    { 0xff9f00, 2 }, { 0xff9fff, 3 }, { 0xffaa00, 2 }, { 0xffaaff, 3 }, { 0xffb700, 2 }, { 0xffc500, 2 },
+    { 0xffd200, 2 }, { 0xffe000, 2 }, { 0xffee00, 2 }, { 0xffffff, 3 },
 };
 
 static radar_level_t level_of_rgb(uint32_t rgb)
@@ -139,7 +140,7 @@ static void on_tile_row(void *ctx, int y, const uint8_t *row, const png_info_t *
     }
     for (int x = 0; x < info->width; x++) {
         const uint8_t *px = row + 4 * x;
-        if (px[3] != 0) {
+        if (px[3] >= 250) {
             radar_level_t level = level_of_rgb((uint32_t)px[0] << 16 | (uint32_t)px[1] << 8 | px[2]);
             if (level != RADAR_NONE) {
                 radar_frame_set(c->f, c->ox + x, c->oy + y, level);

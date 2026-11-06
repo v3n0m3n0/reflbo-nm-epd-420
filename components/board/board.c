@@ -117,3 +117,12 @@ i2c_master_bus_handle_t board_i2c(void)
 {
     return s_i2c;
 }
+
+void board_prepare_deep_sleep(void)
+{
+    gpio_set_level(BOARD_PIN_TEMP_CTL, 0);
+    gpio_set_level(BOARD_PIN_CODEC_EN, 0);
+    gpio_set_level(BOARD_PIN_LORA_EN, 0);
+    gpio_set_level(BOARD_PIN_PA_CTRL, 0);
+    gpio_set_level(BOARD_PIN_ADC_EN, 0);
+}

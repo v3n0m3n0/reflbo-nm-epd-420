@@ -200,48 +200,77 @@ esp_err_t lora_widget_init(void)
     }
 
     /* Configure SX1262 for EU868 reception */
-    uint8_t standby_rc = 0x00;
-    if (lora_write_cmd(0x02, &standby_rc, 1) != ESP_OK) {
+    uint8_t standby_rc = 0x00; /* STDBY_RC (0x80) */
+    if (lora_write_cmd(0x80, &standby_rc, 1) != ESP_OK) {
         ESP_LOGW(TAG, "SX1262 SetStandby failed (module not populated) - disabled");
         return ESP_OK;
     }
 
-    uint8_t reg_mode = 0x01; /* DC-DC mode */
-    lora_write_cmd(0x8A, &reg_mode, 1);
+    uint8_t reg_mode = 0x01; /* DC-DC mode (0x96) */
+    lora_write_cmd(0x96, &reg_mode, 1);
 
-    uint8_t dio2_rf_sw = 0x01; /* DIO2 as RF Switch */
-    lora_write_cmd(0x97, &dio2_rf_sw, 1);
+    uint8_t dio2_rf_sw = 0x01; /* DIO2 as RF Switch (0x9D) */
+    lora_write_cmd(0x9D, &dio2_rf_sw, 1);
 
-    /* TCXO 1.8V, delay ~5ms */
-    uint8_t tcxo_cfg[4] = { 0x02, 0x00, 0x00, 0xA0 };
-    lora_write_cmd(0x98, tcxo_cfg, 4);
+    /* TCXO 1.8V, delay ~5ms: 320 * 15.625us = 0x000140 (0x97) */
+    uint8_t tcxo_cfg[4] = { 0x02, 0x00, 0x01, 0x40 };
+    lora_write_cmd(0x97, tcxo_cfg, 4);
 
-    uint8_t pkt_type = 0x01; /* LoRa */
-    lora_write_cmd(0x80, &pkt_type, 1);
+    /* Calibrate all blocks (0x89) */
+    uint8_t cal_all = 0x7F;
+    lora_write_cmd(0x89, &cal_all, 1);
 
-    /* Frequency 868.0 MHz: 868000000 / (32000000 / 2^25) = 0x36400000 */
+    /* Calibrate image for 863-870 MHz (0x98) */
+    uint8_t cal_img[2] = { 0xD7, 0xDB };
+    lora_write_cmd(0x98, cal_img, 2);
+
+    uint8_t pkt_type = 0x01; /* Packet Type LoRa (0x8A) */
+    lora_write_cmd(0x8A, &pkt_type, 1);
+
+    /* Frequency 868.0 MHz: 868000000 / (32000000 / 2^25) = 0x36400000 (0x86) */
     uint8_t freq[4] = { 0x36, 0x40, 0x00, 0x00 };
     lora_write_cmd(0x86, freq, 4);
 
-    /* Modulation: SF7 (0x07), BW250kHz (0x05), CR 4/5 (0x01), LowDataRateOpt 0x00 */
-    uint8_t mod_params[4] = { 0x07, 0x05, 0x01, 0x00 };
-    lora_write_cmd(0x88, mod_params, 4);
+    /* Buffer base address: TX 0, RX 0 (0x8F) */
+    uint8_t base_addr[2] = { 0x00, 0x00 };
+    lora_write_cmd(0x8F, base_addr, 2);
 
-    /* Packet params: preamble=12, explicit header, max len=255, crc on, standard IQ */
+    /* Modulation: SF7 (0x07), BW250kHz (0x05), CR 4/5 (0x01), LowDataRateOpt 0x00 (0x8B) */
+    uint8_t mod_params[4] = { 0x07, 0x05, 0x01, 0x00 };
+    lora_write_cmd(0x8B, mod_params, 4);
+
+    /* Packet params: preamble=12, explicit header, max len=255, crc on, standard IQ (0x8C) */
     uint8_t pkt_params[6] = { 0x00, 0x0C, 0x00, 0xFF, 0x01, 0x00 };
     lora_write_cmd(0x8C, pkt_params, 6);
 
-    /* Clear IRQ */
-    uint8_t clr_irq[2] = { 0x03, 0xFF };
-    lora_write_cmd(0x08, clr_irq, 2);
+    /* SetDioIrqParams: RxDone(0x0002) | Timeout(0x0200) | CrcErr(0x0040) = 0x0242, DIO1 mask = 0x0002 (0x08) */
+    uint8_t dio_irq[8] = { 0x02, 0x42, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00 };
+    lora_write_cmd(0x08, dio_irq, 8);
 
-    /* Arm continuous RX */
+    /* Clear IRQ (0x02) */
+    uint8_t clr_irq[2] = { 0x03, 0xFF };
+    lora_write_cmd(0x02, clr_irq, 2);
+
+    /* Arm continuous RX (0x82) */
     uint8_t rx_timeout[3] = { 0xFF, 0xFF, 0xFF };
     lora_write_cmd(0x82, rx_timeout, 3);
+
+    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_stats.initialized = true;
+        xSemaphoreGive(s_stats_mutex);
+    }
 
     xTaskCreate(lora_rx_task, "lora_rx", 3072, NULL, 5, &s_task);
     ESP_LOGI(TAG, "SX1262 LoRa receiver initialized successfully");
     return ESP_OK;
+}
+
+void lora_widget_sleep(void)
+{
+    if (!s_stats.initialized) return;
+    uint8_t sleep_cfg = 0x00; /* cold start, config not retained (0x84) */
+    lora_write_cmd(0x84, &sleep_cfg, 1);
+    gpio_set_level(BOARD_PIN_LORA_EN, 0);
 }
 
 lora_stats_t lora_widget_get_stats(void)

@@ -7,30 +7,26 @@
 #include "st7305_frame.h"
 
 /*
- * ST7305 driver. It owns SPI3_HOST and GPIO 5 (D/C), 6 (TE), 11 (SCK), 12 (MOSI), 40 (CS) and
- * 41 (RESET). Not thread-safe: only one task may call it at a time. That is the display service's
- * caller (see display.h).
+ * SSD1683 e-paper display driver for NM-EPD-420 (GYE042A87 400x300 monochrome e-paper).
+ * Controls SPI display bus (SCK IO2, MOSI IO1, CS IO46, DC IO4, RST IO5, BUSY IO6).
+ * Not thread-safe: only one task may call it at a time (display service).
  */
 
-/* The two vendor init sequences (AGENTS.md gotcha 6). They differ in the source high voltages
- * (contrast), the oscillator (HPM frame rate) and the LPM frame rate. The driver replaces the
- * sequence's LPM rate (factory 8 Hz, XiaoZhi 1 Hz) with st7305_lpm_rate(). */
+/* The vendor init sequence variants. */
 typedef enum {
-    ST7305_VARIANT_FACTORY, /* factory firmware: SPI 10 MHz, VSHP/VSHN 0x41, HPM 16 Hz */
-    ST7305_VARIANT_XIAOZHI, /* XiaoZhi firmware: SPI 40 MHz, VSHP 0x69, VSHN 0x4B, HPM 25.5 Hz */
+    ST7305_VARIANT_FACTORY,
+    ST7305_VARIANT_XIAOZHI,
 } st7305_variant_t;
 
 typedef enum {
-    ST7305_MODE_HPM, /* high power mode: fast refresh, for interaction */
-    ST7305_MODE_LPM, /* low power mode: slow refresh, for idle */
+    ST7305_MODE_HPM,
+    ST7305_MODE_LPM,
 } st7305_mode_t;
 
-/* LPM refresh rate. The values are the LFRA codes of FRCTRL (B2h), datasheet §8.2.3. Idle stays in
- * LPM, so this sets the panel's idle power draw. */
 typedef enum {
     ST7305_LPM_0_25HZ,
     ST7305_LPM_0_5HZ,
-    ST7305_LPM_1HZ, /* default (spec §4.2) */
+    ST7305_LPM_1HZ,
     ST7305_LPM_2HZ,
     ST7305_LPM_4HZ,
     ST7305_LPM_8HZ,
@@ -38,10 +34,9 @@ typedef enum {
 
 /* Cold start: SPI bus, hardware reset, init sequence. The panel RAM is undefined until the first push. */
 esp_err_t st7305_init(st7305_variant_t variant);
-/* After a deep-sleep wake: attaches the SPI bus without resetting the panel, which kept its
- * image, mode and rate (AGENTS.md gotcha 4). Releases the pin holds set before sleeping. */
+/* After a deep-sleep wake: wakes SSD1683 from Deep Sleep Mode 1 (via hw_reset) without clearing bistable e-paper image. */
 esp_err_t st7305_init_warm(st7305_variant_t variant, st7305_mode_t mode, st7305_lpm_rate_t rate, bool asleep);
-/* Holds CS and RESET through deep sleep. Call last, just before sleeping. */
+/* Puts SSD1683 into Deep Sleep Mode 1. Call last, just before sleeping. */
 esp_err_t st7305_prepare_deep_sleep(void);
 /* Resets the panel and runs another init sequence (the SPI clock follows the variant). */
 esp_err_t st7305_reinit(st7305_variant_t variant);

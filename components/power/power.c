@@ -4,6 +4,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "board.h"
 #include "board_pins.h"
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
@@ -302,6 +303,7 @@ power_wake_t power_sleep_light(time_t until_utc)
 
 static void start_deep_sleep(void)
 {
+    board_prepare_deep_sleep();
     fflush(stdout);
     fsync(fileno(stdout));
     esp_deep_sleep_disable_rom_logging();
@@ -317,11 +319,13 @@ static unsigned held_buttons(void)
            (gpio_get_level(BOARD_PIN_BOOT) == 0 ? POWER_BUTTON_BOOT : 0);
 }
 
-/* ext1 bits for the buttons that are not held (D16). */
+/* ext1 bits for the buttons that are not held (D16).
+ * Note: On ESP32-S3 only GPIO0-GPIO21 belong to the RTC IO domain.
+ * BOARD_PIN_KEY (GPIO45) is not RTC IO and passing it to ext1 returns ESP_ERR_INVALID_ARG.
+ * Thus only BOARD_PIN_BOOT (GPIO0) can be armed for EXT1 deep sleep wakeup. */
 static uint64_t button_wake_bits(unsigned held)
 {
-    return (held & POWER_BUTTON_KEY ? 0 : BIT64(BOARD_PIN_KEY)) |
-           (held & POWER_BUTTON_BOOT ? 0 : BIT64(BOARD_PIN_BOOT));
+    return (held & POWER_BUTTON_BOOT ? 0 : BIT64(BOARD_PIN_BOOT));
 }
 
 unsigned power_masked_buttons(void)
@@ -362,14 +366,11 @@ void power_sleep_critical(uint32_t recheck_s)
 {
     count_sleep(true);
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-    bool held = held_buttons() & POWER_BUTTON_KEY;
-    s_rtc.masked = 0; /* KEY stays the wake source either way */
-    /* A KEY still held, usually the press that asked for this check, wakes the chip when it is
-     * released, so the next press counts; a timer looks again now and then in case it is stuck. */
-    esp_sleep_enable_ext1_wakeup_io(BIT64(BOARD_PIN_KEY), held ? ESP_EXT1_WAKEUP_ANY_HIGH : ESP_EXT1_WAKEUP_ANY_LOW);
-    if (held) {
-        esp_sleep_enable_timer_wakeup((uint64_t)recheck_s * 1000000u);
-    }
+    bool held = held_buttons() & POWER_BUTTON_BOOT;
+    s_rtc.masked = 0;
+    /* Arm RTC IO button BOARD_PIN_BOOT (GPIO0) and always arm periodic timer */
+    esp_sleep_enable_ext1_wakeup_io(BIT64(BOARD_PIN_BOOT), held ? ESP_EXT1_WAKEUP_ANY_HIGH : ESP_EXT1_WAKEUP_ANY_LOW);
+    esp_sleep_enable_timer_wakeup((uint64_t)recheck_s * 1000000u);
     start_deep_sleep();
 }
 

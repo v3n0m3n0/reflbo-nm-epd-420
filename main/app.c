@@ -45,7 +45,6 @@
 #define APP_PRIORITY      5
 #define APP_CORE          1
 #define QUEUE_DEPTH       16
-#define BACKUP_S          5    /* wake anyway this long after a missed RTC alarm (spec §9.2) */
 #define GRACE_MS          2000 /* stay awake after boot or a button so a PC can find the board */
 #define TETHER_RECHECK_MS 1000
 #define RETRY_S           300  /* after a failed boot with no PC attached */
@@ -236,10 +235,10 @@ static void schedule_next(void)
     }
 }
 
-/* The timer wake: a cycle switch or seconds tick if one comes before the alarm, else the alarm's backup. */
+/* The timer wake: a cycle switch or seconds tick if one comes before the alarm, else the alarm itself. */
 static time_t sleep_until(void)
 {
-    return s_wake_at < s_next_alarm ? s_wake_at : s_next_alarm + BACKUP_S;
+    return s_wake_at < s_next_alarm ? s_wake_at : s_next_alarm;
 }
 
 int64_t app_uptime_ms(void)
@@ -432,11 +431,8 @@ static void handle_wake(power_wake_t wake)
     case POWER_WAKE_RTC:
         on_tick(false, true);
         break;
-    case POWER_WAKE_TIMER: /* a cycle switch or seconds tick, or the alarm's backup */
-        if (time(NULL) >= s_next_alarm + BACKUP_S) {
-            ESP_LOGW(TAG, "RTC alarm missed; backup wake");
-        }
-        on_tick(false, false);
+    case POWER_WAKE_TIMER: /* a cycle switch or seconds tick, or scheduled alarm */
+        on_tick(false, s_next_alarm != 0 && time(NULL) >= s_next_alarm);
         break;
     case POWER_WAKE_KEY:
     case POWER_WAKE_BOOT:
@@ -500,7 +496,7 @@ static void enter_night_sleep(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "RTC alarm: %s; the backup timer takes over", esp_err_to_name(err));
     }
-    time_t wake = until + BACKUP_S;
+    time_t wake = until;
     if (board_buttons_pressed(BOARD_BUTTON_KEY) || board_buttons_pressed(BOARD_BUTTON_BOOT)) {
         /* D16 leaves a held button out of this sleep's wake sources: look again soon, so that
          * once it is released, a press can still show the dashboard */
@@ -662,9 +658,6 @@ static esp_err_t boot(void)
     if (wake == POWER_WAKE_COLD || button_wake) {
         power_hold_awake_ms(GRACE_MS);
     }
-    if (wake == POWER_WAKE_TIMER && time(NULL) >= s_next_alarm + BACKUP_S) {
-        ESP_LOGW(TAG, "RTC alarm missed; backup wake");
-    }
     if (button_wake && app_ui_night() && time(NULL) < app_state()->night_until) {
         night_peek(woke_by);
     } else {
@@ -673,7 +666,8 @@ static esp_err_t boot(void)
         } else if (button_wake) {
             board_buttons_woke(woke_by);
         }
-        on_tick(!warm || app_state()->critical, wake == POWER_WAKE_RTC);
+        bool rtc_edge = (wake == POWER_WAKE_RTC) || (wake == POWER_WAKE_TIMER && s_next_alarm != 0 && time(NULL) >= s_next_alarm);
+        on_tick(!warm || app_state()->critical, rtc_edge);
     }
     s_rendered = true;
     if (resume_config) {
@@ -782,9 +776,8 @@ static void app_task(void *arg)
         app_event_t ev;
         if (xQueueReceive(s_queue, &ev, wait) == pdTRUE) {
             handle_event(&ev);
-        } else if (err == ESP_OK && time(NULL) >= s_next_alarm + BACKUP_S) {
-            ESP_LOGW(TAG, "RTC alarm missed; backup tick");
-            on_tick(false, false);
+        } else if (err == ESP_OK && s_next_alarm != 0 && time(NULL) >= s_next_alarm) {
+            on_tick(false, true);
         } else if (err == ESP_OK && time(NULL) >= s_wake_at) {
             on_tick(false, false); /* a cycle switch or seconds tick */
         }

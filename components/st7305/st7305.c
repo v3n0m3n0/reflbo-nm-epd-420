@@ -277,6 +277,7 @@ esp_err_t st7305_init_warm(st7305_variant_t variant, st7305_mode_t mode, st7305_
     s_mode = mode;
     s_lpm_rate = rate;
     s_asleep = asleep;
+    hw_reset(); /* Wake SSD1683 controller from Deep Sleep Mode 1 */
     return ESP_OK;
 }
 
@@ -363,18 +364,12 @@ esp_err_t st7305_prepare_deep_sleep(void)
     send_command(0x10);
     send_data(0x01); /* Deep sleep mode 1 */
 
-    gpio_hold_en(PIN_CS);
-    gpio_hold_en(PIN_RST);
-    gpio_deep_sleep_hold_en();
     s_asleep = true;
     return ESP_OK;
 }
 
 void st7305_cancel_deep_sleep(void)
 {
-    gpio_deep_sleep_hold_dis();
-    gpio_hold_dis(PIN_CS);
-    gpio_hold_dis(PIN_RST);
     s_asleep = false;
 }
 

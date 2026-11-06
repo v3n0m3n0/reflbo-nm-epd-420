@@ -5,6 +5,7 @@
 #include "esp_err.h"
 
 typedef struct {
+    bool     initialized;
     uint32_t packet_count;
     int16_t  last_rssi_dbm;
     int8_t   last_snr_db;
@@ -14,6 +15,9 @@ typedef struct {
 
 /* Starts SX1262 in EU868 RX mode and launches background listener task */
 esp_err_t lora_widget_init(void);
+
+/* Puts SX1262 into sleep mode and cuts LORA_EN before deep sleep */
+void lora_widget_sleep(void);
 
 /* Returns latest packet reception statistics for UI display */
 lora_stats_t lora_widget_get_stats(void);

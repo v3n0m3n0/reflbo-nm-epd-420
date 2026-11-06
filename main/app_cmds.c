@@ -8,6 +8,7 @@
 #include "esp_console.h"
 #include "esp_log.h"
 #include "lang.h"
+#include "lora_widget.h"
 #include "netmgr.h"
 #include "timekeeping.h"
 #include "ui_fields.h"
@@ -453,15 +454,22 @@ static int cmd_pc(int argc, char **argv)
     return diag_on_owner(pc_body, argc, argv);
 }
 
-/* `radar status | loop` (spec §15, M6). */
+/* `radar status | loop | demo on | demo off` (spec §15, M6). */
 static int radar_body(int argc, char **argv)
 {
-    static const char *const k_usage = "radar status | radar loop";
+    static const char *const k_usage = "radar status | radar loop | radar demo on | radar demo off";
+    if (argc == 3 && strcmp(argv[1], "demo") == 0 && (strcmp(argv[2], "on") == 0 || strcmp(argv[2], "off") == 0)) {
+        bool on = strcmp(argv[2], "on") == 0;
+        app_radar_demo(on);
+        app_ui_render();
+        printf("radar: demo mode %s\n", on ? "on (synthetic storm front shown)" : "off");
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "status") == 0) {
         app_radar_status_t r;
         app_radar_status(&r);
-        printf("weather: %s, %u frame%s kept\n", r.source == RADAR_SOURCE_CHMU ? "ChMU" : "RainViewer", r.frames,
-               r.frames == 1 ? "" : "s");
+        printf("weather: %s, %u frame%s kept%s\n", r.source == RADAR_SOURCE_CHMU ? "ChMU" : "RainViewer", r.frames,
+               r.frames == 1 ? "" : "s", app_radar_demo_active() ? " (demo mode on)" : "");
         print_time("  newest", (time_t)r.frame_at);
         print_time("  fetched", r.fetched_at);
         if (r.fetched_at != 0 && !r.ok) {
@@ -613,6 +621,27 @@ static int cmd_energy(int argc, char **argv)
     return diag_on_owner(energy_body, argc, argv);
 }
 
+/* `lora [status]` */
+static int lora_body(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    lora_stats_t s = lora_widget_get_stats();
+    printf("lora: %s\n", s.initialized ? "initialized (SX1262 EU868 continuous RX)" : "disabled or not populated");
+    printf("  packets received: %lu\n", (unsigned long)s.packet_count);
+    if (s.packet_count > 0) {
+        printf("  last RSSI: %d dBm\n", s.last_rssi_dbm);
+        printf("  last SNR: %d dB\n", s.last_snr_db);
+        print_time("  last packet", (time_t)s.last_packet_time_s);
+    }
+    return 0;
+}
+
+static int cmd_lora(int argc, char **argv)
+{
+    return diag_on_owner(lora_body, argc, argv);
+}
+
 void app_register_commands(void)
 {
     const esp_console_cmd_t cmds[] = {
@@ -624,10 +653,11 @@ void app_register_commands(void)
                                          "add <HH:MM> night <HH:MM> [days]", .func = &cmd_schedule },
         { .command = "wifi", .help = "wifi status | scan", .func = &cmd_wifi },
         { .command = "sync", .help = "sync now | status (spec §9.3)", .func = &cmd_sync },
-        { .command = "radar", .help = "radar status | loop (spec §11.2, §11.3)", .func = &cmd_radar },
+        { .command = "radar", .help = "radar status | loop | demo on | demo off (spec §11.2, §11.3)", .func = &cmd_radar },
         { .command = "solar", .help = "solar status | demo on | demo off (spec §11.5, §11.6)", .func = &cmd_solar },
         { .command = "energy", .help = "energy raw: SolaX's last replies (D37)", .func = &cmd_energy },
         { .command = "pc", .help = "pc status | demo on | demo off (spec §12a)", .func = &cmd_pc },
+        { .command = "lora", .help = "lora status: SX1262 LoRa module statistics", .func = &cmd_lora },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         esp_err_t err = esp_console_cmd_register(&cmds[i]);

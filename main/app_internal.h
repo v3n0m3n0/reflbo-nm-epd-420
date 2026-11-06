@@ -228,6 +228,8 @@ void app_radar_prepare(const ui_preset_t *p);
 const ui_radar_t *app_radar_ui(void); /* the radars as a render draws them now */
 uint32_t app_radar_step_s(void);      /* the source's frame step: 300 s for ČHMÚ, 600 for RainViewer */
 void app_radar_status(app_radar_status_t *out);
+void app_radar_demo(bool on); /* `radar demo on|off` */
+bool app_radar_demo_active(void);
 /* The loop (D28): BOOT short on the Radar layout in sync mode `always` plays the kept frames in HPM,
  * oldest first, then stops on the newest in LPM. False, and nothing played, with fewer than two. */
 bool app_radar_loop_start(void);

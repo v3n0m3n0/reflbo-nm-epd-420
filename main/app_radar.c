@@ -32,6 +32,8 @@ static app_radar_status_t s_status;
 static ui_radar_t s_ui;
 static uint8_t s_loop_at, s_loop_count; /* the loop (D28): the frame shown of how many; 0 when it doesn't run */
 static int64_t s_loop_next_ms;          /* app_uptime_ms() of its next frame */
+static radar_frame_t s_demo_frame;
+static bool s_demo;
 
 static void ready(void)
 {
@@ -192,10 +194,67 @@ void app_radar_status(app_radar_status_t *out)
 {
     tidy();
     *out = s_status;
-    out->frames = (uint8_t)s_store.count;
-    const radar_frame_t *f = radar_store_newest(&s_store);
+    out->frames = s_demo ? 1 : (uint8_t)s_store.count;
+    const radar_frame_t *f = s_demo ? &s_demo_frame : radar_store_newest(&s_store);
     out->frame_at = f != NULL ? f->time : 0;
     out->source = source_now();
+}
+
+void app_radar_demo(bool on)
+{
+    if (on == s_demo) {
+        return;
+    }
+    if (on) {
+        ready();
+        const settings_t *set = app_settings();
+        map_view_t v;
+        map_view_init(&v, set->wx_lat_e4, set->wx_lon_e4, set->wx_zoom_q / 4.0, RADAR_VIEW_W, RADAR_VIEW_H);
+        radar_rv_tiles_t t;
+        radar_rv_tiles(&v, &t);
+        if (s_demo_frame.levels != NULL) {
+            radar_frame_free(&s_demo_frame, &radar_fetch_mem);
+        }
+        if (radar_rv_frame_alloc(&s_demo_frame, &t, (uint32_t)time(NULL), &radar_fetch_mem)) {
+            int cx = s_demo_frame.w / 2;
+            int cy = s_demo_frame.h / 2;
+            int r_outer = (s_demo_frame.w < s_demo_frame.h ? s_demo_frame.w : s_demo_frame.h) / 3;
+            int r_mid = r_outer * 2 / 3;
+            int r_core = r_outer / 3;
+            if (r_outer < 30) r_outer = 30;
+            if (r_mid < 20) r_mid = 20;
+            if (r_core < 10) r_core = 10;
+            for (int y = 0; y < s_demo_frame.h; y++) {
+                for (int x = 0; x < s_demo_frame.w; x++) {
+                    int dx = x - cx;
+                    int dy = y - cy;
+                    int dist_sq = dx * dx + dy * dy;
+                    if (dist_sq <= r_core * r_core) {
+                        radar_frame_set(&s_demo_frame, x, y, RADAR_HEAVY);
+                    } else if (dist_sq <= r_mid * r_mid) {
+                        radar_frame_set(&s_demo_frame, x, y, RADAR_MODERATE);
+                    } else if (dist_sq <= r_outer * r_outer) {
+                        radar_frame_set(&s_demo_frame, x, y, RADAR_LIGHT);
+                    }
+                }
+            }
+            s_demo = true;
+            ESP_LOGI(TAG, "radar demo ON: synthetic rain cell generated (%u x %u)", s_demo_frame.w, s_demo_frame.h);
+        } else {
+            ESP_LOGE(TAG, "failed to allocate radar demo frame");
+        }
+    } else {
+        if (s_demo_frame.levels != NULL) {
+            radar_frame_free(&s_demo_frame, &radar_fetch_mem);
+        }
+        s_demo = false;
+        ESP_LOGI(TAG, "radar demo OFF");
+    }
+}
+
+bool app_radar_demo_active(void)
+{
+    return s_demo;
 }
 
 /* The preset draws the weather radar: the Radar layout, or a slot's or a cell's map. */
@@ -234,7 +293,7 @@ const ui_radar_t *app_radar_ui(void)
     bool loop = s_loop_count > 0 && s_loop_at < s_store.count;
     s_ui = (ui_radar_t){ .map = s_map_state > 0 ? &s_map : NULL, .home_lat_e4 = set->lat_e4,
                          .home_lon_e4 = set->lon_e4,
-                         .frame = loop ? &s_store.frames[s_loop_at] : radar_store_newest(&s_store),
+                         .frame = s_demo ? &s_demo_frame : (loop ? &s_store.frames[s_loop_at] : radar_store_newest(&s_store)),
                          .loop_at = loop ? s_loop_at : 0, .loop_count = loop ? s_loop_count : 0,
                          .wx_lat_e4 = set->wx_lat_e4, .wx_lon_e4 = set->wx_lon_e4, .wx_zoom_q = set->wx_zoom_q,
                          .fl_lat_e4 = set->fl_lat_e4, .fl_lon_e4 = set->fl_lon_e4,

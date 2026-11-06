@@ -14,6 +14,7 @@ sdkconfig.defaults.local
 # Reference repos and device captures (logs, screenshots, renders)
 /ref/
 /captures/
+/_backup/
 
 # Python
 __pycache__/

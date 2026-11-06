@@ -162,13 +162,17 @@ target_include_directories(datastore PUBLIC ${REPO_ROOT}/components/datastore/in
 target_compile_options(datastore PRIVATE ${REFLBO_WARNINGS})
 target_link_libraries(datastore PUBLIC m)
 
-# cJSON: the copy bundled with ESP-IDF, so the host tests parse exactly like the firmware.
+# cJSON: the copy bundled with ESP-IDF or managed_components, so the host tests parse exactly like the firmware.
 set(REFLBO_IDF_PATH "$ENV{REFLBO_IDF_PATH}")
-if(NOT REFLBO_IDF_PATH)
-    set(REFLBO_IDF_PATH "$ENV{HOME}/esp/esp-idf-v5.5.5")
+if(EXISTS "${REPO_ROOT}/managed_components/espressif__cjson/cJSON/cJSON.c")
+    set(CJSON_DIR "${REPO_ROOT}/managed_components/espressif__cjson/cJSON")
+elseif(REFLBO_IDF_PATH AND EXISTS "${REFLBO_IDF_PATH}/components/json/cJSON/cJSON.c")
+    set(CJSON_DIR "${REFLBO_IDF_PATH}/components/json/cJSON")
+else()
+    set(CJSON_DIR "$ENV{HOME}/esp/esp-idf-v5.5.5/components/json/cJSON")
 endif()
-add_library(cjson STATIC ${REFLBO_IDF_PATH}/components/json/cJSON/cJSON.c)
-target_include_directories(cjson PUBLIC ${REFLBO_IDF_PATH}/components/json/cJSON)
+add_library(cjson STATIC ${CJSON_DIR}/cJSON.c)
+target_include_directories(cjson PUBLIC ${CJSON_DIR})
 target_compile_options(cjson PRIVATE -Wno-deprecated-declarations) # its sprintf calls; third-party code
 target_link_libraries(cjson PUBLIC m)
 

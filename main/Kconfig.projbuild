@@ -29,16 +29,16 @@ menu "reflbo"
         default 166068
 
     config REFLBO_TEMP_OFFSET_C10
-        int "SHTC3 temperature offset (0.1 °C)"
+        int "AHT20 temperature offset (0.1 °C)"
         range -100 100
         default -20
         help
-            Added to every reading. The board warms the sensor by about 2 °C at all times
-            (AGENTS.md gotcha 10; the owner's measurement, 2026-09-30), so the default is -2.0 °C.
-            Trim it against a reference thermometer in the menu or the web UI (spec §8).
+            Added to every reading. The board warms the sensor by about 2 °C at all times,
+            so the default is -2.0 °C. Trim it against a reference thermometer in the menu
+            or the web UI (spec §8).
 
     config REFLBO_HUM_OFFSET_PCT10
-        int "SHTC3 humidity offset (0.1 %RH)"
+        int "AHT20 humidity offset (0.1 %RH)"
         range -200 200
         default 0
 
@@ -47,13 +47,13 @@ menu "reflbo"
         range 900 1100
         default 1000
         help
-            Per-device correction for the ADC and the 200k/100k divider (spec §8).
+            Per-device correction for the ADC and the 100k/100k divider (ratio 2, spec §8).
 
     choice REFLBO_PANEL_INIT
         prompt "Panel init sequence"
         default REFLBO_PANEL_INIT_FACTORY
         help
-            ST7305 vendor init sequence (decision D12). XiaoZhi's stays available for diagnostics.
+            SSD1683 e-paper init sequence.
         config REFLBO_PANEL_INIT_FACTORY
             bool "Factory firmware (better contrast)"
         config REFLBO_PANEL_INIT_XIAOZHI
