@@ -40,8 +40,12 @@ static int s_hum_offset_pct100 = CONFIG_REFLBO_HUM_OFFSET_PCT10 * 10;
 
 static esp_err_t aht20_check_and_init(void)
 {
+    uint8_t cmd = AHT20_CMD_STATUS;
     uint8_t status = 0;
-    esp_err_t err = i2c_master_receive(s_aht20, &status, 1, I2C_TIMEOUT_MS);
+    esp_err_t err = i2c_master_transmit_receive(s_aht20, &cmd, 1, &status, 1, I2C_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        err = i2c_master_receive(s_aht20, &status, 1, I2C_TIMEOUT_MS);
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "AHT20 status query failed: %s", esp_err_to_name(err));
         return err;
@@ -66,7 +70,7 @@ static esp_err_t aht20_read(int *temp_c100, int *hum_pct100)
 
     vTaskDelay(pdMS_TO_TICKS(AHT20_MEAS_DELAY_MS));
 
-    uint8_t raw[7] = {0};
+    uint8_t raw[6] = {0};
     ESP_RETURN_ON_ERROR(i2c_master_receive(s_aht20, raw, sizeof(raw), I2C_TIMEOUT_MS),
                         TAG, "read measurement");
 

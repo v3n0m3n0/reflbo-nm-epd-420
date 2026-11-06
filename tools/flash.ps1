@@ -24,10 +24,9 @@ Set-Location $projectDir
 
 Write-Host "Flashing reflbo-nm-epd-420 to $Port at $Baud baud..."
 
-# Flashing command (--after watchdog-reset is REQUIRED to clear FORCE_DOWNLOAD_BOOT latch)
 & $python -X utf8 $esptool --chip esp32s3 --port $Port --baud $Baud `
-    --before default-reset --after watchdog-reset write-flash `
-    --flash-mode dio --flash-size 16MB --flash-freq 80m `
+    --before default_reset --after hard_reset write_flash `
+    --flash_mode dio --flash_size 16MB --flash_freq 80m `
     0x0 "build\bootloader\bootloader.bin" `
     0x8000 "build\partition_table\partition-table.bin" `
     0x19000 "build\ota_data_initial.bin" `
