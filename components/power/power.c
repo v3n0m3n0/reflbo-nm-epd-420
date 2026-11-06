@@ -360,6 +360,8 @@ void power_sleep_deep(time_t until_utc)
     }
     lora_stats_t lstats = lora_widget_get_stats();
     if (lstats.enabled && lstats.wake_on_rx) {
+        gpio_hold_en(BOARD_PIN_LORA_EN);
+        gpio_deep_sleep_hold_en();
         esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(1ULL << BOARD_PIN_LORA_DIO1, ESP_GPIO_WAKEUP_GPIO_HIGH);
     }
     esp_sleep_enable_timer_wakeup(sleep_us_until(until_utc));

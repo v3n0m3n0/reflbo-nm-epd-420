@@ -1110,7 +1110,7 @@ async function loraPage() {
   const bw = choose(LORA_BW, String(lora.bw_khz || 250));
   const cr = choose(LORA_CR, String(lora.cr || 5));
   const swVal = lora.sync_word !== undefined ? lora.sync_word : 0x1424;
-  const initialSw = (typeof swVal === 'number' ? swVal.toString(16) : String(swVal).replace(/^0x/i, '')).toUpperCase();
+  const initialSw = (typeof swVal === 'number' ? swVal.toString(16) : String(swVal).replace(/^0x/i, '')).toUpperCase().padStart(4, '0');
   const syncWord = h('input', { type: 'text', value: initialSw, autocapitalize: 'characters', spellcheck: 'false' });
   const wakeOnRx = h('input', { type: 'checkbox', checked: !!lora.wake_on_rx });
 

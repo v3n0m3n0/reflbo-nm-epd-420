@@ -81,7 +81,7 @@ esp_err_t board_init(bool cold)
 
     gpio_set_level(BOARD_PIN_TEMP_CTL, 1);
     gpio_set_level(BOARD_PIN_CODEC_EN, 1);
-    gpio_set_level(BOARD_PIN_LORA_EN, 1);
+    gpio_set_level(BOARD_PIN_LORA_EN, 0); /* Off until lora_widget_apply() evaluates settings */
     gpio_set_level(BOARD_PIN_PA_CTRL, 0);
     gpio_set_level(BOARD_PIN_ADC_EN, 0);
 
@@ -139,7 +139,7 @@ void board_prepare_deep_sleep(void)
 
     gpio_set_level(BOARD_PIN_TEMP_CTL, 0);
     gpio_set_level(BOARD_PIN_CODEC_EN, 0);
-    gpio_set_level(BOARD_PIN_LORA_EN, 0);
+    /* Note: LORA_EN is managed strictly by lora_widget_sleep() to allow wake_on_rx */
     gpio_set_level(BOARD_PIN_PA_CTRL, 0);
     gpio_set_level(BOARD_PIN_ADC_EN, 0);
 }

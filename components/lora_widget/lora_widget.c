@@ -168,6 +168,18 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         s_stats_mutex = xSemaphoreCreateMutex();
     }
 
+    if (cfg != NULL && s_stats.initialized && s_stats.enabled == cfg->enabled &&
+        s_stats.freq_khz == cfg->freq_khz && s_stats.sf == cfg->sf &&
+        s_stats.bw_khz == cfg->bw_khz && s_stats.cr == cfg->cr &&
+        s_stats.sync_word == cfg->sync_word) {
+        /* Radio parameters unchanged; only update wake_on_rx */
+        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            s_stats.wake_on_rx = cfg->wake_on_rx;
+            xSemaphoreGive(s_stats_mutex);
+        }
+        return ESP_OK;
+    }
+
     /* Pause RX and disable interrupts during reconfiguration */
     gpio_intr_disable(BOARD_PIN_LORA_DIO1);
     if (s_task != NULL) {
@@ -211,7 +223,7 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
     gpio_config_t out_conf = {
         .pin_bit_mask = (1ULL << BOARD_PIN_LORA_NSS) | (1ULL << BOARD_PIN_LORA_RST) | (1ULL << BOARD_PIN_LORA_EN),
         .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
