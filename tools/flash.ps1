@@ -25,7 +25,7 @@ Set-Location $projectDir
 Write-Host "Flashing reflbo-nm-epd-420 to $Port at $Baud baud..."
 
 & $python -X utf8 $esptool --chip esp32s3 --port $Port --baud $Baud `
-    --before default_reset --after watchdog-reset write_flash `
+    --before default_reset --after hard_reset write_flash `
     --flash_mode dio --flash_size 16MB --flash_freq 80m `
     0x0 "build\bootloader\bootloader.bin" `
     0x8000 "build\partition_table\partition-table.bin" `

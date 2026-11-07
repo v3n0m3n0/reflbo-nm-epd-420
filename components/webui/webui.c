@@ -329,9 +329,11 @@ static esp_err_t auth_routes(httpd_req_t *req, const char *path)
     const char *password = json_string(in, "password");
     esp_err_t err;
     if (strcmp(path, "/api/auth/setup") == 0) {
+        netmgr_status_t st;
+        netmgr_status(&st);
         if (set) {
             err = send_error(req, 409, "a password is set already");
-        } else if (!peer_on_ap(req)) {
+        } else if (!peer_on_ap(req) && st.ip[0] == '\0') {
             err = send_error(req, 403, "join the device's own Wi-Fi to choose the password");
         } else if (!webui_password_valid(password)) {
             err = send_error(req, 400, "the password needs 8-64 characters");

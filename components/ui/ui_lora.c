@@ -7,6 +7,11 @@
 #include "gfx_fonts.h"
 #include "lang.h"
 
+#define LORA_MSG_MAX_LINES   3
+#define LORA_MSG_LINE_W      384
+#define LORA_MSG_LINE_H      13
+#define LORA_MSG_LINE_BUF_SZ 160
+
 static void format_bw(uint32_t bw_hz, char *out, size_t size)
 {
     if (bw_hz % 1000 == 0) {
@@ -22,6 +27,148 @@ static void format_snr(int8_t snr_q4, char *out, size_t size)
     int frac = abs(snr_q4 % 4) * 25 / 10;
     snprintf(out, size, "%+d.%d dB", whole, frac);
 }
+
+static void format_lora_msg(const ui_lora_msg_t *msg, char *out, size_t out_sz)
+{
+    char time_str[16];
+    if (msg->timestamp >= 1577836800u) {
+        time_t t = (time_t)msg->timestamp;
+        struct tm tm;
+        localtime_r(&t, &tm);
+        snprintf(time_str, sizeof(time_str), "%02d:%02d", tm.tm_hour, tm.tm_min);
+    } else {
+        snprintf(time_str, sizeof(time_str), "%s", msg->outgoing ? "[TX]" : "[RX]");
+    }
+
+    if (msg->outgoing) {
+        if (msg->sender[0] != '\0') {
+            snprintf(out, out_sz, "%s > %s: %s",
+                     time_str, msg->sender, msg->text);
+        } else {
+            snprintf(out, out_sz, "%s > %s",
+                     time_str, msg->text);
+        }
+    } else {
+        const char *dir = msg->is_direct ? "< [DM]" : "<";
+        if (msg->sender[0] != '\0') {
+            snprintf(out, out_sz, "%s %s %s: %s",
+                     time_str, dir, msg->sender, msg->text);
+        } else {
+            snprintf(out, out_sz, "%s %s %s",
+                     time_str, dir, msg->text);
+        }
+    }
+}
+
+static int wrap_lora_msg_lines(const gfx_font_t *font, const char *text, int16_t max_w,
+                               char lines[LORA_MSG_MAX_LINES][LORA_MSG_LINE_BUF_SZ])
+{
+    if (lines == NULL) {
+        return 0;
+    }
+    for (int i = 0; i < LORA_MSG_MAX_LINES; i++) {
+        lines[i][0] = '\0';
+    }
+    if (font == NULL || text == NULL || text[0] == '\0') {
+        return 1;
+    }
+
+    while (*text == ' ' || *text == '\n' || *text == '\r') {
+        text++;
+    }
+    if (*text == '\0') {
+        return 1;
+    }
+
+    for (int line_idx = 0; line_idx < LORA_MSG_MAX_LINES; line_idx++) {
+        if (line_idx > 0) {
+            while (*text == ' ' || *text == '\n' || *text == '\r') {
+                text++;
+            }
+            if (*text == '\0') {
+                return line_idx;
+            }
+        }
+
+        if (line_idx == LORA_MSG_MAX_LINES - 1) {
+            if (gfx_text_width(font, text) <= max_w) {
+                snprintf(lines[line_idx], LORA_MSG_LINE_BUF_SZ, "%s", text);
+            } else {
+                gfx_text_ellipsize(font, text, max_w, lines[line_idx], LORA_MSG_LINE_BUF_SZ);
+            }
+            return LORA_MSG_MAX_LINES;
+        }
+
+        if (gfx_text_width(font, text) <= max_w) {
+            snprintf(lines[line_idx], LORA_MSG_LINE_BUF_SZ, "%s", text);
+            return line_idx + 1;
+        }
+
+        const char *p = text;
+        const char *last_char_p = text;
+        const char *last_space_p = NULL;
+        const char *next_after_space_p = NULL;
+
+        while (*p != '\0') {
+            const char *prev = p;
+            gfx_utf8_next(&p);
+            size_t len = (size_t)(p - text);
+            if (len >= LORA_MSG_LINE_BUF_SZ) {
+                break;
+            }
+            char candidate[LORA_MSG_LINE_BUF_SZ];
+            memcpy(candidate, text, len);
+            candidate[len] = '\0';
+            if (gfx_text_width(font, candidate) > max_w) {
+                break;
+            }
+            last_char_p = p;
+            if (*prev == ' ' || *prev == '\n' || *prev == '\r') {
+                last_space_p = prev;
+                next_after_space_p = p;
+            }
+        }
+
+        size_t break_len = 0;
+        const char *next_text = NULL;
+
+        if (last_space_p != NULL && last_space_p > text) {
+            break_len = (size_t)(last_space_p - text);
+            next_text = next_after_space_p;
+        } else {
+            /* If a single word has no spaces and exceeds max_w, break at last complete UTF-8 character boundary */
+            if (last_char_p == text) {
+                p = text;
+                gfx_utf8_next(&p);
+                last_char_p = p;
+            }
+            break_len = (size_t)(last_char_p - text);
+            next_text = last_char_p;
+        }
+
+        if (break_len >= LORA_MSG_LINE_BUF_SZ) {
+            break_len = LORA_MSG_LINE_BUF_SZ - 1;
+        }
+        memcpy(lines[line_idx], text, break_len);
+        lines[line_idx][break_len] = '\0';
+
+        /* Trim trailing whitespace from line */
+        while (break_len > 0 && (lines[line_idx][break_len - 1] == ' ' ||
+                                 lines[line_idx][break_len - 1] == '\r' ||
+                                 lines[line_idx][break_len - 1] == '\n')) {
+            lines[line_idx][--break_len] = '\0';
+        }
+
+        text = next_text;
+    }
+
+    return LORA_MSG_MAX_LINES;
+}
+
+typedef struct {
+    int line_count;
+    char lines[LORA_MSG_MAX_LINES][LORA_MSG_LINE_BUF_SZ];
+} wrapped_lora_msg_t;
 
 void ui_draw_lora_view(gfx_fb_t *fb, gfx_rect_t below, const ui_context_t *ctx)
 {
@@ -108,45 +255,37 @@ void ui_draw_lora_view(gfx_fb_t *fb, gfx_rect_t below, const ui_context_t *ctx)
         gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 8, 153, 384, 16 }, GFX_ALIGN_CENTER,
                          "BOOT short: send Self Advert", GFX_BLACK);
     } else {
-        int max_show = lora->msg_count > 5 ? 5 : lora->msg_count;
-        int y_pos = 80;
-        for (int i = 0; i < max_show; i++) {
-            const ui_lora_msg_t *msg = &lora->msgs[i];
-            char time_str[16];
-            if (msg->timestamp >= 1577836800u) {
-                time_t t = (time_t)msg->timestamp;
-                struct tm tm;
-                localtime_r(&t, &tm);
-                snprintf(time_str, sizeof(time_str), "%02d:%02d", tm.tm_hour, tm.tm_min);
-            } else {
-                snprintf(time_str, sizeof(time_str), "%s", msg->outgoing ? "[TX]" : "[RX]");
-            }
+        int count = lora->msg_count > UI_LORA_MAX_MSGS ? UI_LORA_MAX_MSGS : lora->msg_count;
+        static wrapped_lora_msg_t wrapped[UI_LORA_MAX_MSGS];
+        int total_h = 0;
+        int first_visible = count - 1;
 
+        for (int i = count - 1; i >= 0; i--) {
             char full_msg[256];
-            if (msg->outgoing) {
-                if (msg->sender[0] != '\0') {
-                    snprintf(full_msg, sizeof(full_msg), "%s > %s: %s",
-                             time_str, msg->sender, msg->text);
-                } else {
-                    snprintf(full_msg, sizeof(full_msg), "%s > %s",
-                             time_str, msg->text);
-                }
+            format_lora_msg(&lora->msgs[i], full_msg, sizeof(full_msg));
+            wrapped[i].line_count = wrap_lora_msg_lines(font_sm, full_msg, LORA_MSG_LINE_W, wrapped[i].lines);
+            int msg_h = wrapped[i].line_count * LORA_MSG_LINE_H + 3;
+            if (i == count - 1) {
+                total_h += msg_h;
+                first_visible = i;
             } else {
-                const char *dir = msg->is_direct ? "< [DM]" : "<";
-                if (msg->sender[0] != '\0') {
-                    snprintf(full_msg, sizeof(full_msg), "%s %s %s: %s",
-                             time_str, dir, msg->sender, msg->text);
+                if (total_h + msg_h <= (205 - 76)) {
+                    total_h += msg_h;
+                    first_visible = i;
                 } else {
-                    snprintf(full_msg, sizeof(full_msg), "%s %s %s",
-                             time_str, dir, msg->text);
+                    break;
                 }
             }
+        }
 
-            char fit[160];
-            gfx_text_ellipsize(font_sm, full_msg, 384, fit, sizeof(fit));
-            gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 8, (int16_t)y_pos, 384, 16 },
-                             GFX_ALIGN_LEFT, fit, GFX_BLACK);
-            y_pos += 25;
+        int y_pos = 76;
+        for (int i = first_visible; i < count; i++) {
+            for (int l = 0; l < wrapped[i].line_count; l++) {
+                gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 8, (int16_t)y_pos, LORA_MSG_LINE_W, 14 },
+                                 GFX_ALIGN_LEFT, wrapped[i].lines[l], GFX_BLACK);
+                y_pos += LORA_MSG_LINE_H;
+            }
+            y_pos += 3;
         }
     }
 

@@ -566,6 +566,27 @@ bool lora_widget_get_message(size_t index, meshcore_msg_t *out)
     return ok;
 }
 
+static void drain_pending_ble_tx(void)
+{
+    if (s_pending_ble_tx.pending_ack_confirm) {
+        uint8_t ack_push[9];
+        ack_push[0] = PUSH_CODE_SEND_CONFIRMED;
+        memcpy(&ack_push[1], s_pending_ble_tx.ack_tag, 4);
+        uint32_t rtt_ms = 250;
+        memcpy(&ack_push[5], &rtt_ms, 4);
+        push_companion_event(ack_push, sizeof(ack_push));
+        s_pending_ble_tx.pending_ack_confirm = false;
+    }
+    if (s_pending_ble_tx.pending_channel_txt) {
+        s_pending_ble_tx.pending_channel_txt = false;
+        lora_widget_send_channel_msg_ts(s_pending_ble_tx.msg_ts, s_pending_ble_tx.text);
+    }
+    if (s_pending_ble_tx.pending_advert) {
+        s_pending_ble_tx.pending_advert = false;
+        lora_widget_send_advert(s_pending_ble_tx.advert_flood);
+    }
+}
+
 static void lora_rx_task(void *arg)
 {
     (void)arg;
@@ -596,27 +617,12 @@ static void lora_rx_task(void *arg)
             if (resp_len > 0) {
                 meshcore_ble_send(resp, resp_len);
             }
-            if (s_pending_ble_tx.pending_ack_confirm) {
-                uint8_t ack_push[9];
-                ack_push[0] = PUSH_CODE_SEND_CONFIRMED;
-                memcpy(&ack_push[1], s_pending_ble_tx.ack_tag, 4);
-                uint32_t rtt_ms = 250;
-                memcpy(&ack_push[5], &rtt_ms, 4);
-                push_companion_event(ack_push, sizeof(ack_push));
-                s_pending_ble_tx.pending_ack_confirm = false;
-            }
-            if (s_pending_ble_tx.pending_channel_txt) {
-                s_pending_ble_tx.pending_channel_txt = false;
-                lora_widget_send_channel_msg_ts(s_pending_ble_tx.msg_ts, s_pending_ble_tx.text);
-            }
-            if (s_pending_ble_tx.pending_advert) {
-                s_pending_ble_tx.pending_advert = false;
-                lora_widget_send_advert(s_pending_ble_tx.advert_flood);
-            }
+            drain_pending_ble_tx();
             if (cfg_changed) {
                 lora_widget_apply(&s_current_cfg);
             }
         }
+        drain_pending_ble_tx();
 
         if (!s_stats.enabled || !s_stats.initialized) {
             continue;
@@ -956,6 +962,9 @@ static bool companion_send_advert(bool flood)
 {
     s_pending_ble_tx.pending_advert = true;
     s_pending_ble_tx.advert_flood = flood;
+    if (s_task) {
+        xTaskNotifyGive(s_task);
+    }
     return true;
 }
 
@@ -969,6 +978,9 @@ static bool companion_send_channel_txt(uint8_t channel_idx, const char *text)
         s_pending_ble_tx.text[sizeof(s_pending_ble_tx.text) - 1] = '\0';
     } else {
         s_pending_ble_tx.text[0] = '\0';
+    }
+    if (s_task) {
+        xTaskNotifyGive(s_task);
     }
     return true;
 }

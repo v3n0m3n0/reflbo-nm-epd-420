@@ -13,6 +13,7 @@
 #include "esp_mac.h"
 #include "esp_system.h"
 #include "lora_widget.h"
+#include "meshcore_companion.h"
 #include "netmgr.h"
 #include "sensors.h"
 #include "storage_backup.h"
@@ -808,6 +809,80 @@ void app_web_api(const char *method, const char *path, const char *query, const 
     } else if (strcmp(path, "/api/lora/reset") == 0 && strcmp(method, "POST") == 0) {
         lora_widget_reset_stats();
         reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
+    } else if (strcmp(path, "/api/lora/stats") == 0 && get) {
+        lora_stats_t ls = lora_widget_get_stats();
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddBoolToObject(o, "enabled", ls.enabled);
+        cJSON_AddBoolToObject(o, "initialized", ls.initialized);
+        cJSON_AddNumberToObject(o, "ble_pin", ls.ble_pin);
+        cJSON_AddBoolToObject(o, "ble_connected", ls.ble_connected);
+        cJSON_AddNumberToObject(o, "packet_count", ls.packet_count);
+        cJSON_AddNumberToObject(o, "packets_sent", ls.packets_sent);
+        cJSON_AddNumberToObject(o, "recv_flood", ls.recv_flood);
+        cJSON_AddNumberToObject(o, "recv_direct", ls.recv_direct);
+        cJSON_AddNumberToObject(o, "noise_floor_dbm", ls.noise_floor_dbm);
+        cJSON_AddNumberToObject(o, "last_rssi_dbm", ls.last_rssi_dbm);
+        cJSON_AddNumberToObject(o, "last_snr_db", (double)ls.last_snr_q4 / 4.0);
+        ds_entry_t eb;
+        if (ds_get(app_ds(), DS_BAT_LEVEL, &eb) && eb.updated != 0) {
+            cJSON_AddNumberToObject(o, "battery_mv", eb.mv);
+            cJSON_AddNumberToObject(o, "battery_level", eb.value);
+        }
+        reply_cjson(reply, out, size, o);
+    } else if (strcmp(path, "/api/lora/companion") == 0 && strcmp(method, "POST") == 0) {
+        uint8_t cmd_buf[COMPANION_MAX_FRAME_SIZE];
+        size_t cmd_len = 0;
+        if (body != NULL && body[0] == '{') {
+            cJSON *in = cJSON_Parse(body);
+            const cJSON *h = in ? cJSON_GetObjectItemCaseSensitive(in, "hex") : NULL;
+            const cJSON *cmd_id = in ? cJSON_GetObjectItemCaseSensitive(in, "cmd") : NULL;
+            if (cJSON_IsString(h) && h->valuestring) {
+                size_t hlen = strlen(h->valuestring);
+                for (size_t i = 0; i < hlen && cmd_len < sizeof(cmd_buf); i += 2) {
+                    unsigned int byte = 0;
+                    if (sscanf(h->valuestring + i, "%02x", &byte) == 1) {
+                        cmd_buf[cmd_len++] = (uint8_t)byte;
+                    }
+                }
+            } else if (cJSON_IsNumber(cmd_id)) {
+                cmd_buf[cmd_len++] = (uint8_t)cmd_id->valueint;
+            }
+            if (in) cJSON_Delete(in);
+        } else if (body != NULL) {
+            cmd_len = strlen(body);
+            if (cmd_len > sizeof(cmd_buf)) cmd_len = sizeof(cmd_buf);
+            memcpy(cmd_buf, body, cmd_len);
+        }
+        if (cmd_len == 0) {
+            reply_error(reply, out, size, 400, "missing companion command");
+        } else {
+            app_ui_state_t *s = app_state();
+            bool changed = false;
+            uint8_t resp[COMPANION_MAX_FRAME_SIZE];
+            size_t resp_len = lora_widget_handle_companion_cmd(cmd_buf, cmd_len, &s->settings.lora, &changed, resp, sizeof(resp));
+            if (changed) {
+                lora_widget_apply(&s->settings.lora);
+                app_ui_save_settings();
+            }
+            cJSON *res = cJSON_CreateObject();
+            cJSON_AddBoolToObject(res, "ok", true);
+            cJSON_AddNumberToObject(res, "resp_len", (double)resp_len);
+            char hex_out[COMPANION_MAX_FRAME_SIZE * 2 + 1];
+            for (size_t i = 0; i < resp_len; i++) {
+                snprintf(hex_out + (i * 2), 3, "%02x", resp[i]);
+            }
+            hex_out[resp_len * 2] = '\0';
+            cJSON_AddStringToObject(res, "hex", hex_out);
+            if (resp_len >= 11 && resp[0] == RESP_CODE_BATT_AND_STORAGE) {
+                uint16_t mv = (uint16_t)resp[1] | ((uint16_t)resp[2] << 8);
+                uint32_t used_kb = (uint32_t)resp[3] | ((uint32_t)resp[4] << 8) | ((uint32_t)resp[5] << 16) | ((uint32_t)resp[6] << 24);
+                uint32_t total_kb = (uint32_t)resp[7] | ((uint32_t)resp[8] << 8) | ((uint32_t)resp[9] << 16) | ((uint32_t)resp[10] << 24);
+                cJSON_AddNumberToObject(res, "batt_mv", mv);
+                cJSON_AddNumberToObject(res, "storage_used_kb", (double)used_kb);
+                cJSON_AddNumberToObject(res, "storage_total_kb", (double)total_kb);
+            }
+            reply_cjson(reply, out, size, res);
+        }
     } else if (strcmp(path, "/api/lora/advert") == 0 && strcmp(method, "POST") == 0) {
         bool flood = true;
         if (body != NULL && body[0] != '\0') {

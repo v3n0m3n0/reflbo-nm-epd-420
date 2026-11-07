@@ -37,6 +37,8 @@ static int64_t s_toast_until_ms;
 static ui_lora_t s_lora_ui;
 static uint32_t s_last_lora_pkt_count;
 static uint32_t s_last_lora_sent_count;
+static uint32_t s_last_lora_msg_count;
+static bool s_last_lora_ble;
 
 #define LEARN_PATH "/fs/state/battery_learn.txt" /* the battery learning session in base64 (D21) */
 #define FORECAST_PATH "/fs/state/datastore.bin"    /* the last weather and air quality (spec §6) */
@@ -771,9 +773,14 @@ void app_ui_tick(bool force)
     }
     if (s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
         lora_stats_t st = lora_widget_get_stats();
-        if (st.packet_count != s_last_lora_pkt_count || st.packets_sent != s_last_lora_sent_count) {
+        if (st.packet_count != s_last_lora_pkt_count ||
+            st.packets_sent != s_last_lora_sent_count ||
+            st.msg_count != s_last_lora_msg_count ||
+            st.ble_connected != s_last_lora_ble) {
             s_last_lora_pkt_count = st.packet_count;
             s_last_lora_sent_count = st.packets_sent;
+            s_last_lora_msg_count = st.msg_count;
+            s_last_lora_ble = st.ble_connected;
             render = true;
         }
     }
@@ -791,7 +798,8 @@ sched_wake_t app_ui_next_wake(time_t now)
         .display_every_min = s.settings.display_every_min,
         .sensors_every_min = s.settings.sensors_every_min,
         .cycle_at = s_presets.cycle_enabled ? s.cycle_at : 0,
-        .every_second = s_presets.presets[s_presets.active].seconds,
+        .every_second = s_presets.presets[s_presets.active].seconds ||
+                        (s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA),
         .schedule_at = schedule_runs() ? ui_schedule_next(&s_presets.schedule, now, &index) : 0,
         .sync_at = s.critical || s.night_until != 0 ? 0 : app_sync_due(),
     };
