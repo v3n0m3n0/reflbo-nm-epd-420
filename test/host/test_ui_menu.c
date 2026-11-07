@@ -41,17 +41,17 @@ static ui_menu_intent_t open_item(ui_menu_item_t item)
 static void test_the_root_lists_the_sections_in_order(void)
 {
     const ui_menu_item_t expected[] = { UI_MI_PRESETS, UI_MI_WIFI,    UI_MI_SYNC, UI_MI_TIME,
-                                        UI_MI_DISPLAY, UI_MI_SENSORS, UI_MI_INFO, UI_MI_SYSTEM };
+                                        UI_MI_DISPLAY, UI_MI_SENSORS, UI_MI_LORA, UI_MI_INFO, UI_MI_SYSTEM };
     ui_menu_item_t items[UI_MI_COUNT];
     int n = ui_menu_visible(&s_m, &s_model, items, UI_MI_COUNT);
-    TEST_ASSERT_EQUAL_INT(8, n);
-    TEST_ASSERT_EQUAL_INT_ARRAY(expected, items, 8);
+    TEST_ASSERT_EQUAL_INT(9, n);
+    TEST_ASSERT_EQUAL_INT_ARRAY(expected, items, 9);
     TEST_ASSERT_EQUAL_INT(UI_MI_PRESETS, ui_menu_current(&s_m, &s_model));
 }
 
 static void test_next_wraps_select_enters_and_back_returns_to_the_section(void)
 {
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 9; i++) {
         press(UI_MENU_KEY_NEXT);
     }
     TEST_ASSERT_EQUAL_INT(UI_MI_PRESETS, ui_menu_current(&s_m, &s_model)); /* wrapped */
@@ -186,7 +186,7 @@ static void test_hidden_items_are_skipped_and_info_does_nothing(void)
 {
     s_model.hidden[UI_MI_DISPLAY] = true;
     ui_menu_item_t items[UI_MI_COUNT];
-    TEST_ASSERT_EQUAL_INT(7, ui_menu_visible(&s_m, &s_model, items, UI_MI_COUNT));
+    TEST_ASSERT_EQUAL_INT(8, ui_menu_visible(&s_m, &s_model, items, UI_MI_COUNT));
     press(UI_MENU_KEY_NEXT);
     press(UI_MENU_KEY_NEXT);
     press(UI_MENU_KEY_NEXT);
@@ -365,12 +365,72 @@ static void test_the_sync_steps_switch_on_and_off(void)
     TEST_ASSERT_EQUAL_INT(UI_MI_SYNC_STEPS, ui_menu_current(&s_m, &s_model)); /* back where it was */
 }
 
+/* LoRa section: radio toggle, advert action, discover action, and status info */
+static void test_the_lora_section_offers_radio_advert_discover_and_status(void)
+{
+    open_item(UI_MI_LORA);
+    ui_menu_item_t items[UI_MI_COUNT];
+    const ui_menu_item_t expected[] = { UI_MI_LORA_ENABLED, UI_MI_LORA_ADVERT, UI_MI_LORA_DISCOVER, UI_MI_LORA_STATUS };
+    TEST_ASSERT_EQUAL_INT(4, ui_menu_visible(&s_m, &s_model, items, UI_MI_COUNT));
+    TEST_ASSERT_EQUAL_INT_ARRAY(expected, items, 4);
+
+    const lang_t *en = lang_get("en"), *cs = lang_get("cs");
+    TEST_ASSERT_EQUAL_STRING("LoRa", ui_menu_label(UI_MI_LORA, en));
+    TEST_ASSERT_EQUAL_STRING("LoRa radio", ui_menu_label(UI_MI_LORA_ENABLED, en));
+    TEST_ASSERT_EQUAL_STRING("Send advert", ui_menu_label(UI_MI_LORA_ADVERT, en));
+    TEST_ASSERT_EQUAL_STRING("Find repeaters", ui_menu_label(UI_MI_LORA_DISCOVER, en));
+    TEST_ASSERT_EQUAL_STRING("Status", ui_menu_label(UI_MI_LORA_STATUS, en));
+
+    TEST_ASSERT_EQUAL_STRING("LoRa", ui_menu_label(UI_MI_LORA, cs));
+    TEST_ASSERT_EQUAL_STRING("Rádio LoRa", ui_menu_label(UI_MI_LORA_ENABLED, cs));
+    TEST_ASSERT_EQUAL_STRING("Odeslat maják", ui_menu_label(UI_MI_LORA_ADVERT, cs));
+    TEST_ASSERT_EQUAL_STRING("Hledat převaděče", ui_menu_label(UI_MI_LORA_DISCOVER, cs));
+    TEST_ASSERT_EQUAL_STRING("Stav", ui_menu_label(UI_MI_LORA_STATUS, cs));
+
+    /* Toggle UI_MI_LORA_ENABLED */
+    s_model.value[UI_MI_LORA_ENABLED] = 0;
+    ui_menu_intent_t in = open_item(UI_MI_LORA_ENABLED);
+    TEST_ASSERT_EQUAL(UI_MENU_SET, in.kind);
+    TEST_ASSERT_EQUAL_INT(UI_MI_LORA_ENABLED, in.item);
+    TEST_ASSERT_EQUAL_INT(1, in.value);
+
+    /* Test helper step_value / format_value */
+    ui_menu_values_t v = { .lora_enabled = false, .lora_status = "868.00M RX:10 TX:2" };
+    step_value(UI_MI_LORA_ENABLED, &v);
+    TEST_ASSERT_TRUE(v.lora_enabled);
+    char text[32];
+    format_value(UI_MI_LORA_ENABLED, &v, en, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("On", text);
+    format_value(UI_MI_LORA_STATUS, &v, en, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("868.00M RX:10 TX:2", text);
+
+    /* Trigger UI_MI_LORA_ADVERT */
+    in = open_item(UI_MI_LORA_ADVERT);
+    TEST_ASSERT_EQUAL(UI_MENU_ACTION, in.kind);
+    TEST_ASSERT_EQUAL_INT(UI_MI_LORA_ADVERT, in.item);
+
+    /* Trigger UI_MI_LORA_DISCOVER */
+    in = open_item(UI_MI_LORA_DISCOVER);
+    TEST_ASSERT_EQUAL(UI_MENU_ACTION, in.kind);
+    TEST_ASSERT_EQUAL_INT(UI_MI_LORA_DISCOVER, in.item);
+
+    /* Status item is info: select does nothing */
+    TEST_ASSERT_EQUAL(UI_MENU_NONE, open_item(UI_MI_LORA_STATUS).kind);
+    TEST_ASSERT_EQUAL(UI_MENU_BROWSE, s_m.mode);
+
+    /* Back returns to root on UI_MI_LORA */
+    TEST_ASSERT_EQUAL(UI_MENU_NONE, press(UI_MENU_KEY_BACK).kind);
+    TEST_ASSERT_EQUAL_INT(UI_MI_ROOT, s_m.section);
+    TEST_ASSERT_EQUAL_INT(UI_MI_LORA, ui_menu_current(&s_m, &s_model));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_the_sync_section_offers_its_mode_and_quiet_hours);
     RUN_TEST(test_the_sync_steps_switch_on_and_off);
     RUN_TEST(test_the_pc_section_switches_pc_stats_and_shows_the_session);
+    RUN_TEST(test_the_lora_section_offers_radio_advert_discover_and_status);
     RUN_TEST(test_the_root_lists_the_sections_in_order);
     RUN_TEST(test_next_wraps_select_enters_and_back_returns_to_the_section);
     RUN_TEST(test_back_at_the_root_and_exit_anywhere_close_the_menu);

@@ -68,6 +68,11 @@ static const node_t k_nodes[UI_MI_COUNT] = {
     [UI_MI_HUM_OFFSET] = { .label = LS_M_HUM_OFFSET, .kind = K_NUMBER, .parent = UI_MI_SENSORS, .min = -200,
                            .max = 200, .step = 5, .decimals = 1, .unit = "%" },
     [UI_MI_UNITS] = { .label = LS_M_UNITS, .kind = K_CHOICE, .parent = UI_MI_SENSORS },
+    [UI_MI_LORA] = { .label = LS_M_LORA, .kind = K_SECTION, .parent = UI_MI_ROOT },
+    [UI_MI_LORA_ENABLED] = { .label = LS_M_LORA_RADIO, .kind = K_TOGGLE, .parent = UI_MI_LORA },
+    [UI_MI_LORA_ADVERT] = { .label = LS_M_LORA_ADVERT, .kind = K_ACTION, .parent = UI_MI_LORA },
+    [UI_MI_LORA_DISCOVER] = { .label = LS_M_LORA_DISCOVER, .kind = K_ACTION, .parent = UI_MI_LORA },
+    [UI_MI_LORA_STATUS] = { .label = LS_M_LORA_STATUS, .kind = K_INFO, .parent = UI_MI_LORA },
     [UI_MI_INFO] = { .label = LS_M_INFO, .kind = K_SECTION, .parent = UI_MI_ROOT },
     [UI_MI_INFO_BATTERY] = { .label = LS_BATTERY, .kind = K_INFO, .parent = UI_MI_INFO },
     [UI_MI_INFO_FIRMWARE] = { .label = LS_M_FIRMWARE, .kind = K_INFO, .parent = UI_MI_INFO },
@@ -335,5 +340,31 @@ ui_menu_intent_t ui_menu_input(ui_menu_t *m, const ui_menu_model_t *model, ui_me
         return k_none;
     default:
         return (ui_menu_intent_t){ .kind = UI_MENU_CLOSE };
+    }
+}
+
+void step_value(ui_menu_item_t item, ui_menu_values_t *v)
+{
+    if (!v) {
+        return;
+    }
+    if (item == UI_MI_LORA_ENABLED) {
+        v->lora_enabled = !v->lora_enabled;
+    }
+}
+
+void format_value(ui_menu_item_t item, const ui_menu_values_t *v, const lang_t *lang, char *out, size_t size)
+{
+    if (!out || size == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!v) {
+        return;
+    }
+    if (item == UI_MI_LORA_ENABLED) {
+        snprintf(out, size, "%s", lang_str(lang, v->lora_enabled ? LS_ON : LS_OFF));
+    } else if (item == UI_MI_LORA_STATUS) {
+        snprintf(out, size, "%s", v->lora_status);
     }
 }

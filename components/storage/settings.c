@@ -34,6 +34,7 @@ static void read_string(const cJSON *obj, const char *key, char *out, size_t siz
 {
     const cJSON *item = child(obj, key);
     if (cJSON_IsString(item) && strlen(item->valuestring) < size && item->valuestring[0] != '\0') {
+        memset(out, 0, size);
         snprintf(out, size, "%s", item->valuestring);
     }
 }
@@ -319,11 +320,25 @@ void settings_lora_defaults(settings_t *out)
 {
     out->lora.enabled = true;
     out->lora.freq_khz = 868000;
-    out->lora.sf = 7;
+    out->lora.bw_hz = 250000;
     out->lora.bw_khz = 250;
+    out->lora.sf = 7;
     out->lora.cr = 5;
+    out->lora.tx_power_dbm = 22;
     out->lora.sync_word = 0x1424;
+    out->lora.rx_boosted = true;
+    out->lora.cad_enabled = false;
+    out->lora.client_repeat = false;
+    out->lora.path_hash_mode = 0;
+    out->lora.airtime_factor_x10 = 10;
     out->lora.wake_on_rx = false;
+    out->lora.share_loc = false;
+    memset(out->lora.node_name, 0, sizeof(out->lora.node_name));
+    snprintf(out->lora.node_name, sizeof(out->lora.node_name), "%s", "NM-EPD-420");
+    memset(out->lora.channel_name, 0, sizeof(out->lora.channel_name));
+    snprintf(out->lora.channel_name, sizeof(out->lora.channel_name), "%s", "Public");
+    memset(out->lora.channel_psk, 0, sizeof(out->lora.channel_psk));
+    snprintf(out->lora.channel_psk, sizeof(out->lora.channel_psk), "%s", LORA_DEFAULT_PUBLIC_PSK);
 }
 
 /* A preset id's characters: a-z, 0-9, - and _ (ui_preset_json.c), 15 at most. */
@@ -360,6 +375,41 @@ static void read_pc(const cJSON *pc, settings_t *out)
     }
 }
 
+static bool valid_lora_bw_hz(long hz)
+{
+    static const long k_valid_bw_hz[] = {
+        7800, 10400, 15600, 20800, 31250, 41700, 62500, 125000, 250000, 500000
+    };
+    for (size_t i = 0; i < sizeof(k_valid_bw_hz) / sizeof(k_valid_bw_hz[0]); i++) {
+        if (hz == k_valid_bw_hz[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static long lora_bw_khz_to_hz(double khz)
+{
+    if (!isfinite(khz) || khz <= 0) {
+        return 0;
+    }
+    long hz = lround(khz * 1000.0);
+    if (valid_lora_bw_hz(hz)) {
+        return hz;
+    }
+    long ikhz = lround(khz);
+    switch (ikhz) {
+    case 62: return 62500;
+    case 31: return 31250;
+    case 42: return 41700;
+    case 21: return 20800;
+    case 16: return 15600;
+    case 10: return 10400;
+    case 8:  return 7800;
+    default: return 0;
+    }
+}
+
 static void read_lora(const cJSON *lora, settings_t *out)
 {
     if (!cJSON_IsObject(lora)) {
@@ -367,15 +417,49 @@ static void read_lora(const cJSON *lora, settings_t *out)
     }
     read_bool(lora, "enabled", &out->lora.enabled);
     out->lora.freq_khz = (uint32_t)read_scaled(lora, "freq_khz", out->lora.freq_khz, 1, 430000, 928000);
-    out->lora.sf = (uint8_t)read_scaled(lora, "sf", out->lora.sf, 1, 7, 12);
-    const cJSON *bw_item = child(lora, "bw_khz");
-    if (cJSON_IsNumber(bw_item)) {
-        long bw = lround(bw_item->valuedouble);
-        if (bw == 125 || bw == 250 || bw == 500) {
-            out->lora.bw_khz = (uint16_t)bw;
+    out->lora.sf = (uint8_t)read_scaled(lora, "sf", out->lora.sf, 1, 5, 12);
+
+    /* Bandwidth: support both bw_hz and bw_khz with smart merge-patch conflict resolution */
+    long j_hz = 0;
+    const cJSON *bw_hz_item = child(lora, "bw_hz");
+    if (cJSON_IsNumber(bw_hz_item) && isfinite(bw_hz_item->valuedouble)) {
+        long hz = lround(bw_hz_item->valuedouble);
+        if (valid_lora_bw_hz(hz)) {
+            j_hz = hz;
         }
     }
+
+    long k_hz = 0;
+    const cJSON *bw_khz_item = child(lora, "bw_khz");
+    if (cJSON_IsNumber(bw_khz_item)) {
+        long hz = lora_bw_khz_to_hz(bw_khz_item->valuedouble);
+        if (hz > 0) {
+            k_hz = hz;
+        }
+    }
+
+    if (j_hz > 0 && k_hz > 0) {
+        if (j_hz == k_hz) {
+            out->lora.bw_hz = (uint32_t)j_hz;
+        } else if (j_hz != (long)out->lora.bw_hz && k_hz == (long)out->lora.bw_hz) {
+            out->lora.bw_hz = (uint32_t)j_hz;
+        } else if (k_hz != (long)out->lora.bw_hz && j_hz == (long)out->lora.bw_hz) {
+            out->lora.bw_hz = (uint32_t)k_hz;
+        } else {
+            out->lora.bw_hz = (uint32_t)j_hz;
+        }
+        out->lora.bw_khz = (uint16_t)(out->lora.bw_hz / 1000);
+    } else if (j_hz > 0) {
+        out->lora.bw_hz = (uint32_t)j_hz;
+        out->lora.bw_khz = (uint16_t)(out->lora.bw_hz / 1000);
+    } else if (k_hz > 0) {
+        out->lora.bw_hz = (uint32_t)k_hz;
+        out->lora.bw_khz = (uint16_t)(out->lora.bw_hz / 1000);
+    }
+
     out->lora.cr = (uint8_t)read_scaled(lora, "cr", out->lora.cr, 1, 5, 8);
+    out->lora.tx_power_dbm = (int8_t)read_scaled(lora, "tx_power_dbm", out->lora.tx_power_dbm, 1, -9, 22);
+
     const cJSON *sw = child(lora, "sync_word");
     if (cJSON_IsNumber(sw) && sw->valuedouble >= 0 && sw->valuedouble <= 0xFFFF) {
         out->lora.sync_word = (uint16_t)sw->valueint;
@@ -386,7 +470,25 @@ static void read_lora(const cJSON *lora, settings_t *out)
             out->lora.sync_word = (uint16_t)v;
         }
     }
+
+    read_bool(lora, "rx_boosted", &out->lora.rx_boosted);
+    read_bool(lora, "cad_enabled", &out->lora.cad_enabled);
+    read_bool(lora, "client_repeat", &out->lora.client_repeat);
+    out->lora.path_hash_mode = (uint8_t)read_scaled(lora, "path_hash_mode", out->lora.path_hash_mode, 1, 0, 2);
+
+    const cJSON *af = child(lora, "airtime_factor");
+    if (cJSON_IsNumber(af)) {
+        out->lora.airtime_factor_x10 = (uint8_t)read_scaled(lora, "airtime_factor", out->lora.airtime_factor_x10, 10.0, 0, 90);
+    } else {
+        out->lora.airtime_factor_x10 = (uint8_t)read_scaled(lora, "airtime_factor_x10", out->lora.airtime_factor_x10, 1.0, 0, 90);
+    }
+
     read_bool(lora, "wake_on_rx", &out->lora.wake_on_rx);
+    read_bool(lora, "share_loc", &out->lora.share_loc);
+
+    read_string(lora, "node_name", out->lora.node_name, sizeof(out->lora.node_name));
+    read_string(lora, "channel_name", out->lora.channel_name, sizeof(out->lora.channel_name));
+    read_string(lora, "channel_psk", out->lora.channel_psk, sizeof(out->lora.channel_psk));
 }
 
 const char *settings_step_name(settings_step_t step)
@@ -675,11 +777,22 @@ size_t settings_to_json(const settings_t *s, const char *base_json, char *out, s
     cJSON *lora = object_at(root, "lora");
     put(lora, "enabled", cJSON_CreateBool(s->lora.enabled));
     put(lora, "freq_khz", cJSON_CreateNumber(s->lora.freq_khz));
+    put(lora, "bw_hz", cJSON_CreateNumber(s->lora.bw_hz));
+    put(lora, "bw_khz", cJSON_CreateNumber(s->lora.bw_hz / 1000.0));
     put(lora, "sf", cJSON_CreateNumber(s->lora.sf));
-    put(lora, "bw_khz", cJSON_CreateNumber(s->lora.bw_khz));
     put(lora, "cr", cJSON_CreateNumber(s->lora.cr));
+    put(lora, "tx_power_dbm", cJSON_CreateNumber(s->lora.tx_power_dbm));
     put(lora, "sync_word", cJSON_CreateNumber(s->lora.sync_word));
+    put(lora, "rx_boosted", cJSON_CreateBool(s->lora.rx_boosted));
+    put(lora, "cad_enabled", cJSON_CreateBool(s->lora.cad_enabled));
+    put(lora, "client_repeat", cJSON_CreateBool(s->lora.client_repeat));
+    put(lora, "path_hash_mode", cJSON_CreateNumber(s->lora.path_hash_mode));
+    put(lora, "airtime_factor", cJSON_CreateNumber(s->lora.airtime_factor_x10 / 10.0));
     put(lora, "wake_on_rx", cJSON_CreateBool(s->lora.wake_on_rx));
+    put(lora, "share_loc", cJSON_CreateBool(s->lora.share_loc));
+    put(lora, "node_name", cJSON_CreateString(s->lora.node_name));
+    put(lora, "channel_name", cJSON_CreateString(s->lora.channel_name));
+    put(lora, "channel_psk", cJSON_CreateString(s->lora.channel_psk));
     bool ok = size > 0 && cJSON_PrintPreallocated(root, out, (int)size, true);
     cJSON_Delete(root);
     return ok ? strlen(out) : 0;

@@ -1049,94 +1049,335 @@ async function pcPage() {
     save, nowCard);
 }
 
-/* ---- LoRa (spec §10.3) ---- */
+/* ---- LoRa & MeshCore (spec §10.3) ---- */
 
 const LORA_SF = [
-  ['7', 'SF7'], ['8', 'SF8'], ['9', 'SF9'], ['10', 'SF10'], ['11', 'SF11'], ['12', 'SF12'],
+  ['5', 'SF5'], ['6', 'SF6'], ['7', 'SF7'], ['8', 'SF8'],
+  ['9', 'SF9'], ['10', 'SF10'], ['11', 'SF11'], ['12', 'SF12'],
 ];
 const LORA_BW = [
+  ['7.8', '7.8 kHz'], ['10.4', '10.4 kHz'], ['15.6', '15.6 kHz'], ['20.8', '20.8 kHz'],
+  ['31.25', '31.25 kHz'], ['41.7', '41.7 kHz'], ['62.5', '62.5 kHz'],
   ['125', '125 kHz'], ['250', '250 kHz'], ['500', '500 kHz'],
 ];
 const LORA_CR = [
   ['5', '4/5'], ['6', '4/6'], ['7', '4/7'], ['8', '4/8'],
 ];
+const LORA_PATH_HASH = [
+  ['0', '1 byte'], ['1', '2 bytes'], ['2', '3 bytes'],
+];
+
+function nodeTypeName(t) {
+  switch (Number(t)) {
+    case 1: return 'Chat';
+    case 2: return 'Repeater';
+    case 3: return 'Room';
+    case 4: return 'Sensor';
+    default: return 'Unknown';
+  }
+}
 
 async function loraPage() {
-  const [s, st] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/status')]);
+  const [s, initialSt] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/status')]);
+  let st = initialSt;
   const lora = s.lora || {};
 
-  /* Card 1: Now (Live status) */
+  /* Card 1: Now (Live status, telemetry & quick controls) */
   const summary = h('div');
   const nowNote = h('p');
   const showNow = (status) => {
     const l = (status && status.lora) || {};
     const ageText = !l.last_packet_at
       ? 'none yet'
-      : (l.age_s !== undefined && l.age_s >= 0)
+      : (l.age_s !== undefined && l.age_s !== null && l.age_s >= 0)
         ? `${l.age_s < 60 ? Math.round(l.age_s) + ' s' : duration(l.age_s)} ago (${when(l.last_packet_at)})`
         : when(l.last_packet_at);
     const hasSignal = l.last_rssi_dbm !== undefined && l.last_snr_db !== undefined && (l.last_packet_at || l.packet_count);
     const rssiSnr = hasSignal
       ? `${l.last_rssi_dbm} dBm / ${l.last_snr_db} dB`
       : '—';
+    const txAirS = ((l.tx_air_ms || 0) / 1000).toFixed(1);
+    const rxAirS = ((l.rx_air_ms || 0) / 1000).toFixed(1);
+
+    const pubKeyKid = l.pub_key ? h('span', {},
+      `${l.pub_key.slice(0, 16)}… `,
+      button('Copy key', () => {
+        try { navigator.clipboard?.writeText(l.pub_key); } catch (_) {}
+        toast('Key copied');
+      }, 'small')
+    ) : '—';
+
     summary.replaceChildren(facts([
       ['State', loraState(l)],
-      ['Packets', String(l.packet_count ?? 0)],
-      ['Last packet', ageText],
+      ['Node', l.node_name || '—'],
+      ['Public key', pubKeyKid],
+      ['Noise floor', l.noise_floor_dbm !== undefined ? `${l.noise_floor_dbm} dBm` : '—'],
       ['RSSI / SNR', rssiSnr],
+      ['Last packet', ageText],
+      ['Packets', `${l.packet_count ?? 0} (flood ${l.recv_flood ?? 0}, direct ${l.recv_direct ?? 0}, err ${l.recv_errors ?? 0})`],
+      ['Packets TX', `${l.packets_sent ?? 0} (flood ${l.sent_flood ?? 0}, direct ${l.sent_direct ?? 0})`],
+      ['Airtime', `TX ${txAirS} s · RX ${rxAirS} s`],
     ]));
   };
   showNow(st);
 
+  const toggleBtn = button(
+    st.lora?.enabled ? 'Turn LoRa Off' : 'Turn LoRa On',
+    () => busy(nowCard, nowNote, async () => {
+      const nextEnabled = !st.lora?.enabled;
+      await api('PATCH', '/api/settings', { schema: 1, lora: { enabled: nextEnabled } });
+      if (!st.lora) st.lora = {};
+      st.lora.enabled = nextEnabled;
+      toggleBtn.replaceChildren(nextEnabled ? 'Turn LoRa Off' : 'Turn LoRa On');
+      toast(nextEnabled ? 'LoRa enabled' : 'LoRa disabled');
+      const fresh = await api('GET', '/api/status');
+      st = fresh;
+      showNow(fresh);
+      showChat(fresh);
+      showNodes(fresh);
+    })
+  );
+  toggleBtn.id = 'lora-toggle-btn';
+  toggleBtn.setAttribute('id', 'lora-toggle-btn');
+
   const nowCard = card('Now', summary, nowNote, actions(
+    toggleBtn,
     button('Refresh', () => busy(nowCard, nowNote, async () => {
       const fresh = await api('GET', '/api/status');
+      st = fresh;
+      showNow(fresh);
+      showChat(fresh);
+      showNodes(fresh);
+    })),
+    button('Send Advert (Flood)', () => busy(nowCard, nowNote, async () => {
+      await api('POST', '/api/lora/advert', { flood: true });
+      toast('Advert sent (Flood)');
+      const fresh = await api('GET', '/api/status');
+      st = fresh;
       showNow(fresh);
     })),
-    button('Reset counter', () => busy(nowCard, nowNote, async () => {
-      await api('POST', '/api/lora/reset');
+    button('Send Advert (Zero-Hop)', () => busy(nowCard, nowNote, async () => {
+      await api('POST', '/api/lora/advert', { flood: false });
+      toast('Advert sent (Zero-Hop)');
       const fresh = await api('GET', '/api/status');
+      st = fresh;
+      showNow(fresh);
+    })),
+    button('Discover Repeaters', () => busy(nowCard, nowNote, async () => {
+      await api('POST', '/api/lora/discover', {});
+      toast('Discovery probe sent');
+      const fresh = await api('GET', '/api/status');
+      st = fresh;
+      showNow(fresh);
+      showNodes(fresh);
+    })),
+    button('Reset counter', () => busy(nowCard, nowNote, async () => {
+      await api('POST', '/api/lora/reset', {});
+      const fresh = await api('GET', '/api/status');
+      st = fresh;
       showNow(fresh);
       toast('Counter reset');
     })),
   ));
 
-  /* Card 2: LoRa radio (Settings) */
-  const enabled = h('input', { type: 'checkbox', checked: lora.enabled !== false });
+  /* Card 2: Group channel chat */
+  const chInfo = h('p', { class: 'muted small' });
+  const chatBox = h('div', { class: 'chat-box' });
+  const chatNote = h('p');
+  const chatInput = h('input', { type: 'text', id: 'lora-chat-input', placeholder: 'Message on channel…' });
+  chatInput.setAttribute('id', 'lora-chat-input');
+  const chatSend = button('Send', () => busy(chatCard, chatNote, async () => {
+    const txt = (chatInput.value || '').trim();
+    if (!txt) return;
+    await api('POST', '/api/lora/send', { text: txt });
+    chatInput.value = '';
+    toast('Message sent');
+    const fresh = await api('GET', '/api/status');
+    st = fresh;
+    showChat(fresh);
+    showNow(fresh);
+  }), 'primary');
+  chatSend.id = 'lora-chat-send';
+  chatSend.setAttribute('id', 'lora-chat-send');
+
+  chatInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') chatSend.click();
+  });
+
+  const showChat = (status) => {
+    const l = (status && status.lora) || {};
+    const chName = l.channel_name || 'Public';
+    const chHash = l.channel_hash !== undefined ? '0x' + l.channel_hash.toString(16).padStart(2, '0').toUpperCase() : '0x00';
+    chInfo.textContent = `Channel: ${chName} (${chHash})`;
+
+    const msgs = l.messages || [];
+    if (msgs.length === 0) {
+      chatBox.replaceChildren(h('p', { class: 'muted' }, 'No channel messages yet'));
+    } else {
+      chatBox.replaceChildren(...msgs.map((m) => {
+        const dirCls = m.outgoing ? 'out' : 'in';
+        const sig = (m.rssi_dbm !== undefined && m.snr_db !== undefined)
+          ? `${m.rssi_dbm} dBm / ${typeof m.snr_db === 'number' ? m.snr_db.toFixed(1) : m.snr_db} dB` : '';
+        const hops = m.hops !== undefined ? `${m.hops} hops` : '';
+        const age = (m.age_s !== undefined && m.age_s !== null) ? `${Math.round(m.age_s)}s ago` : '';
+        const metaStr = [m.outgoing ? 'TX' : 'RX', sig, hops, age].filter(Boolean).join(' · ');
+        return h('div', { class: `chat-msg ${dirCls}` },
+          h('div', { class: 'chat-text', text: m.text || '' }),
+          h('div', { class: 'chat-meta', text: metaStr })
+        );
+      }));
+    }
+  };
+  showChat(st);
+
+  const chatCard = card('Group channel chat',
+    chInfo,
+    chatBox,
+    h('div', { class: 'actions' }, chatInput, chatSend),
+    chatNote
+  );
+
+  /* Card 3: Neighbors & heard nodes */
+  const nbrBox = h('div');
+  const advBox = h('div');
+  const showNodes = (status) => {
+    const l = (status && status.lora) || {};
+    const nbrs = l.neighbors || [];
+    if (nbrs.length === 0) {
+      nbrBox.replaceChildren(h('p', { class: 'muted' }, 'No repeaters discovered yet'));
+    } else {
+      const list = h('ul', { class: 'list' });
+      for (const n of nbrs) {
+        const typeBadge = h('span', { class: `badge ${nodeTypeName(n.node_type).toLowerCase()}`, text: nodeTypeName(n.node_type) });
+        const ageStr = (n.age_s !== undefined && n.age_s !== null) ? `${Math.round(n.age_s)}s ago` : '—';
+        const meta = `SNR Out ${n.snr_out_db} dB · In ${n.snr_in_db} dB · RSSI ${n.rssi_dbm} dBm · ${ageStr}`;
+        list.append(h('li', {},
+          h('div', { class: 'grow' },
+            h('strong', { text: n.name || n.pub_key || 'Unknown' }), ' ',
+            typeBadge,
+            h('div', { class: 'muted small', text: meta })
+          )
+        ));
+      }
+      nbrBox.replaceChildren(list);
+    }
+
+    const advs = l.adverts || [];
+    if (advs.length === 0) {
+      advBox.replaceChildren(h('p', { class: 'muted' }, 'No adverts heard yet'));
+    } else {
+      const list = h('ul', { class: 'list' });
+      for (const a of advs) {
+        const typeBadge = h('span', { class: `badge ${nodeTypeName(a.node_type).toLowerCase()}`, text: nodeTypeName(a.node_type) });
+        const locStr = a.has_loc && a.lat !== null && a.lat !== undefined ? `GPS: ${Number(a.lat).toFixed(4)}, ${Number(a.lon).toFixed(4)} · ` : '';
+        const ageStr = (a.age_s !== undefined && a.age_s !== null) ? `${Math.round(a.age_s)}s ago` : '—';
+        const meta = `${a.hops ?? 0} hops · ${a.rssi_dbm} dBm / ${a.snr_db} dB · ${locStr}${ageStr}`;
+        list.append(h('li', {},
+          h('div', { class: 'grow' },
+            h('strong', { text: a.name || a.pub_key || 'Unknown' }), ' ',
+            typeBadge,
+            h('div', { class: 'muted small', text: meta })
+          )
+        ));
+      }
+      advBox.replaceChildren(list);
+    }
+  };
+  showNodes(st);
+
+  const nodesCard = card('Neighbors & heard nodes',
+    h('h3', { text: 'Zero-Hop Repeaters' }),
+    nbrBox,
+    h('h3', { text: 'Recent Adverts' }),
+    advBox
+  );
+
+  /* Card 4: LoRa & MeshCore settings */
+  const enabled = h('input', { type: 'checkbox', name: 'enabled', checked: lora.enabled !== false });
+  enabled.name = 'enabled';
+  const nodeName = h('input', { type: 'text', name: 'node_name', maxLength: '31', value: lora.node_name || 'NM-EPD-420' });
+  nodeName.name = 'node_name';
+  const shareLoc = h('input', { type: 'checkbox', name: 'share_loc', checked: !!lora.share_loc });
+  shareLoc.name = 'share_loc';
+  const channelName = h('input', { type: 'text', name: 'channel_name', maxLength: '23', value: lora.channel_name || 'Public' });
+  channelName.name = 'channel_name';
+  const channelPsk = h('input', { type: 'text', name: 'channel_psk', maxLength: '47', value: lora.channel_psk || 'izOH6cXN6mrJ5e26oRXNcg==' });
+  channelPsk.name = 'channel_psk';
+
   const freqKhz = lora.freq_khz || 868000;
-  const freq = h('input', { type: 'number', min: '430', max: '928', step: '0.001',
+  const freq = h('input', { type: 'number', name: 'freq_mhz', min: '430', max: '928', step: '0.001',
                            value: (freqKhz / 1000).toFixed(3) });
+  freq.name = 'freq_mhz';
   const sf = choose(LORA_SF, String(lora.sf || 7));
-  const bw = choose(LORA_BW, String(lora.bw_khz || 250));
+  sf.name = 'sf';
+  const bwInit = lora.bw_hz ? (lora.bw_hz % 1000 === 0 ? String(lora.bw_hz / 1000) : String(lora.bw_hz / 1000)) : String(lora.bw_khz || 250);
+  const bw = choose(LORA_BW, bwInit);
+  bw.name = 'bw_khz';
   const cr = choose(LORA_CR, String(lora.cr || 5));
+  cr.name = 'cr';
+  const txPower = h('input', { type: 'number', name: 'tx_power_dbm', min: '-9', max: '22', step: '1',
+                              value: String(lora.tx_power_dbm !== undefined ? lora.tx_power_dbm : 22) });
+  txPower.name = 'tx_power_dbm';
+
   const swVal = lora.sync_word !== undefined ? lora.sync_word : 0x1424;
   const initialSw = (typeof swVal === 'number' ? swVal.toString(16) : String(swVal).replace(/^0x/i, '')).toUpperCase().padStart(4, '0');
-  const syncWord = h('input', { type: 'text', value: initialSw, autocapitalize: 'characters', spellcheck: 'false' });
-  const wakeOnRx = h('input', { type: 'checkbox', checked: !!lora.wake_on_rx });
+  const syncWord = h('input', { type: 'text', name: 'sync_word', value: initialSw, autocapitalize: 'characters', spellcheck: 'false' });
+  syncWord.name = 'sync_word';
+  const rxBoosted = h('input', { type: 'checkbox', name: 'rx_boosted', checked: lora.rx_boosted !== false });
+  rxBoosted.name = 'rx_boosted';
+  const cadEnabled = h('input', { type: 'checkbox', name: 'cad_enabled', checked: !!lora.cad_enabled });
+  cadEnabled.name = 'cad_enabled';
+  const clientRepeat = h('input', { type: 'checkbox', name: 'client_repeat', checked: !!lora.client_repeat });
+  clientRepeat.name = 'client_repeat';
+  const pathHash = choose(LORA_PATH_HASH, String(lora.path_hash_mode || 0));
+  pathHash.name = 'path_hash_mode';
 
-  const applyPreset = (f, sfVal, bwVal, crVal, swVal) => {
+  const afVal = lora.airtime_factor_x10 !== undefined ? (lora.airtime_factor_x10 / 10).toFixed(1) : (lora.airtime_factor !== undefined ? Number(lora.airtime_factor).toFixed(1) : '1.0');
+  const airtimeFactor = h('input', { type: 'number', name: 'airtime_factor', min: '0', max: '9', step: '0.1', value: afVal });
+  airtimeFactor.name = 'airtime_factor';
+
+  const wakeOnRx = h('input', { type: 'checkbox', name: 'wake_on_rx', checked: !!lora.wake_on_rx });
+  wakeOnRx.name = 'wake_on_rx';
+
+  const applyPreset = (f, sfVal, bwVal, crVal, pwrVal, swVal) => {
     freq.value = Number(f).toFixed(3);
     sf.value = String(sfVal);
     bw.value = String(bwVal);
     cr.value = String(crVal);
+    if (pwrVal !== undefined) txPower.value = String(pwrVal);
     syncWord.value = swVal;
   };
 
   const presetActions = actions(
-    button('EU868 Default', () => applyPreset(868, 7, 250, 5, '1424')),
-    button('MeshCore EU868', () => applyPreset(868, 11, 250, 5, '1424')),
-    button('Meshtastic EU868 LongFast', () => applyPreset(869.525, 11, 250, 5, '2B24')),
+    button('MeshCore EU/UK Narrow', () => applyPreset(869.618, 8, 62.5, 5, 22, '1424')),
+    button('MeshCore EU868', () => applyPreset(868, 11, 250, 5, 22, '1424')),
+    button('MeshCore CZ/SK Narrow', () => applyPreset(869.432, 7, 62.5, 5, 22, '1424')),
+    button('MeshCore US/CA/AU', () => applyPreset(910.525, 7, 62.5, 5, 22, '1424')),
+    button('MeshCore AU Narrow', () => applyPreset(916.575, 7, 62.5, 8, 22, '1424')),
+    button('MeshCore NZ Narrow', () => applyPreset(917.375, 7, 62.5, 5, 22, '1424')),
+    button('EU868 Default', () => applyPreset(868, 7, 250, 5, 22, '1424')),
+    button('Meshtastic EU868 LongFast', () => applyPreset(869.525, 11, 250, 5, 22, '2B24')),
   );
 
   const note = h('p');
-  const radioCard = card('LoRa radio',
+  const radioCard = card('LoRa & MeshCore settings',
     presetActions,
     h('label', { class: 'check' }, enabled, 'Enabled'),
+    field('Node name', nodeName, 'Up to 31 characters.'),
+    h('label', { class: 'check' }, shareLoc, 'Share location in adverts'),
+    field('Channel name', channelName, 'Up to 23 characters.'),
+    field('Channel PSK (Base64)', channelPsk, 'AES-128 key in Base64 (default: Public channel).'),
     field('Frequency (MHz)', freq, '430.000 to 928.000 MHz.'),
     field('Spreading factor', sf),
     field('Bandwidth', bw),
     field('Coding rate', cr),
+    field('TX power (dBm)', txPower, '-9 to +22 dBm.'),
     field('Sync word', syncWord, 'Hexadecimal (e.g. 1424 or 0x1424).'),
+    h('label', { class: 'check' }, rxBoosted, 'RX boosted gain'),
+    h('label', { class: 'check' }, cadEnabled, 'CAD (listen before talk)'),
+    h('label', { class: 'check' }, clientRepeat, 'Client repeat (forward flood)'),
+    field('Path hash size', pathHash),
+    field('Airtime factor (0–9)', airtimeFactor, 'Airtime factor for duty cycle regulation (0.0 to 9.0).'),
     h('label', { class: 'check' }, wakeOnRx, 'Wake from sleep on packet'),
     note,
     actions(button('Save', () => busy(radioCard, note, async () => {
@@ -1149,15 +1390,33 @@ async function loraPage() {
         throw new ApiError('Sync word must be a valid hex value (0 to FFFF).');
       }
       const sw = parseInt(swStr, 16);
+      const bwKhzNum = Number(bw.value);
+      const bwHzNum = Math.round(bwKhzNum * 1000);
+      const afNum = Number(airtimeFactor.value) || 0;
+      const afX10 = Math.round(afNum * 10);
+      const txPwr = Number(txPower.value);
+
       await api('PATCH', '/api/settings', {
         lora: {
           enabled: enabled.checked,
           freq_khz: Math.round(f * 1000),
           sf: Number(sf.value),
-          bw_khz: Number(bw.value),
+          bw_khz: bwKhzNum,
+          bw_hz: bwHzNum,
           cr: Number(cr.value),
+          tx_power_dbm: isNaN(txPwr) ? 22 : txPwr,
           sync_word: sw,
+          rx_boosted: rxBoosted.checked,
+          cad_enabled: cadEnabled.checked,
+          client_repeat: clientRepeat.checked,
+          path_hash_mode: Number(pathHash.value),
+          airtime_factor: afNum,
+          airtime_factor_x10: afX10,
           wake_on_rx: wakeOnRx.checked,
+          share_loc: shareLoc.checked,
+          node_name: nodeName.value.trim() || 'NM-EPD-420',
+          channel_name: channelName.value.trim() || 'Public',
+          channel_psk: channelPsk.value.trim() || 'izOH6cXN6mrJ5e26oRXNcg==',
         },
       });
       note.className = 'good';
@@ -1165,12 +1424,58 @@ async function loraPage() {
       toast('Saved');
       try {
         const freshStatus = await api('GET', '/api/status');
+        st = freshStatus;
         showNow(freshStatus);
+        showChat(freshStatus);
+        showNodes(freshStatus);
       } catch (_) {}
     }), 'primary')),
   );
 
-  main.replaceChildren(h('h1', { text: 'LoRa' }), nowCard, radioCard);
+  /* Card 5: MeshCore CLI */
+  const cliInput = h('input', { type: 'text', id: 'lora-cli-input', placeholder: 'e.g. get radio, stats-packets, set tx 22…' });
+  cliInput.setAttribute('id', 'lora-cli-input');
+  const cliOutput = h('pre', { id: 'lora-cli-output' }, '(ready)');
+  cliOutput.setAttribute('id', 'lora-cli-output');
+  const cliNote = h('p');
+
+  const runCli = (cmd) => {
+    const c = (cmd || '').trim();
+    if (!c) return;
+    busy(cliCard, cliNote, async () => {
+      try {
+        const res = await api('POST', '/api/lora/cli', { cmd: c });
+        cliOutput.textContent = res.reply || '(empty reply)';
+      } catch (err) {
+        cliOutput.textContent = `Error: ${err.message}`;
+      }
+    });
+  };
+
+  const cliRun = button('Run', () => runCli(cliInput.value), 'primary');
+  cliRun.id = 'lora-cli-run';
+  cliRun.setAttribute('id', 'lora-cli-run');
+
+  cliInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') runCli(cliInput.value);
+  });
+
+  const quickCmds = ['ver', 'get radio', 'stats-radio', 'stats-packets', 'neighbors', 'help'];
+  const cliQuickActions = actions(
+    ...quickCmds.map((cmd) => button(cmd, () => {
+      cliInput.value = cmd;
+      runCli(cmd);
+    }))
+  );
+
+  const cliCard = card('MeshCore CLI',
+    cliQuickActions,
+    h('div', { class: 'actions' }, cliInput, cliRun),
+    cliNote,
+    cliOutput
+  );
+
+  main.replaceChildren(h('h1', { text: 'LoRa' }), nowCard, chatCard, nodesCard, radioCard, cliCard);
 }
 
 /* ---- Show as (spec §5.3, §10.3, M7, D44) ---- */

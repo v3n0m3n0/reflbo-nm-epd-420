@@ -621,7 +621,7 @@ static int cmd_energy(int argc, char **argv)
     return diag_on_owner(energy_body, argc, argv);
 }
 
-/* `lora [status | reset]` */
+/* `lora [status | reset | on | off | advert | discover | send | cli]` */
 static int lora_body(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "reset") == 0) {
@@ -629,23 +629,125 @@ static int lora_body(int argc, char **argv)
         printf("lora: statistics reset\n");
         return 0;
     }
+    if (argc >= 2 && (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "off") == 0)) {
+        bool enable = strcmp(argv[1], "on") == 0;
+        app_ui_state_t *st = app_state();
+        st->settings.lora.enabled = enable;
+        lora_widget_apply(&st->settings.lora);
+        app_ui_save_settings();
+        printf("lora: radio turned %s\n", enable ? "on" : "off");
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "advert") == 0) {
+        bool flood = true;
+        if (argc >= 3 && (strcmp(argv[2], "zerohop") == 0 || strcmp(argv[2], "direct") == 0)) {
+            flood = false;
+        }
+        esp_err_t err = lora_widget_send_advert(flood);
+        if (err == ESP_OK) {
+            printf("lora: advert sent (%s)\n", flood ? "flood" : "zero-hop");
+        } else {
+            printf("lora: failed to send advert (%s)\n", esp_err_to_name(err));
+        }
+        return err == ESP_OK ? 0 : 1;
+    }
+    if (argc >= 2 && strcmp(argv[1], "discover") == 0) {
+        esp_err_t err = lora_widget_send_discover();
+        if (err == ESP_OK) {
+            printf("lora: discovery request sent\n");
+        } else {
+            printf("lora: failed to send discover (%s)\n", esp_err_to_name(err));
+        }
+        return err == ESP_OK ? 0 : 1;
+    }
+    if (argc >= 2 && strcmp(argv[1], "send") == 0) {
+        if (argc < 3) {
+            printf("lora: usage: lora send <text>\n");
+            return 1;
+        }
+        char text_buf[160] = { 0 };
+        size_t off = 0;
+        for (int i = 2; i < argc; i++) {
+            int w = snprintf(text_buf + off, sizeof(text_buf) - off, "%s%s", (i > 2 ? " " : ""), argv[i]);
+            if (w > 0) off += (size_t)w;
+            if (off >= sizeof(text_buf) - 1) break;
+        }
+        esp_err_t err = lora_widget_send_channel_msg(text_buf);
+        if (err == ESP_OK) {
+            printf("lora: message sent on channel\n");
+        } else {
+            printf("lora: failed to send message (%s)\n", esp_err_to_name(err));
+        }
+        return err == ESP_OK ? 0 : 1;
+    }
+    if (argc >= 2 && strcmp(argv[1], "cli") == 0) {
+        if (argc < 3) {
+            printf("lora: usage: lora cli <cmd...>\n");
+            return 1;
+        }
+        char cmd_buf[128] = { 0 };
+        size_t off = 0;
+        for (int i = 2; i < argc; i++) {
+            int w = snprintf(cmd_buf + off, sizeof(cmd_buf) - off, "%s%s", (i > 2 ? " " : ""), argv[i]);
+            if (w > 0) off += (size_t)w;
+            if (off >= sizeof(cmd_buf) - 1) break;
+        }
+        app_ui_state_t *st = app_state();
+        bool changed = false;
+        char reply[512] = { 0 };
+        lora_widget_exec_cli(cmd_buf, &st->settings.lora, &changed, reply, sizeof(reply));
+        if (changed) {
+            lora_widget_apply(&st->settings.lora);
+            app_ui_save_settings();
+        }
+        printf("%s", reply);
+        if (reply[0] == '\0' || reply[strlen(reply) - 1] != '\n') {
+            printf("\n");
+        }
+        return 0;
+    }
+
     lora_stats_t s = lora_widget_get_stats();
     printf("lora: %s\n", s.initialized ? "initialized (SX1262 continuous RX)" : "disabled or not populated");
     printf("  enabled: %s\n", s.enabled ? "yes" : "no");
+    printf("  node name: %s\n", s.node_name);
+    printf("  public key: %s\n", s.pub_key_hex[0] != '\0' ? s.pub_key_hex : "(none)");
     if (s.freq_khz > 0) {
         printf("  frequency: %lu.%03lu MHz\n", (unsigned long)(s.freq_khz / 1000), (unsigned long)(s.freq_khz % 1000));
         printf("  spreading factor: SF%u\n", (unsigned)s.sf);
-        printf("  bandwidth: %u kHz\n", (unsigned)s.bw_khz);
+        if (s.bw_hz % 1000 == 0) {
+            printf("  bandwidth: %u kHz\n", (unsigned)(s.bw_hz / 1000));
+        } else {
+            printf("  bandwidth: %.1f kHz\n", (double)s.bw_hz / 1000.0);
+        }
         printf("  coding rate: 4/%u\n", (unsigned)s.cr);
+        printf("  tx power: %d dBm\n", (int)s.tx_power_dbm);
         printf("  sync word: 0x%04X\n", (unsigned)s.sync_word);
+        printf("  rx boosted: %s\n", s.rx_boosted ? "yes" : "no");
+        printf("  cad: %s\n", s.cad_enabled ? "yes" : "no");
+        printf("  client repeat: %s\n", s.client_repeat ? "yes" : "no");
+        printf("  path hash mode: %u bytes\n", (unsigned)(s.path_hash_mode + 1));
+        printf("  airtime factor: %.1f\n", (double)s.airtime_factor_x10 / 10.0);
         printf("  wake on rx: %s\n", s.wake_on_rx ? "yes" : "no");
+        printf("  share location: %s\n", s.share_loc ? "yes" : "no");
+        printf("  channel: %s (hash 0x%02X)\n", s.channel_name, s.channel_hash);
     }
-    printf("  packets received: %lu\n", (unsigned long)s.packet_count);
+    printf("  noise floor: %d dBm\n", (int)s.noise_floor_dbm);
+    printf("  packets received: %lu (flood: %lu, direct: %lu, errors: %lu)\n",
+           (unsigned long)s.packet_count, (unsigned long)s.recv_flood,
+           (unsigned long)s.recv_direct, (unsigned long)s.recv_errors);
+    printf("  packets sent: %lu (flood: %lu, direct: %lu)\n",
+           (unsigned long)s.packets_sent, (unsigned long)s.sent_flood,
+           (unsigned long)s.sent_direct);
+    printf("  airtime: TX %lu ms, RX %lu ms\n", (unsigned long)s.tx_air_ms, (unsigned long)s.rx_air_ms);
     if (s.packet_count > 0) {
         printf("  last RSSI: %d dBm\n", s.last_rssi_dbm);
-        printf("  last SNR: %d dB\n", s.last_snr_db);
+        printf("  last SNR: %.2f dB\n", (double)s.last_snr_q4 / 4.0);
         print_time("  last packet", (time_t)s.last_packet_time_s);
     }
+    printf("  recent adverts: %u\n", (unsigned)s.advert_count);
+    printf("  discovered neighbors: %u\n", (unsigned)s.neighbor_count);
+    printf("  channel messages: %u\n", (unsigned)s.msg_count);
     return 0;
 }
 
@@ -669,7 +771,7 @@ void app_register_commands(void)
         { .command = "solar", .help = "solar status | demo on | demo off (spec §11.5, §11.6)", .func = &cmd_solar },
         { .command = "energy", .help = "energy raw: SolaX's last replies (D37)", .func = &cmd_energy },
         { .command = "pc", .help = "pc status | demo on | demo off (spec §12a)", .func = &cmd_pc },
-        { .command = "lora", .help = "lora status | reset: SX1262 LoRa module statistics and control", .func = &cmd_lora },
+        { .command = "lora", .help = "lora [status|reset|on|off|advert|discover|send|cli]: SX1262 LoRa module and MeshCore", .func = &cmd_lora },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         esp_err_t err = esp_console_cmd_register(&cmds[i]);

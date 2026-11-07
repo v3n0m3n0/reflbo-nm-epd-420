@@ -1513,11 +1513,23 @@ const LORA_SETTINGS = {
   lora: {
     enabled: true,
     freq_khz: 868000,
-    sf: 7,
+    bw_hz: 250000,
     bw_khz: 250,
+    sf: 7,
     cr: 5,
+    tx_power_dbm: 22,
     sync_word: 0x1424,
+    rx_boosted: true,
+    cad_enabled: false,
+    client_repeat: false,
+    path_hash_mode: 0,
+    airtime_factor: 1,
+    airtime_factor_x10: 10,
     wake_on_rx: false,
+    share_loc: false,
+    node_name: 'NM-EPD-420',
+    channel_name: 'Public',
+    channel_psk: 'izOH6cXN6mrJ5e26oRXNcg==',
   },
 };
 
@@ -1531,21 +1543,77 @@ const LORA_STATUS = {
   lora: {
     enabled: true,
     initialized: true,
+    node_name: 'NM-EPD-420',
+    pub_key: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
     freq_khz: 868000,
-    sf: 7,
+    bw_hz: 250000,
     bw_khz: 250,
+    sf: 7,
     cr: 5,
+    tx_power_dbm: 22,
     sync_word: 0x1424,
+    rx_boosted: true,
+    cad_enabled: false,
+    client_repeat: false,
+    path_hash_mode: 0,
+    airtime_factor: 1,
     wake_on_rx: false,
+    share_loc: false,
+    channel_name: 'Public',
+    channel_hash: 0x12,
+    noise_floor_dbm: -112,
     packet_count: 42,
+    packets_sent: 10,
+    recv_flood: 30,
+    recv_direct: 12,
+    sent_flood: 8,
+    sent_direct: 2,
+    recv_errors: 0,
+    tx_air_ms: 1200,
+    rx_air_ms: 4500,
     last_rssi_dbm: -74,
     last_snr_db: 9,
     last_packet_at: 1790879950,
     age_s: 50,
+    adverts: [
+      {
+        name: 'Repeater-1',
+        node_type: 2,
+        pub_key: 'aabbccddeeff0011',
+        hops: 1,
+        rssi_dbm: -80,
+        snr_db: 7.5,
+        has_loc: true,
+        lat: 49.1951,
+        lon: 16.6068,
+        age_s: 120,
+      },
+    ],
+    neighbors: [
+      {
+        name: 'Repeater-1',
+        node_type: 2,
+        pub_key: 'aabbccddeeff0011',
+        snr_in_db: 6.5,
+        snr_out_db: 7.0,
+        rssi_dbm: -82,
+        age_s: 100,
+      },
+    ],
+    messages: [
+      {
+        text: 'Hello MeshCore',
+        rssi_dbm: -75,
+        snr_db: 8.0,
+        hops: 0,
+        outgoing: false,
+        age_s: 60,
+      },
+    ],
   },
 };
 
-function loraDevice(patches, customSettings = {}, customStatus = {}, resetCalls = []) {
+function loraDevice(patches, customSettings = {}, customStatus = {}, resetCalls = [], actions = {}) {
   const settings = { ...LORA_SETTINGS, ...customSettings, lora: { ...LORA_SETTINGS.lora, ...(customSettings.lora || {}) } };
   let currentStatus = {
     ...LORA_STATUS,
@@ -1555,11 +1623,36 @@ function loraDevice(patches, customSettings = {}, customStatus = {}, resetCalls 
   return {
     'GET /api/settings': () => reply(200, settings),
     'GET /api/status': () => reply(200, currentStatus),
-    'PATCH /api/settings': (init) => { patches.push(JSON.parse(init.body)); return reply(200, settings); },
+    'PATCH /api/settings': (init) => {
+      const p = JSON.parse(init.body);
+      patches.push(p);
+      if (p.lora) {
+        Object.assign(settings.lora, p.lora);
+        if (currentStatus.lora) Object.assign(currentStatus.lora, p.lora);
+      }
+      return reply(200, settings);
+    },
     'POST /api/lora/reset': () => {
       resetCalls.push(true);
       currentStatus = { ...currentStatus, lora: { ...currentStatus.lora, packet_count: 0 } };
       return reply(200, { ok: true });
+    },
+    'POST /api/lora/advert': (init) => {
+      actions.advert = JSON.parse(init.body || '{}');
+      return reply(200, { ok: true });
+    },
+    'POST /api/lora/discover': () => {
+      actions.discover = true;
+      return reply(200, { ok: true });
+    },
+    'POST /api/lora/send': (init) => {
+      actions.send = JSON.parse(init.body || '{}');
+      return reply(200, { ok: true });
+    },
+    'POST /api/lora/cli': (init) => {
+      const b = JSON.parse(init.body || '{}');
+      actions.cli = b;
+      return reply(200, { ok: true, reply: `CLI output for ${b.cmd}` });
     },
   };
 }
@@ -1711,9 +1804,21 @@ test('changing LoRa settings saves via PATCH /api/settings', async () => {
       freq_khz: 915000,
       sf: 10,
       bw_khz: 125,
+      bw_hz: 125000,
       cr: 7,
+      tx_power_dbm: 22,
       sync_word: 0x2b24,
+      rx_boosted: true,
+      cad_enabled: false,
+      client_repeat: false,
+      path_hash_mode: 0,
+      airtime_factor: 1,
+      airtime_factor_x10: 10,
       wake_on_rx: true,
+      share_loc: false,
+      node_name: 'NM-EPD-420',
+      channel_name: 'Public',
+      channel_psk: 'izOH6cXN6mrJ5e26oRXNcg==',
     },
   });
 });
@@ -1814,6 +1919,133 @@ test('LoRa handles string sync_word in settings and formats age/signal metrics',
   assert.equal(control(main, 'Sync word').value, '2B24');
   assert.match(text(main), /2 min ago/);
   assert.match(text(main), /-80 dBm \/ 7 dB/);
+});
+
+test('quick radio ON/OFF toggle button (#lora-toggle-btn) updates settings and status', async () => {
+  const patches = [];
+  const { ctx, main } = await load(loraDevice(patches));
+  ctx.location.hash = '#lora';
+  ctx.route();
+  await settle();
+
+  const toggleBtn = below(main).find((e) => e.attrs?.id === 'lora-toggle-btn' || e.id === 'lora-toggle-btn');
+  assert.ok(toggleBtn, 'toggle button exists');
+  assert.equal(text(toggleBtn), 'Turn LoRa Off');
+
+  await toggleBtn.click();
+  await settle();
+
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].lora.enabled, false);
+  assert.equal(text(toggleBtn), 'Turn LoRa On');
+});
+
+test('applying MeshCore EU/UK Narrow preset saves all MeshCore fields', async () => {
+  const patches = [];
+  const { ctx, main } = await load(loraDevice(patches));
+  await ctx.loraPage();
+
+  await buttonNamed(main, 'MeshCore EU/UK Narrow').click();
+  assert.equal(control(main, 'Frequency (MHz)').value, '869.618');
+  assert.equal(control(main, 'Spreading factor').value, '8');
+  assert.equal(control(main, 'Bandwidth').value, '62.5');
+  assert.equal(control(main, 'Coding rate').value, '5');
+  assert.equal(control(main, 'Sync word').value, '1424');
+  assert.equal(control(main, 'TX power (dBm)').value, '22');
+
+  await type(control(main, 'Node name'), 'TestNode');
+  await type(control(main, 'Channel name'), 'CustomCh');
+  await type(control(main, 'Channel PSK (Base64)'), 'dGVzdGtleTEyMzQ1Njc4OQ==');
+  await buttonNamed(main, 'Save').click();
+  await settle();
+
+  assert.equal(patches.length, 1);
+  const p = patches[0].lora;
+  assert.equal(p.freq_khz, 869618);
+  assert.equal(p.sf, 8);
+  assert.equal(p.bw_khz, 62.5);
+  assert.equal(p.bw_hz, 62500);
+  assert.equal(p.cr, 5);
+  assert.equal(p.tx_power_dbm, 22);
+  assert.equal(p.sync_word, 0x1424);
+  assert.equal(p.node_name, 'TestNode');
+  assert.equal(p.channel_name, 'CustomCh');
+  assert.equal(p.channel_psk, 'dGVzdGtleTEyMzQ1Njc4OQ==');
+  assert.equal(p.rx_boosted, true);
+  assert.equal(p.cad_enabled, false);
+  assert.equal(p.client_repeat, false);
+  assert.equal(p.path_hash_mode, 0);
+  assert.equal(p.airtime_factor, 1.0);
+  assert.equal(p.share_loc, false);
+});
+
+test('action buttons trigger advert, discover, and reset endpoints', async () => {
+  const actionsCalled = {};
+  const resetCalls = [];
+  const dev = loraDevice([], {}, {}, resetCalls, actionsCalled);
+  const { ctx, main } = await load(dev);
+  await ctx.loraPage();
+
+  await buttonNamed(main, 'Send Advert (Flood)').click();
+  await settle();
+  assert.deepEqual(actionsCalled.advert, { flood: true });
+
+  await buttonNamed(main, 'Send Advert (Zero-Hop)').click();
+  await settle();
+  assert.deepEqual(actionsCalled.advert, { flood: false });
+
+  await buttonNamed(main, 'Discover Repeaters').click();
+  await settle();
+  assert.equal(actionsCalled.discover, true);
+
+  await buttonNamed(main, 'Reset counter').click();
+  await settle();
+  assert.equal(resetCalls.length, 1);
+});
+
+test('sending a group channel chat message calls POST /api/lora/send', async () => {
+  const actionsCalled = {};
+  const dev = loraDevice([], {}, {}, [], actionsCalled);
+  const { ctx, main } = await load(dev);
+  await ctx.loraPage();
+
+  const chatInput = below(main).find((e) => e.attrs?.id === 'lora-chat-input' || e.id === 'lora-chat-input');
+  const chatSend = below(main).find((e) => e.attrs?.id === 'lora-chat-send' || e.id === 'lora-chat-send');
+  assert.ok(chatInput, 'chat input exists');
+  assert.ok(chatSend, 'chat send exists');
+
+  assert.match(text(main), /Hello MeshCore/);
+
+  await type(chatInput, 'Broadcast test message');
+  await chatSend.click();
+  await settle();
+
+  assert.deepEqual(actionsCalled.send, { text: 'Broadcast test message' });
+});
+
+test('executing a MeshCore CLI command calls POST /api/lora/cli and displays output', async () => {
+  const actionsCalled = {};
+  const dev = loraDevice([], {}, {}, [], actionsCalled);
+  const { ctx, main } = await load(dev);
+  await ctx.loraPage();
+
+  const cliInput = below(main).find((e) => e.attrs?.id === 'lora-cli-input' || e.id === 'lora-cli-input');
+  const cliRun = below(main).find((e) => e.attrs?.id === 'lora-cli-run' || e.id === 'lora-cli-run');
+  const cliOut = below(main).find((e) => e.attrs?.id === 'lora-cli-output' || e.id === 'lora-cli-output');
+  assert.ok(cliInput, 'cli input exists');
+  assert.ok(cliRun, 'cli run exists');
+  assert.ok(cliOut, 'cli output exists');
+
+  await type(cliInput, 'get radio');
+  await cliRun.click();
+  await settle();
+
+  assert.deepEqual(actionsCalled.cli, { cmd: 'get radio' });
+  assert.match(text(cliOut), /CLI output for get radio/);
+
+  await buttonNamed(main, 'stats-radio').click();
+  await settle();
+  assert.deepEqual(actionsCalled.cli, { cmd: 'stats-radio' });
 });
 
 

@@ -1,5 +1,9 @@
 #include "lora_widget.h"
+#include "meshcore_proto.h"
+#include "util_sha256.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -8,15 +12,66 @@
 #include "driver/spi_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_random.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "lora_widget";
 
 static spi_device_handle_t s_lora_spi;
 static lora_stats_t s_stats;
+static meshcore_advert_t s_adverts[MESHCORE_MAX_ADVERTS];
+static meshcore_neighbor_t s_neighbors[MESHCORE_MAX_NEIGHBORS];
+static meshcore_msg_t s_messages[MESHCORE_MAX_MESSAGES];
 static SemaphoreHandle_t s_stats_mutex;
 static TaskHandle_t s_task;
+static lora_config_t s_current_cfg;
+
+static int32_t s_lat_e6 = 0;
+static int32_t s_lon_e6 = 0;
+static bool s_has_loc = false;
+
+static uint8_t s_pub_key[32];
+static uint8_t s_prv_key[64];
+static bool s_keys_initialized = false;
+
+/* Forward declarations */
+static esp_err_t sx1262_transmit(const uint8_t *data, size_t len);
+
+static void init_node_keys(void)
+{
+    if (s_keys_initialized) {
+        return;
+    }
+
+    uint8_t mac[6] = {0};
+    esp_err_t err = esp_efuse_mac_get_default(mac);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_efuse_mac_get_default failed (%s), using random seed", esp_err_to_name(err));
+        esp_fill_random(mac, sizeof(mac));
+    }
+
+    /* Seed = SHA256("meshcore-ed25519-v1" || mac[6]) */
+    uint8_t seed_input[19 + 6];
+    memcpy(seed_input, "meshcore-ed25519-v1", 19);
+    memcpy(seed_input + 19, mac, 6);
+
+    uint8_t seed[32];
+    util_sha256(seed_input, sizeof(seed_input), seed);
+
+    meshcore_ed25519_create_keypair(s_pub_key, s_prv_key, seed);
+
+    for (int i = 0; i < 32; i++) {
+        snprintf(s_stats.pub_key_hex + (i * 2), 3, "%02x", s_pub_key[i]);
+    }
+    s_stats.pub_key_hex[64] = '\0';
+    s_keys_initialized = true;
+
+    ESP_LOGI(TAG, "MeshCore Ed25519 Node Key derived. PubKey prefix: %.16s...", s_stats.pub_key_hex);
+}
 
 static bool lora_wait_busy(uint32_t timeout_ms)
 {
@@ -93,6 +148,81 @@ static esp_err_t lora_read_cmd(uint8_t cmd, uint8_t *out, size_t len)
     return err;
 }
 
+static esp_err_t lora_write_reg(uint16_t reg, uint8_t val)
+{
+    uint8_t data[3] = { (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF), val };
+    return lora_write_cmd(0x0D, data, 3);
+}
+
+static esp_err_t lora_write_buffer(uint8_t offset, const uint8_t *data, size_t len)
+{
+    if (!lora_wait_busy(50)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    gpio_set_level(BOARD_PIN_LORA_NSS, 0);
+
+    uint8_t cmd_hdr[2] = { 0x0E, offset };
+    spi_transaction_t t_hdr = {
+        .length = 16,
+        .tx_buffer = cmd_hdr,
+    };
+    esp_err_t err = spi_device_polling_transmit(s_lora_spi, &t_hdr);
+    if (err == ESP_OK && len > 0 && data != NULL) {
+        spi_transaction_t t_data = {
+            .length = 8 * len,
+            .tx_buffer = data,
+        };
+        err = spi_device_polling_transmit(s_lora_spi, &t_data);
+    }
+
+    gpio_set_level(BOARD_PIN_LORA_NSS, 1);
+    esp_rom_delay_us(10);
+    lora_wait_busy(50);
+    return err;
+}
+
+static esp_err_t lora_read_buffer(uint8_t offset, uint8_t *out, size_t len)
+{
+    if (!lora_wait_busy(50)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    gpio_set_level(BOARD_PIN_LORA_NSS, 0);
+
+    uint8_t cmd_hdr[3] = { 0x1E, offset, 0x00 /* dummy */ };
+    spi_transaction_t t_hdr = {
+        .length = 24,
+        .tx_buffer = cmd_hdr,
+    };
+    esp_err_t err = spi_device_polling_transmit(s_lora_spi, &t_hdr);
+    if (err == ESP_OK && len > 0 && out != NULL) {
+        spi_transaction_t t_data = {
+            .length = 8 * len,
+            .tx_buffer = NULL,
+            .rx_buffer = out,
+        };
+        err = spi_device_polling_transmit(s_lora_spi, &t_data);
+    }
+
+    gpio_set_level(BOARD_PIN_LORA_NSS, 1);
+    esp_rom_delay_us(10);
+    lora_wait_busy(50);
+    return err;
+}
+
+static uint8_t sx1262_bw_register(uint32_t bw_hz)
+{
+    if (bw_hz <= 7800)   return 0x00; /* 7.81 kHz */
+    if (bw_hz <= 10400)  return 0x08; /* 10.42 kHz */
+    if (bw_hz <= 15600)  return 0x01; /* 15.63 kHz */
+    if (bw_hz <= 20800)  return 0x09; /* 20.83 kHz */
+    if (bw_hz <= 31250)  return 0x02; /* 31.25 kHz */
+    if (bw_hz <= 41700)  return 0x0A; /* 41.67 kHz */
+    if (bw_hz <= 62500)  return 0x03; /* 62.50 kHz */
+    if (bw_hz <= 125000) return 0x04; /* 125.00 kHz */
+    if (bw_hz <= 250000) return 0x05; /* 250.00 kHz */
+    return 0x06;                       /* 500.00 kHz */
+}
+
 static void IRAM_ATTR lora_dio1_isr_handler(void *arg)
 {
     TaskHandle_t task = (TaskHandle_t)arg;
@@ -103,15 +233,256 @@ static void IRAM_ATTR lora_dio1_isr_handler(void *arg)
     }
 }
 
+static esp_err_t sx1262_transmit(const uint8_t *data, size_t len)
+{
+    if (!data || len == 0 || len > 255) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!s_stats.initialized || !s_stats.enabled || s_lora_spi == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* Temporarily mask DIO1 interrupt so background RX task does not clear TxDone */
+    gpio_intr_disable(BOARD_PIN_LORA_DIO1);
+
+    /* Standby */
+    uint8_t standby = 0x00;
+    lora_write_cmd(0x80, &standby, 1);
+
+    /* Set buffer base address: TX at 0 */
+    uint8_t base_addr[2] = { 0x00, 0x00 };
+    lora_write_cmd(0x8F, base_addr, 2);
+
+    /* Write data into FIFO */
+    esp_err_t err = lora_write_buffer(0x00, data, len);
+    if (err != ESP_OK) {
+        gpio_intr_enable(BOARD_PIN_LORA_DIO1);
+        xSemaphoreGive(s_stats_mutex);
+        return err;
+    }
+
+    /* Configure PacketParams for TX */
+    uint16_t preamble = (s_current_cfg.sf <= 8) ? 32 : 16;
+    uint8_t pkt_params[6] = {
+        (uint8_t)(preamble >> 8),
+        (uint8_t)(preamble & 0xFF),
+        0x00, /* Explicit header */
+        (uint8_t)len,
+        0x01, /* CRC on */
+        0x00  /* Standard IQ */
+    };
+    lora_write_cmd(0x8C, pkt_params, 6);
+
+    /* Set DIO IRQ: TxDone(0x0001) | Timeout(0x0200) in IrqMask; DIO1 mask 0x0000 */
+    uint8_t dio_irq[8] = { 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    lora_write_cmd(0x08, dio_irq, 8);
+
+    /* Clear IRQ */
+    uint8_t clr[2] = { 0x03, 0xFF };
+    lora_write_cmd(0x02, clr, 2);
+
+    /* Calculate airtime */
+    uint32_t bw_hz = s_current_cfg.bw_hz ? s_current_cfg.bw_hz : (uint32_t)s_current_cfg.bw_khz * 1000;
+    uint32_t air_ms = meshcore_calc_airtime_ms(bw_hz, s_current_cfg.sf, s_current_cfg.cr, preamble, len);
+
+    /* Set TX: timeout 0 (disabled in hardware; software polling handles timeout) */
+    uint8_t tx_to[3] = { 0x00, 0x00, 0x00 };
+    lora_write_cmd(0x83, tx_to, 3);
+
+    /* Poll for TxDone */
+    uint32_t start_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t max_wait_ms = air_ms * 2 + 1000;
+    bool tx_ok = false;
+
+    while (((uint32_t)(esp_timer_get_time() / 1000) - start_ms) < max_wait_ms) {
+        uint8_t irq_stat[2] = {0};
+        if (lora_read_cmd(0x12, irq_stat, 2) == ESP_OK) {
+            uint16_t irq = ((uint16_t)irq_stat[0] << 8) | irq_stat[1];
+            if (irq & 0x0001) { /* TxDone */
+                tx_ok = true;
+                break;
+            }
+            if (irq & 0x0200) { /* Timeout */
+                ESP_LOGW(TAG, "TX timeout IRQ triggered");
+                break;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    if (tx_ok) {
+        s_stats.packets_sent++;
+        s_stats.tx_air_ms += air_ms;
+        ESP_LOGI(TAG, "TX done: %u bytes, airtime: %lu ms (total TX air: %lu ms)",
+                 (unsigned)len, (unsigned long)air_ms, (unsigned long)s_stats.tx_air_ms);
+    } else {
+        ESP_LOGE(TAG, "TX failed or timed out");
+    }
+
+    /* Restore continuous RX */
+    uint8_t rx_pkt_params[6] = {
+        (uint8_t)(preamble >> 8),
+        (uint8_t)(preamble & 0xFF),
+        0x00, /* Explicit header */
+        0xFF, /* Max RX payload */
+        0x01, /* CRC on */
+        0x00  /* Standard IQ */
+    };
+    lora_write_cmd(0x8C, rx_pkt_params, 6);
+
+    uint8_t rx_dio_irq[8] = { 0x02, 0x42, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00 };
+    lora_write_cmd(0x08, rx_dio_irq, 8);
+    lora_write_cmd(0x02, clr, 2);
+
+    uint8_t rx_timeout[3] = { 0xFF, 0xFF, 0xFF };
+    lora_write_cmd(0x82, rx_timeout, 3);
+
+    gpio_intr_enable(BOARD_PIN_LORA_DIO1);
+    xSemaphoreGive(s_stats_mutex);
+    return tx_ok ? ESP_OK : ESP_FAIL;
+}
+
+static void update_advert_table(const meshcore_advert_t *adv)
+{
+    /* Find existing advert by pub_key */
+    for (int i = 0; i < s_stats.advert_count; i++) {
+        if (memcmp(s_adverts[i].pub_key, adv->pub_key, 32) == 0) {
+            s_adverts[i] = *adv;
+            return;
+        }
+    }
+
+    /* Append if room */
+    if (s_stats.advert_count < MESHCORE_MAX_ADVERTS) {
+        s_adverts[s_stats.advert_count++] = *adv;
+        return;
+    }
+
+    /* Evict oldest */
+    int oldest_idx = 0;
+    uint32_t oldest_time = s_adverts[0].rx_time_s;
+    for (int i = 1; i < MESHCORE_MAX_ADVERTS; i++) {
+        if (s_adverts[i].rx_time_s < oldest_time) {
+            oldest_time = s_adverts[i].rx_time_s;
+            oldest_idx = i;
+        }
+    }
+    s_adverts[oldest_idx] = *adv;
+}
+
+static void update_neighbor_table(const meshcore_neighbor_t *nb)
+{
+    for (int i = 0; i < s_stats.neighbor_count; i++) {
+        if (memcmp(s_neighbors[i].pub_key_prefix, nb->pub_key_prefix, 8) == 0) {
+            s_neighbors[i] = *nb;
+            return;
+        }
+    }
+
+    if (s_stats.neighbor_count < MESHCORE_MAX_NEIGHBORS) {
+        s_neighbors[s_stats.neighbor_count++] = *nb;
+        return;
+    }
+
+    int oldest_idx = 0;
+    uint32_t oldest_time = s_neighbors[0].rx_time_s;
+    for (int i = 1; i < MESHCORE_MAX_NEIGHBORS; i++) {
+        if (s_neighbors[i].rx_time_s < oldest_time) {
+            oldest_time = s_neighbors[i].rx_time_s;
+            oldest_idx = i;
+        }
+    }
+    s_neighbors[oldest_idx] = *nb;
+}
+
+static void append_message_history(const meshcore_msg_t *msg)
+{
+    if (s_stats.msg_count < MESHCORE_MAX_MESSAGES) {
+        s_messages[s_stats.msg_count++] = *msg;
+        return;
+    }
+
+    /* Shift ring buffer left and insert at end */
+    for (int i = 0; i < MESHCORE_MAX_MESSAGES - 1; i++) {
+        s_messages[i] = s_messages[i + 1];
+    }
+    s_messages[MESHCORE_MAX_MESSAGES - 1] = *msg;
+}
+
+bool lora_widget_get_advert(size_t index, meshcore_advert_t *out)
+{
+    if (out == NULL) return false;
+    bool ok = false;
+    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (index < s_stats.advert_count && index < MESHCORE_MAX_ADVERTS) {
+            *out = s_adverts[index];
+            ok = true;
+        }
+        xSemaphoreGive(s_stats_mutex);
+    }
+    return ok;
+}
+
+bool lora_widget_get_neighbor(size_t index, meshcore_neighbor_t *out)
+{
+    if (out == NULL) return false;
+    bool ok = false;
+    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (index < s_stats.neighbor_count && index < MESHCORE_MAX_NEIGHBORS) {
+            *out = s_neighbors[index];
+            ok = true;
+        }
+        xSemaphoreGive(s_stats_mutex);
+    }
+    return ok;
+}
+
+bool lora_widget_get_message(size_t index, meshcore_msg_t *out)
+{
+    if (out == NULL) return false;
+    bool ok = false;
+    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (index < s_stats.msg_count && index < MESHCORE_MAX_MESSAGES) {
+            *out = s_messages[index];
+            ok = true;
+        }
+        xSemaphoreGive(s_stats_mutex);
+    }
+    return ok;
+}
+
 static void lora_rx_task(void *arg)
 {
     (void)arg;
-    ESP_LOGI(TAG, "LoRa SX1262 monitor task started (interrupt-driven)");
+    ESP_LOGI(TAG, "LoRa SX1262 MeshCore monitor task started (interrupt-driven)");
 
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        /* Wait up to 1000 ms for packet interrupt */
+        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
 
         if (!s_stats.enabled || !s_stats.initialized) {
+            continue;
+        }
+
+        if (notified == 0) {
+            /* Background timeout: sample instantaneous noise floor */
+            uint8_t rssi_raw = 0;
+            if (lora_read_cmd(0x15, &rssi_raw, 1) == ESP_OK) {
+                int16_t inst = -(int16_t)(rssi_raw / 2);
+                if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                    if (s_stats.noise_floor_dbm == 0) {
+                        s_stats.noise_floor_dbm = inst;
+                    } else {
+                        s_stats.noise_floor_dbm = (int16_t)((s_stats.noise_floor_dbm * 7 + inst) / 8);
+                    }
+                    xSemaphoreGive(s_stats_mutex);
+                }
+            }
             continue;
         }
 
@@ -123,32 +494,195 @@ static void lora_rx_task(void *arg)
 
         uint16_t irq = ((uint16_t)irq_stat[0] << 8) | irq_stat[1];
 
+        /* Check CRC Error */
+        if (irq & 0x0040) {
+            if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                s_stats.recv_errors++;
+                xSemaphoreGive(s_stats_mutex);
+            }
+        }
+
         /* Bit 1 is RxDone (0x0002) */
         if (irq & 0x0002) {
             /* GetPacketStatus (cmd 0x14) */
             uint8_t pkt_stat[3] = {0};
             int16_t rssi = -120;
-            int8_t snr = 0;
+            int8_t snr_q4 = 0;
             if (lora_read_cmd(0x14, pkt_stat, 3) == ESP_OK) {
                 rssi = -(int16_t)(pkt_stat[0] / 2);
-                snr = ((int8_t)pkt_stat[1]) / 4;
+                snr_q4 = (int8_t)pkt_stat[1];
+            }
+
+            /* Read RxBufferStatus (cmd 0x13): payload_len, start_offset */
+            uint8_t rx_buf_stat[2] = {0};
+            uint8_t payload_len = 0;
+            uint8_t start_offset = 0;
+            if (lora_read_cmd(0x13, rx_buf_stat, 2) == ESP_OK) {
+                payload_len = rx_buf_stat[0];
+                start_offset = rx_buf_stat[1];
+            }
+
+            /* Read packet buffer */
+            uint8_t rx_bytes[256];
+            bool read_ok = false;
+            if (payload_len > 0 && lora_read_buffer(start_offset, rx_bytes, payload_len) == ESP_OK) {
+                read_ok = true;
             }
 
             /* Clear IRQ (cmd 0x02, 0x03FF to clear all pending flags) */
             uint8_t clr[2] = { 0x03, 0xFF };
             lora_write_cmd(0x02, clr, 2);
 
+            if (!read_ok) {
+                continue;
+            }
+
+            uint32_t bw_hz = s_current_cfg.bw_hz ? s_current_cfg.bw_hz : (uint32_t)s_current_cfg.bw_khz * 1000;
+            uint16_t preamble = (s_current_cfg.sf <= 8) ? 32 : 16;
+            uint32_t air_ms = meshcore_calc_airtime_ms(bw_hz, s_current_cfg.sf, s_current_cfg.cr, preamble, payload_len);
+
             /* Update stats */
             if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 s_stats.packet_count++;
                 s_stats.last_rssi_dbm = rssi;
-                s_stats.last_snr_db = snr;
+                s_stats.last_snr_q4 = snr_q4;
+                s_stats.last_snr_db = snr_q4 / 4;
                 s_stats.last_packet_time_s = (uint32_t)time(NULL);
+                s_stats.rx_air_ms += air_ms;
                 xSemaphoreGive(s_stats_mutex);
             }
 
-            ESP_LOGI(TAG, "LoRa packet received! Total: %u, RSSI: %d dBm, SNR: %d dB",
-                     (unsigned)s_stats.packet_count, (int)rssi, (int)snr);
+            /* Parse MeshCore packet */
+            meshcore_packet_t pkt;
+            if (!meshcore_packet_decode(&pkt, rx_bytes, payload_len)) {
+                ESP_LOGD(TAG, "Non-MeshCore packet received (%u bytes)", (unsigned)payload_len);
+                continue;
+            }
+
+            uint8_t route = meshcore_packet_get_route_type(&pkt);
+            uint8_t ptype = meshcore_packet_get_payload_type(&pkt);
+            uint8_t hops = meshcore_packet_get_hop_count(&pkt);
+
+            if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                if (route == MESHCORE_ROUTE_FLOOD || route == MESHCORE_ROUTE_TRANSPORT_FLOOD) {
+                    s_stats.recv_flood++;
+                } else {
+                    s_stats.recv_direct++;
+                }
+                xSemaphoreGive(s_stats_mutex);
+            }
+
+            /* Handle payload types */
+            if (ptype == MESHCORE_PAYLOAD_ADVERT) {
+                meshcore_advert_t adv;
+                if (meshcore_parse_advert_payload(pkt.payload, pkt.payload_len, &adv)) {
+                    adv.hops = hops;
+                    adv.rssi_dbm = rssi;
+                    adv.snr_q4 = snr_q4;
+                    adv.rx_time_s = (uint32_t)time(NULL);
+
+                    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                        update_advert_table(&adv);
+                        strncpy(s_stats.last_sender, adv.name, sizeof(s_stats.last_sender) - 1);
+                        s_stats.last_sender[sizeof(s_stats.last_sender) - 1] = '\0';
+                        xSemaphoreGive(s_stats_mutex);
+                    }
+                    ESP_LOGI(TAG, "Discovered Node Advert: '%s' (type %u, hops %u, RSSI %d dBm)",
+                             adv.name, adv.node_type, adv.hops, rssi);
+                }
+            } else if (ptype == MESHCORE_PAYLOAD_CONTROL) {
+                if (pkt.payload_len >= 6 && (pkt.payload[0] & 0xF0) == 0x80) {
+                    /* Discover Request received: reply with Discover Response */
+                    uint8_t resp_payload[14];
+                    resp_payload[0] = 0x90 | MESHCORE_ADV_CHAT;
+                    resp_payload[1] = (uint8_t)snr_q4;
+                    memcpy(&resp_payload[2], &pkt.payload[2], 4); /* Match request tag */
+                    memcpy(&resp_payload[6], s_pub_key, 8);        /* Our pubkey prefix */
+
+                    uint8_t resp_raw[64];
+                    meshcore_packet_t resp_pkt;
+                    memset(&resp_pkt, 0, sizeof(resp_pkt));
+                    resp_pkt.header = (uint8_t)((MESHCORE_ROUTE_DIRECT & 0x03) | ((MESHCORE_PAYLOAD_CONTROL & 0x0F) << 2));
+                    resp_pkt.path_len = 0;
+                    resp_pkt.payload_len = sizeof(resp_payload);
+                    memcpy(resp_pkt.payload, resp_payload, sizeof(resp_payload));
+                    size_t raw_sz = meshcore_packet_encode(&resp_pkt, resp_raw, sizeof(resp_raw));
+                    if (raw_sz > 0) {
+                        /* Short randomized delay before response to prevent collisions */
+                        vTaskDelay(pdMS_TO_TICKS(10 + (esp_random() % 30)));
+                        sx1262_transmit(resp_raw, raw_sz);
+                        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                            s_stats.sent_direct++;
+                            xSemaphoreGive(s_stats_mutex);
+                        }
+                    }
+                } else if (pkt.payload_len >= 14 && (pkt.payload[0] & 0xF0) == 0x90) {
+                    /* Discover Response received */
+                    meshcore_neighbor_t nb;
+                    uint32_t tag = 0;
+                    if (meshcore_parse_discover_resp(pkt.payload, pkt.payload_len, &nb, &tag)) {
+                        nb.rssi_dbm = rssi;
+                        nb.rx_time_s = (uint32_t)time(NULL);
+                        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                            update_neighbor_table(&nb);
+                            xSemaphoreGive(s_stats_mutex);
+                        }
+                        ESP_LOGI(TAG, "Discover Response from neighbor: prefix %02x%02x%02x%02x (RSSI %d dBm)",
+                                 nb.pub_key_prefix[0], nb.pub_key_prefix[1], nb.pub_key_prefix[2], nb.pub_key_prefix[3], rssi);
+                    }
+                }
+            } else if (ptype == MESHCORE_PAYLOAD_GRP_TXT) {
+                uint32_t ts = 0;
+                char text[160] = {0};
+                if (meshcore_parse_grp_txt_payload(pkt.payload, pkt.payload_len,
+                                                   s_current_cfg.channel_psk,
+                                                   &ts, text, sizeof(text))) {
+                    meshcore_msg_t msg = {
+                        .timestamp = ts,
+                        .rx_time_s = (uint32_t)time(NULL),
+                        .rssi_dbm = rssi,
+                        .snr_q4 = snr_q4,
+                        .hops = hops,
+                        .outgoing = false,
+                    };
+                    strncpy(msg.text, text, sizeof(msg.text) - 1);
+
+                    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                        append_message_history(&msg);
+                        /* Extract sender name before colon */
+                        char *colon = strstr(text, ": ");
+                        if (colon) {
+                            size_t name_len = colon - text;
+                            if (name_len >= sizeof(s_stats.last_sender)) {
+                                name_len = sizeof(s_stats.last_sender) - 1;
+                            }
+                            memcpy(s_stats.last_sender, text, name_len);
+                            s_stats.last_sender[name_len] = '\0';
+                        }
+                        xSemaphoreGive(s_stats_mutex);
+                    }
+                    ESP_LOGI(TAG, "Channel Message: '%s'", text);
+                }
+            }
+
+            /* Client repeat forwarding */
+            if (s_current_cfg.client_repeat &&
+                (route == MESHCORE_ROUTE_FLOOD || route == MESHCORE_ROUTE_TRANSPORT_FLOOD)) {
+                if (hops < 7) {
+                    /* Increment hop count (bits 0..5 in path_len_byte) */
+                    size_t path_byte_offset = (route == MESHCORE_ROUTE_TRANSPORT_FLOOD || route == MESHCORE_ROUTE_TRANSPORT_DIRECT) ? 5 : 1;
+                    if (path_byte_offset < payload_len) {
+                        rx_bytes[path_byte_offset]++;
+                        /* Forward with small randomized delay */
+                        vTaskDelay(pdMS_TO_TICKS(20 + (esp_random() % 50)));
+                        sx1262_transmit(rx_bytes, payload_len);
+                        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                            s_stats.sent_flood++;
+                            xSemaphoreGive(s_stats_mutex);
+                        }
+                    }
+                }
+            }
         } else if (irq != 0) {
             /* Clear non-RxDone IRQ flags */
             uint8_t clr[2] = { irq_stat[0], irq_stat[1] };
@@ -168,30 +702,34 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         s_stats_mutex = xSemaphoreCreateMutex();
     }
 
-    if (cfg != NULL && s_stats.initialized && s_stats.enabled == cfg->enabled &&
-        s_stats.freq_khz == cfg->freq_khz && s_stats.sf == cfg->sf &&
-        s_stats.bw_khz == cfg->bw_khz && s_stats.cr == cfg->cr &&
-        s_stats.sync_word == cfg->sync_word) {
-        /* Radio parameters unchanged; only update wake_on_rx */
-        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            s_stats.wake_on_rx = cfg->wake_on_rx;
-            xSemaphoreGive(s_stats_mutex);
+    init_node_keys();
+
+    if (cfg != NULL) {
+        s_current_cfg = *cfg;
+        if (s_current_cfg.node_name[0] == '\0') {
+            strncpy(s_current_cfg.node_name, "NM-EPD-420", sizeof(s_current_cfg.node_name) - 1);
         }
-        return ESP_OK;
+        if (s_current_cfg.channel_psk[0] == '\0') {
+            strncpy(s_current_cfg.channel_psk, LORA_DEFAULT_PUBLIC_PSK, sizeof(s_current_cfg.channel_psk) - 1);
+        }
+        uint8_t secret32[32];
+        uint8_t ch_hash = 0;
+        if (meshcore_channel_key_from_psk(s_current_cfg.channel_psk, secret32, &ch_hash)) {
+            s_stats.channel_hash = ch_hash;
+        }
     }
 
     /* Pause RX and disable interrupts during reconfiguration */
     gpio_intr_disable(BOARD_PIN_LORA_DIO1);
     if (s_task != NULL) {
-        ulTaskNotifyTake(pdTRUE, 0); /* drain any stale notifications */
+        ulTaskNotifyTake(pdTRUE, 0); /* drain stale notifications */
     }
 
     if (cfg == NULL || !cfg->enabled) {
         if (s_stats.initialized && s_lora_spi != NULL) {
-            uint8_t sleep_cfg = 0x00; /* cold start, config not retained (0x84) */
+            uint8_t sleep_cfg = 0x00; /* cold start (0x84) */
             lora_write_cmd(0x84, &sleep_cfg, 1);
         }
-        /* Bring outputs low to prevent parasitic ESD leakage into unpowered chip */
         gpio_set_level(BOARD_PIN_LORA_NSS, 0);
         gpio_set_level(BOARD_PIN_LORA_RST, 0);
         gpio_set_level(BOARD_PIN_LORA_EN, 0);
@@ -199,14 +737,6 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             s_stats.enabled = false;
             s_stats.initialized = false;
-            if (cfg != NULL) {
-                s_stats.freq_khz = cfg->freq_khz;
-                s_stats.sf = cfg->sf;
-                s_stats.bw_khz = cfg->bw_khz;
-                s_stats.cr = cfg->cr;
-                s_stats.sync_word = cfg->sync_word;
-                s_stats.wake_on_rx = cfg->wake_on_rx;
-            }
             xSemaphoreGive(s_stats_mutex);
         }
         ESP_LOGI(TAG, "LoRa radio disabled");
@@ -219,7 +749,18 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         xSemaphoreGive(s_stats_mutex);
     }
 
-    /* GPIO configuration for outputs (NSS, RST, EN) */
+    /* Configure BOARD_PIN_TF_CS (GPIO7) output HIGH to isolate MicroSD card on shared SPI3 */
+    gpio_config_t tf_conf = {
+        .pin_bit_mask = (1ULL << BOARD_PIN_TF_CS),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&tf_conf), TAG, "tf_cs gpio");
+    gpio_set_level(BOARD_PIN_TF_CS, 1);
+
+    /* Output pins for SX1262 (NSS, RST, EN) */
     gpio_config_t out_conf = {
         .pin_bit_mask = (1ULL << BOARD_PIN_LORA_NSS) | (1ULL << BOARD_PIN_LORA_RST) | (1ULL << BOARD_PIN_LORA_EN),
         .mode = GPIO_MODE_OUTPUT,
@@ -233,17 +774,17 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
     gpio_set_level(BOARD_PIN_LORA_RST, 1);
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    /* GPIO configuration for inputs: BUSY (polling only, NO interrupt) */
+    /* Input pins: BUSY (polling only) */
     gpio_config_t busy_conf = {
         .pin_bit_mask = (1ULL << BOARD_PIN_LORA_BUSY),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE, /* pull down so unpopulated bus stays LOW */
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&busy_conf), TAG, "busy gpio");
 
-    /* GPIO configuration for DIO1: rising edge interrupt */
+    /* Input pins: DIO1 interrupt */
     gpio_config_t dio1_conf = {
         .pin_bit_mask = (1ULL << BOARD_PIN_LORA_DIO1),
         .mode = GPIO_MODE_INPUT,
@@ -260,7 +801,7 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
     vTaskDelay(pdMS_TO_TICKS(20));
 
     if (!lora_wait_busy(50)) {
-        ESP_LOGW(TAG, "SX1262 BUSY timeout after reset (LoRa module not populated or unresponsive) - disabled");
+        ESP_LOGW(TAG, "SX1262 BUSY timeout after reset - radio disabled");
         gpio_set_level(BOARD_PIN_LORA_NSS, 0);
         gpio_set_level(BOARD_PIN_LORA_RST, 0);
         gpio_set_level(BOARD_PIN_LORA_EN, 0);
@@ -291,7 +832,7 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         spi_device_interface_config_t devcfg = {
             .clock_speed_hz = 4 * 1000 * 1000,
             .mode = 0,
-            .spics_io_num = -1, /* manual CS via NSS GPIO */
+            .spics_io_num = -1,
             .queue_size = 1,
         };
         ret = spi_bus_add_device(SPI3_HOST, &devcfg, &s_lora_spi);
@@ -301,10 +842,10 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         }
     }
 
-    /* Configure SX1262 */
-    uint8_t standby_rc = 0x00; /* STDBY_RC (0x80) */
+    /* SetStandby STDBY_RC (0x80) */
+    uint8_t standby_rc = 0x00;
     if (lora_write_cmd(0x80, &standby_rc, 1) != ESP_OK) {
-        ESP_LOGW(TAG, "SX1262 SetStandby failed (module not populated) - disabled");
+        ESP_LOGW(TAG, "SX1262 SetStandby failed - radio disabled");
         gpio_set_level(BOARD_PIN_LORA_NSS, 0);
         gpio_set_level(BOARD_PIN_LORA_RST, 0);
         gpio_set_level(BOARD_PIN_LORA_EN, 0);
@@ -319,10 +860,10 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
     uint8_t reg_mode = 0x01; /* DC-DC mode (0x96) */
     lora_write_cmd(0x96, &reg_mode, 1);
 
-    uint8_t dio2_rf_sw = 0x01; /* DIO2 as RF Switch (0x9D) */
+    uint8_t dio2_rf_sw = 0x01; /* DIO2 as RF switch (0x9D) */
     lora_write_cmd(0x9D, &dio2_rf_sw, 1);
 
-    /* TCXO 1.8V, delay ~5ms: 320 * 15.625us = 0x000140 (0x97) */
+    /* TCXO 1.8V, ~5ms delay: 0x02, 0x00, 0x01, 0x40 (0x97) */
     uint8_t tcxo_cfg[4] = { 0x02, 0x00, 0x01, 0x40 };
     lora_write_cmd(0x97, tcxo_cfg, 4);
 
@@ -330,7 +871,7 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
     uint8_t cal_all = 0x7F;
     lora_write_cmd(0x89, &cal_all, 1);
 
-    /* Calibrate image for target band (0x98) */
+    /* Calibrate image for band (0x98) */
     uint8_t cal_img[2];
     if (cfg->freq_khz >= 430000 && cfg->freq_khz <= 440000) {
         cal_img[0] = 0x6B; cal_img[1] = 0x6F;
@@ -341,15 +882,14 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
     } else if (cfg->freq_khz >= 902000 && cfg->freq_khz <= 928000) {
         cal_img[0] = 0xE1; cal_img[1] = 0xE5;
     } else {
-        /* Default 863-870 MHz */
-        cal_img[0] = 0xD7; cal_img[1] = 0xDB;
+        cal_img[0] = 0xD7; cal_img[1] = 0xDB; /* Default 863-870 MHz */
     }
     lora_write_cmd(0x98, cal_img, 2);
 
-    uint8_t pkt_type = 0x01; /* Packet Type LoRa (0x8A) */
+    uint8_t pkt_type = 0x01; /* LoRa packet type (0x8A) */
     lora_write_cmd(0x8A, &pkt_type, 1);
 
-    /* Frequency: (freq_khz * 1000) / (32000000 / 2^25) = freq_khz * 1000 * 33554432 / 32000000 */
+    /* RF frequency (0x86) */
     uint32_t f_rf = (uint32_t)(((uint64_t)cfg->freq_khz * 1000ULL * (1ULL << 25)) / 32000000ULL);
     uint8_t freq[4] = {
         (uint8_t)((f_rf >> 24) & 0xFF),
@@ -363,23 +903,49 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
     uint8_t base_addr[2] = { 0x00, 0x00 };
     lora_write_cmd(0x8F, base_addr, 2);
 
-    /* Modulation: SF (7..12), BW (125=0x04, 250=0x05, 500=0x06), CR (4/5=1..4/8=4), LDRO (0x8B) */
-    uint8_t sf = cfg->sf >= 7 && cfg->sf <= 12 ? cfg->sf : 7;
-    uint8_t bw = cfg->bw_khz == 125 ? 0x04 : (cfg->bw_khz == 500 ? 0x06 : 0x05);
-    uint8_t cr = cfg->cr >= 5 && cfg->cr <= 8 ? (cfg->cr - 4) : (cfg->cr >= 1 && cfg->cr <= 4 ? cfg->cr : 1);
-    uint16_t bw_val = (cfg->bw_khz == 125 || cfg->bw_khz == 500) ? cfg->bw_khz : 250;
-    /* Auto compute LowDataRateOptimize: Ts = 2^SF / BW_kHz > 16.38 ms <=> (2^SF * 100) > (1638 * BW_kHz) */
-    uint8_t ldro = (((uint32_t)(1u << sf) * 100u) > (1638u * bw_val)) ? 0x01 : 0x00;
-    uint8_t mod_params[4] = { sf, bw, cr, ldro };
+    /* SX1262 PA Configuration (0x95): +22 dBm power amplifier */
+    uint8_t pa_config[4] = { 0x04, 0x07, 0x00, 0x01 };
+    lora_write_cmd(0x95, pa_config, 4);
+
+    /* Over Current Protection (OCP): 140 mA limit at register 0x08E7 (0x38) */
+    lora_write_reg(0x08E7, 0x38);
+
+    /* TX Parameters (0x8E): power clamp [-9..22], ramp 200 us (0x04) */
+    int8_t pwr = cfg->tx_power_dbm;
+    if (pwr < -9) pwr = -9;
+    if (pwr > 22) pwr = 22;
+    uint8_t tx_params[2] = { (uint8_t)pwr, 0x04 };
+    lora_write_cmd(0x8E, tx_params, 2);
+
+    /* RX Boosted gain: register 0x08AC -> 0x96 for boosted, 0x94 for power saving */
+    lora_write_reg(0x08AC, cfg->rx_boosted ? 0x96 : 0x94);
+
+    /* Modulation Parameters (0x8B): SF, BW, CR, LDRO */
+    uint8_t sf = cfg->sf >= 5 && cfg->sf <= 12 ? cfg->sf : 7;
+    uint32_t bw_hz = cfg->bw_hz ? cfg->bw_hz : (uint32_t)(cfg->bw_khz ? cfg->bw_khz : 250) * 1000;
+    uint8_t bw_reg = sx1262_bw_register(bw_hz);
+    uint8_t cr_reg = cfg->cr >= 5 && cfg->cr <= 8 ? (cfg->cr - 4) : 1;
+
+    /* LowDataRateOptimize: Symbol time Ts = 2^SF / BW > 16.38 ms */
+    uint8_t ldro = (((uint64_t)(1u << sf) * 1000000ULL / bw_hz) > 16380ULL) ? 0x01 : 0x00;
+    uint8_t mod_params[4] = { sf, bw_reg, cr_reg, ldro };
     lora_write_cmd(0x8B, mod_params, 4);
 
-    /* Set SyncWord: write registers 0x0740, 0x0741 via WriteRegister (0x0D) */
-    uint16_t sw = cfg->sync_word;
-    uint8_t sync_data[4] = { 0x07, 0x40, (uint8_t)((sw >> 8) & 0xFF), (uint8_t)(sw & 0xFF) };
-    lora_write_cmd(0x0D, sync_data, 4);
+    /* SyncWord: registers 0x0740, 0x0741 via WriteRegister (0x0D) */
+    uint16_t sw = cfg->sync_word ? cfg->sync_word : 0x1424;
+    lora_write_reg(0x0740, (uint8_t)((sw >> 8) & 0xFF));
+    lora_write_reg(0x0741, (uint8_t)(sw & 0xFF));
 
-    /* Packet params: preamble=12, explicit header, max len=255, crc on, standard IQ (0x8C) */
-    uint8_t pkt_params[6] = { 0x00, 0x0C, 0x00, 0xFF, 0x01, 0x00 };
+    /* Packet Parameters (0x8C): adaptive preamble, explicit header, payload 255, crc on, standard IQ */
+    uint16_t preamble = (sf <= 8) ? 32 : 16;
+    uint8_t pkt_params[6] = {
+        (uint8_t)(preamble >> 8),
+        (uint8_t)(preamble & 0xFF),
+        0x00, /* Explicit header */
+        0xFF, /* Max RX payload */
+        0x01, /* CRC on */
+        0x00  /* Standard IQ */
+    };
     lora_write_cmd(0x8C, pkt_params, 6);
 
     /* SetDioIrqParams: RxDone(0x0002) | Timeout(0x0200) | CrcErr(0x0040) = 0x0242, DIO1 mask = 0x0002 (0x08) */
@@ -396,7 +962,7 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
 
     /* Launch background receiver task if not created */
     if (s_task == NULL) {
-        xTaskCreate(lora_rx_task, "lora_rx", 3072, NULL, 5, &s_task);
+        xTaskCreate(lora_rx_task, "lora_rx", 4096, NULL, 5, &s_task);
     }
 
     /* Configure and hook DIO1 interrupt */
@@ -416,17 +982,27 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         s_stats.initialized = true;
         s_stats.enabled = true;
         s_stats.freq_khz = cfg->freq_khz;
+        s_stats.bw_hz = bw_hz;
+        s_stats.bw_khz = (uint16_t)(bw_hz / 1000);
         s_stats.sf = sf;
-        s_stats.bw_khz = bw_val;
         s_stats.cr = cfg->cr >= 5 && cfg->cr <= 8 ? cfg->cr : 5;
+        s_stats.tx_power_dbm = pwr;
         s_stats.sync_word = sw;
+        s_stats.rx_boosted = cfg->rx_boosted;
+        s_stats.cad_enabled = cfg->cad_enabled;
+        s_stats.client_repeat = cfg->client_repeat;
+        s_stats.path_hash_mode = cfg->path_hash_mode;
+        s_stats.airtime_factor_x10 = cfg->airtime_factor_x10;
         s_stats.wake_on_rx = cfg->wake_on_rx;
+        s_stats.share_loc = cfg->share_loc;
+        strncpy(s_stats.node_name, s_current_cfg.node_name, sizeof(s_stats.node_name) - 1);
+        strncpy(s_stats.channel_name, s_current_cfg.channel_name, sizeof(s_stats.channel_name) - 1);
         xSemaphoreGive(s_stats_mutex);
     }
 
-    ESP_LOGI(TAG, "SX1262 LoRa configured: %lu kHz, SF%u, BW%u kHz, CR 4/%u, Sync 0x%04X, LDRO %u",
-             (unsigned long)cfg->freq_khz, (unsigned)sf, (unsigned)bw_val, (unsigned)s_stats.cr,
-             (unsigned)sw, (unsigned)ldro);
+    ESP_LOGI(TAG, "SX1262 MeshCore configured: %lu kHz, SF%u, BW %lu Hz, CR 4/%u, Pwr %d dBm, Sync 0x%04X, LDRO %u",
+             (unsigned long)cfg->freq_khz, (unsigned)sf, (unsigned long)bw_hz,
+             (unsigned)s_stats.cr, (int)pwr, (unsigned)sw, (unsigned)ldro);
     return ESP_OK;
 }
 
@@ -435,11 +1011,22 @@ esp_err_t lora_widget_init(void)
     lora_config_t def = {
         .enabled = true,
         .freq_khz = 868000,
-        .sf = 7,
+        .bw_hz = 250000,
         .bw_khz = 250,
+        .sf = 7,
         .cr = 5,
+        .tx_power_dbm = 22,
         .sync_word = 0x1424,
+        .rx_boosted = true,
+        .cad_enabled = false,
+        .client_repeat = false,
+        .path_hash_mode = 0,
+        .airtime_factor_x10 = 10,
         .wake_on_rx = false,
+        .share_loc = false,
+        .node_name = "NM-EPD-420",
+        .channel_name = "Public",
+        .channel_psk = LORA_DEFAULT_PUBLIC_PSK,
     };
     return lora_widget_apply(&def);
 }
@@ -451,7 +1038,7 @@ void lora_widget_sleep(void)
     }
     gpio_intr_disable(BOARD_PIN_LORA_DIO1);
     if (s_stats.initialized && s_lora_spi != NULL) {
-        uint8_t sleep_cfg = 0x00; /* cold start, config not retained (0x84) */
+        uint8_t sleep_cfg = 0x00; /* cold start */
         lora_write_cmd(0x84, &sleep_cfg, 1);
     }
     gpio_set_level(BOARD_PIN_LORA_NSS, 0);
@@ -475,10 +1062,25 @@ void lora_widget_reset_stats(void)
 {
     if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         s_stats.packet_count = 0;
+        s_stats.packets_sent = 0;
+        s_stats.recv_flood = 0;
+        s_stats.recv_direct = 0;
+        s_stats.sent_flood = 0;
+        s_stats.sent_direct = 0;
+        s_stats.recv_errors = 0;
+        s_stats.tx_air_ms = 0;
+        s_stats.rx_air_ms = 0;
         s_stats.last_rssi_dbm = 0;
         s_stats.last_snr_db = 0;
+        s_stats.last_snr_q4 = 0;
         s_stats.last_packet_time_s = 0;
+        s_stats.advert_count = 0;
+        s_stats.neighbor_count = 0;
+        s_stats.msg_count = 0;
         memset(s_stats.last_sender, 0, sizeof(s_stats.last_sender));
+        memset(s_adverts, 0, sizeof(s_adverts));
+        memset(s_neighbors, 0, sizeof(s_neighbors));
+        memset(s_messages, 0, sizeof(s_messages));
         xSemaphoreGive(s_stats_mutex);
     }
 }
@@ -491,4 +1093,656 @@ lora_stats_t lora_widget_get_stats(void)
         xSemaphoreGive(s_stats_mutex);
     }
     return copy;
+}
+
+void lora_widget_set_location(int32_t lat_e4, int32_t lon_e4)
+{
+    s_lat_e6 = lat_e4 * 100;
+    s_lon_e6 = lon_e4 * 100;
+    s_has_loc = (lat_e4 != 0 || lon_e4 != 0);
+}
+
+esp_err_t lora_widget_send_advert(bool flood)
+{
+    init_node_keys();
+
+    uint8_t raw[256];
+    size_t raw_sz = meshcore_build_advert(
+        raw, sizeof(raw),
+        flood,
+        s_pub_key, s_prv_key,
+        (uint32_t)time(NULL),
+        s_current_cfg.node_name,
+        MESHCORE_ADV_CHAT,
+        s_current_cfg.share_loc && s_has_loc,
+        s_lat_e6, s_lon_e6
+    );
+
+    if (raw_sz == 0) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = sx1262_transmit(raw, raw_sz);
+    if (err == ESP_OK) {
+        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            if (flood) {
+                s_stats.sent_flood++;
+            } else {
+                s_stats.sent_direct++;
+            }
+            xSemaphoreGive(s_stats_mutex);
+        }
+    }
+    return err;
+}
+
+esp_err_t lora_widget_send_discover(void)
+{
+    uint32_t tag = esp_random();
+    uint8_t raw[64];
+    size_t raw_sz = meshcore_build_discover_req(raw, sizeof(raw), tag);
+    if (raw_sz == 0) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = sx1262_transmit(raw, raw_sz);
+    if (err == ESP_OK) {
+        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            s_stats.sent_direct++;
+            xSemaphoreGive(s_stats_mutex);
+        }
+    }
+    return err;
+}
+
+esp_err_t lora_widget_send_channel_msg(const char *text)
+{
+    if (!text || text[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t raw[256];
+    uint32_t ts = (uint32_t)time(NULL);
+    size_t raw_sz = meshcore_build_grp_txt(
+        raw, sizeof(raw),
+        s_current_cfg.channel_psk,
+        ts,
+        s_current_cfg.node_name,
+        text
+    );
+
+    if (raw_sz == 0) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = sx1262_transmit(raw, raw_sz);
+    if (err == ESP_OK) {
+        meshcore_msg_t msg = {
+            .timestamp = ts,
+            .rx_time_s = ts,
+            .rssi_dbm = 0,
+            .snr_q4 = 0,
+            .hops = 0,
+            .outgoing = true,
+        };
+        snprintf(msg.text, sizeof(msg.text), "%s: %s", s_current_cfg.node_name, text);
+
+        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            s_stats.sent_flood++;
+            append_message_history(&msg);
+            xSemaphoreGive(s_stats_mutex);
+        }
+    }
+    return err;
+}
+
+static bool parse_on_off(const char *s, bool default_val)
+{
+    if (!s) return default_val;
+    while (*s == ' ' || *s == '\t') s++;
+    if (strcasecmp(s, "on") == 0 || strcmp(s, "1") == 0 || strcasecmp(s, "true") == 0 || strcasecmp(s, "yes") == 0) {
+        return true;
+    }
+    if (strcasecmp(s, "off") == 0 || strcmp(s, "0") == 0 || strcasecmp(s, "false") == 0 || strcasecmp(s, "no") == 0) {
+        return false;
+    }
+    return default_val;
+}
+
+void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_changed, char *reply, size_t reply_sz)
+{
+    if (!reply || reply_sz == 0) {
+        return;
+    }
+    reply[0] = '\0';
+    if (cfg_changed) *cfg_changed = false;
+
+    if (!cmd || cmd[0] == '\0') {
+        snprintf(reply, reply_sz, "Empty command. Try 'help'.\n");
+        return;
+    }
+
+    /* Trim leading whitespace */
+    while (*cmd == ' ' || *cmd == '\t') cmd++;
+
+    if (*cmd == '\0') {
+        snprintf(reply, reply_sz, "Empty command. Try 'help'.\n");
+        return;
+    }
+
+    /* Standard single-word / exact-match MeshCore CLI commands */
+    if (strcasecmp(cmd, "ver") == 0) {
+        snprintf(reply, reply_sz, "MeshCore-NM-EPD-420-BW v1.18.0-mod-rev0.2\n");
+        return;
+    }
+    if (strcasecmp(cmd, "board") == 0) {
+        snprintf(reply, reply_sz, "RockBase NM-EPD-420 (ESP32-S3R8 / SX1262)\n");
+        return;
+    }
+    if (strcasecmp(cmd, "clear stats") == 0) {
+        lora_widget_reset_stats();
+        snprintf(reply, reply_sz, "Stats cleared.\n");
+        return;
+    }
+    if (strcasecmp(cmd, "advert.zerohop") == 0) {
+        esp_err_t err = lora_widget_send_advert(false);
+        snprintf(reply, reply_sz, "Advert zerohop broadcast: %s\n", esp_err_to_name(err));
+        return;
+    }
+    if (strcasecmp(cmd, "discover.neighbors") == 0) {
+        esp_err_t err = lora_widget_send_discover();
+        snprintf(reply, reply_sz, "Discover request: %s\n", esp_err_to_name(err));
+        return;
+    }
+    if (strcasecmp(cmd, "stats-core") == 0) {
+        lora_stats_t st = lora_widget_get_stats();
+        snprintf(reply, reply_sz,
+                 "Core Stats:\n"
+                 "  Board: RockBase NM-EPD-420 (ESP32-S3R8 / SX1262)\n"
+                 "  Node: %s\n"
+                 "  PubKey: %s\n"
+                 "  Enabled: %s\n"
+                 "  Initialized: %s\n",
+                 s_current_cfg.node_name, st.pub_key_hex,
+                 st.enabled ? "true" : "false", st.initialized ? "true" : "false");
+        return;
+    }
+    if (strcasecmp(cmd, "stats-radio") == 0) {
+        lora_stats_t st = lora_widget_get_stats();
+        snprintf(reply, reply_sz,
+                 "Radio Stats:\n"
+                 "  Noise floor: %d dBm\n"
+                 "  Last RSSI: %d dBm\n"
+                 "  Last SNR: %.2f dB\n"
+                 "  Airtime TX: %lu ms\n"
+                 "  Airtime RX: %lu ms\n"
+                 "  Receive errors: %lu\n",
+                 st.noise_floor_dbm, st.last_rssi_dbm, (double)st.last_snr_q4 / 4.0,
+                 (unsigned long)st.tx_air_ms, (unsigned long)st.rx_air_ms,
+                 (unsigned long)st.recv_errors);
+        return;
+    }
+    if (strcasecmp(cmd, "stats-packets") == 0) {
+        lora_stats_t st = lora_widget_get_stats();
+        snprintf(reply, reply_sz,
+                 "Packet Stats:\n"
+                 "  Packets RX: %lu (Flood: %lu, Direct: %lu)\n"
+                 "  Packets TX: %lu (Flood: %lu, Direct: %lu)\n"
+                 "  Errors: %lu\n",
+                 (unsigned long)st.packet_count, (unsigned long)st.recv_flood, (unsigned long)st.recv_direct,
+                 (unsigned long)st.packets_sent, (unsigned long)st.sent_flood, (unsigned long)st.sent_direct,
+                 (unsigned long)st.recv_errors);
+        return;
+    }
+
+    /* Handle 'get <param>' */
+    if (strncasecmp(cmd, "get ", 4) == 0) {
+        const char *p = cmd + 4;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strcasecmp(p, "radio") == 0) {
+            double f_mhz = (double)s_current_cfg.freq_khz / 1000.0;
+            double bw_khz = (double)(s_current_cfg.bw_hz ? s_current_cfg.bw_hz : (uint32_t)s_current_cfg.bw_khz * 1000) / 1000.0;
+            snprintf(reply, reply_sz, "%.3f,%.1f,%u,%u\n", f_mhz, bw_khz, s_current_cfg.sf, s_current_cfg.cr);
+            return;
+        }
+        if (strcasecmp(p, "tx") == 0) {
+            snprintf(reply, reply_sz, "%d\n", s_current_cfg.tx_power_dbm);
+            return;
+        }
+        if (strcasecmp(p, "name") == 0) {
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.node_name);
+            return;
+        }
+        if (strcasecmp(p, "radio.rxgain") == 0) {
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.rx_boosted ? "on" : "off");
+            return;
+        }
+        if (strcasecmp(p, "cad") == 0) {
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.cad_enabled ? "on" : "off");
+            return;
+        }
+        if (strcasecmp(p, "repeat") == 0) {
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.client_repeat ? "on" : "off");
+            return;
+        }
+        if (strcasecmp(p, "af") == 0) {
+            snprintf(reply, reply_sz, "%.1f\n", (double)s_current_cfg.airtime_factor_x10 / 10.0);
+            return;
+        }
+        if (strcasecmp(p, "dutycycle") == 0) {
+            unsigned int pct = (unsigned int)(1000 / (10 + s_current_cfg.airtime_factor_x10));
+            snprintf(reply, reply_sz, "%u%%\n", pct);
+            return;
+        }
+        if (strcasecmp(p, "path.hash.mode") == 0) {
+            snprintf(reply, reply_sz, "%u\n", s_current_cfg.path_hash_mode);
+            return;
+        }
+        if (strcasecmp(p, "freq") == 0) {
+            snprintf(reply, reply_sz, "%lu\n", (unsigned long)s_current_cfg.freq_khz);
+            return;
+        }
+        if (strcasecmp(p, "bw") == 0) {
+            snprintf(reply, reply_sz, "%lu\n", (unsigned long)(s_current_cfg.bw_hz ? s_current_cfg.bw_hz : (uint32_t)s_current_cfg.bw_khz * 1000));
+            return;
+        }
+        if (strcasecmp(p, "sf") == 0) {
+            snprintf(reply, reply_sz, "%u\n", s_current_cfg.sf);
+            return;
+        }
+        if (strcasecmp(p, "cr") == 0) {
+            snprintf(reply, reply_sz, "%u\n", s_current_cfg.cr);
+            return;
+        }
+        if (strcasecmp(p, "channel") == 0) {
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.channel_name);
+            return;
+        }
+        if (strcasecmp(p, "psk") == 0) {
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.channel_psk);
+            return;
+        }
+        if (strcasecmp(p, "loc") == 0) {
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.share_loc ? "on" : "off");
+            return;
+        }
+        if (strcasecmp(p, "public.key") == 0) {
+            snprintf(reply, reply_sz, "%s\n", s_stats.pub_key_hex);
+            return;
+        }
+        snprintf(reply, reply_sz, "Unknown parameter 'get %s'\n", p);
+        return;
+    }
+
+    /* Handle 'set <param> <val>' */
+    if (strncasecmp(cmd, "set ", 4) == 0) {
+        const char *p = cmd + 4;
+        while (*p == ' ' || *p == '\t') p++;
+        char sparam[32] = {0};
+        char sval[128] = {0};
+        int parsed = sscanf(p, "%31s %127[^\r\n]", sparam, sval);
+        if (parsed <= 0) {
+            snprintf(reply, reply_sz, "Usage: set <param> <value>\n");
+            return;
+        }
+        if (strcasecmp(sparam, "radio") == 0) {
+            float f_val = 0.0f, bw_val = 0.0f;
+            unsigned int sf_val = 0, cr_val = 0;
+            if (sscanf(sval, "%f,%f,%u,%u", &f_val, &bw_val, &sf_val, &cr_val) >= 4) {
+                if (cfg_inout) {
+                    cfg_inout->freq_khz = (f_val < 3000.0f) ? (uint32_t)(f_val * 1000.0f + 0.5f) : (uint32_t)f_val;
+                    uint32_t hz = (bw_val < 1000.0f) ? (uint32_t)(bw_val * 1000.0f + 0.5f) : (uint32_t)bw_val;
+                    cfg_inout->bw_hz = hz;
+                    cfg_inout->bw_khz = (uint16_t)(hz / 1000);
+                    cfg_inout->sf = (uint8_t)sf_val;
+                    cfg_inout->cr = (uint8_t)cr_val;
+                    if (cfg_changed) *cfg_changed = true;
+                    lora_widget_apply(cfg_inout);
+                }
+                snprintf(reply, reply_sz, "Radio set: %lu kHz, %lu Hz, SF%u, CR4/%u\n",
+                         (unsigned long)s_current_cfg.freq_khz,
+                         (unsigned long)s_current_cfg.bw_hz,
+                         s_current_cfg.sf, s_current_cfg.cr);
+            } else {
+                snprintf(reply, reply_sz, "Usage: set radio <freq>,<bw>,<sf>,<cr>\n");
+            }
+            return;
+        }
+        if (strcasecmp(sparam, "tx") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                cfg_inout->tx_power_dbm = (int8_t)atoi(sval);
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%d\n", s_current_cfg.tx_power_dbm);
+            return;
+        }
+        if (strcasecmp(sparam, "name") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                strncpy(cfg_inout->node_name, sval, sizeof(cfg_inout->node_name) - 1);
+                cfg_inout->node_name[sizeof(cfg_inout->node_name) - 1] = '\0';
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.node_name);
+            return;
+        }
+        if (strcasecmp(sparam, "radio.rxgain") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                cfg_inout->rx_boosted = parse_on_off(sval, cfg_inout->rx_boosted);
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.rx_boosted ? "on" : "off");
+            return;
+        }
+        if (strcasecmp(sparam, "cad") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                cfg_inout->cad_enabled = parse_on_off(sval, cfg_inout->cad_enabled);
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.cad_enabled ? "on" : "off");
+            return;
+        }
+        if (strcasecmp(sparam, "repeat") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                cfg_inout->client_repeat = parse_on_off(sval, cfg_inout->client_repeat);
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.client_repeat ? "on" : "off");
+            return;
+        }
+        if (strcasecmp(sparam, "af") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                float af = (float)atof(sval);
+                cfg_inout->airtime_factor_x10 = (uint8_t)(af * 10.0f + 0.5f);
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%.1f\n", (double)s_current_cfg.airtime_factor_x10 / 10.0);
+            return;
+        }
+        if (strcasecmp(sparam, "dutycycle") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                int pct = atoi(sval);
+                if (pct < 1) pct = 1;
+                if (pct > 100) pct = 100;
+                cfg_inout->airtime_factor_x10 = (uint8_t)((100 - pct) * 10 / pct);
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            unsigned int pct = (unsigned int)(1000 / (10 + s_current_cfg.airtime_factor_x10));
+            snprintf(reply, reply_sz, "%u%%\n", pct);
+            return;
+        }
+        if (strcasecmp(sparam, "path.hash.mode") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                int m = atoi(sval);
+                if (m >= 0 && m <= 2) {
+                    cfg_inout->path_hash_mode = (uint8_t)m;
+                    if (cfg_changed) *cfg_changed = true;
+                    lora_widget_apply(cfg_inout);
+                }
+            }
+            snprintf(reply, reply_sz, "%u\n", s_current_cfg.path_hash_mode);
+            return;
+        }
+        if (strcasecmp(sparam, "freq") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                float f = (float)atof(sval);
+                cfg_inout->freq_khz = (f < 3000.0f) ? (uint32_t)(f * 1000.0f + 0.5f) : (uint32_t)f;
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%lu\n", (unsigned long)s_current_cfg.freq_khz);
+            return;
+        }
+        if (strcasecmp(sparam, "bw") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                float bw = (float)atof(sval);
+                uint32_t hz = (bw < 1000.0f) ? (uint32_t)(bw * 1000.0f + 0.5f) : (uint32_t)bw;
+                cfg_inout->bw_hz = hz;
+                cfg_inout->bw_khz = (uint16_t)(hz / 1000);
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%lu\n", (unsigned long)s_current_cfg.bw_hz);
+            return;
+        }
+        if (strcasecmp(sparam, "sf") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                cfg_inout->sf = (uint8_t)atoi(sval);
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%u\n", s_current_cfg.sf);
+            return;
+        }
+        if (strcasecmp(sparam, "cr") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                cfg_inout->cr = (uint8_t)atoi(sval);
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%u\n", s_current_cfg.cr);
+            return;
+        }
+        if (strcasecmp(sparam, "channel") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                strncpy(cfg_inout->channel_name, sval, sizeof(cfg_inout->channel_name) - 1);
+                cfg_inout->channel_name[sizeof(cfg_inout->channel_name) - 1] = '\0';
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.channel_name);
+            return;
+        }
+        if (strcasecmp(sparam, "psk") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                strncpy(cfg_inout->channel_psk, sval, sizeof(cfg_inout->channel_psk) - 1);
+                cfg_inout->channel_psk[sizeof(cfg_inout->channel_psk) - 1] = '\0';
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.channel_psk);
+            return;
+        }
+        if (strcasecmp(sparam, "loc") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                cfg_inout->share_loc = parse_on_off(sval, cfg_inout->share_loc);
+                if (cfg_changed) *cfg_changed = true;
+                lora_widget_apply(cfg_inout);
+            }
+            snprintf(reply, reply_sz, "%s\n", s_current_cfg.share_loc ? "on" : "off");
+            return;
+        }
+        snprintf(reply, reply_sz, "Unknown parameter 'set %s'\n", sparam);
+        return;
+    }
+
+    char op[32] = {0};
+    char arg[128] = {0};
+    int matched = sscanf(cmd, "%31s %127[^\r\n]", op, arg);
+
+    if (matched <= 0) {
+        snprintf(reply, reply_sz, "Invalid command.\n");
+        return;
+    }
+
+    if (strcasecmp(op, "help") == 0) {
+        snprintf(reply, reply_sz,
+                 "MeshCore CLI Commands:\n"
+                 "  ver                  - Get firmware version\n"
+                 "  board                - Get hardware board name\n"
+                 "  get/set radio        - Get or set freq,bw,sf,cr\n"
+                 "  get/set tx           - Get or set TX power (dBm)\n"
+                 "  get/set name         - Get or set node name\n"
+                 "  get/set radio.rxgain - Get or set RX boosted gain (on/off)\n"
+                 "  get/set cad          - Get or set CAD channel activity detection (on/off)\n"
+                 "  get/set repeat       - Get or set client repeat mode (on/off)\n"
+                 "  get/set af           - Get or set airtime factor\n"
+                 "  get/set dutycycle    - Get or set duty cycle limit (%%)\n"
+                 "  get/set path.hash.mode - Get or set path hash mode (0|1|2)\n"
+                 "  stats-core           - Core node metrics\n"
+                 "  stats-radio          - Radio layer metrics\n"
+                 "  stats-packets        - Packet counters\n"
+                 "  clear stats          - Reset statistics counters\n"
+                 "  advert / adv         - Broadcast node advert (flood)\n"
+                 "  advert.zerohop       - Broadcast zero-hop advert\n"
+                 "  discover.neighbors   - Broadcast zero-hop discover request\n"
+                 "  neighbors            - List direct zero-hop neighbors\n"
+                 "  nodes / peers        - List heard node adverts\n"
+                 "  msg / send <text>    - Send group channel text message\n"
+                 "  messages             - Show recent chat messages\n");
+    } else if (strcasecmp(op, "adv") == 0 || strcasecmp(op, "advert") == 0) {
+        esp_err_t err = lora_widget_send_advert(true);
+        snprintf(reply, reply_sz, "Advert broadcast: %s\n", esp_err_to_name(err));
+    } else if (strcasecmp(op, "disc") == 0 || strcasecmp(op, "discover") == 0) {
+        esp_err_t err = lora_widget_send_discover();
+        snprintf(reply, reply_sz, "Discover request: %s\n", esp_err_to_name(err));
+    } else if (strcasecmp(op, "msg") == 0 || strcasecmp(op, "send") == 0) {
+        if (arg[0] == '\0') {
+            snprintf(reply, reply_sz, "Usage: msg <text>\n");
+        } else {
+            esp_err_t err = lora_widget_send_channel_msg(arg);
+            snprintf(reply, reply_sz, "Message send: %s\n", esp_err_to_name(err));
+        }
+    } else if (strcasecmp(op, "node") == 0) {
+        if (arg[0] != '\0' && cfg_inout) {
+            strncpy(cfg_inout->node_name, arg, sizeof(cfg_inout->node_name) - 1);
+            cfg_inout->node_name[sizeof(cfg_inout->node_name) - 1] = '\0';
+            if (cfg_changed) *cfg_changed = true;
+            lora_widget_apply(cfg_inout);
+        }
+        snprintf(reply, reply_sz, "Node name: %s\nPubKey: %.16s...\n",
+                 s_current_cfg.node_name, s_stats.pub_key_hex);
+    } else if (strcasecmp(op, "channel") == 0) {
+        if (arg[0] != '\0' && cfg_inout) {
+            strncpy(cfg_inout->channel_name, arg, sizeof(cfg_inout->channel_name) - 1);
+            cfg_inout->channel_name[sizeof(cfg_inout->channel_name) - 1] = '\0';
+            if (cfg_changed) *cfg_changed = true;
+            lora_widget_apply(cfg_inout);
+        }
+        snprintf(reply, reply_sz, "Channel: %s (hash 0x%02X)\n",
+                 s_current_cfg.channel_name, s_stats.channel_hash);
+    } else if (strcasecmp(op, "psk") == 0) {
+        if (arg[0] != '\0' && cfg_inout) {
+            strncpy(cfg_inout->channel_psk, arg, sizeof(cfg_inout->channel_psk) - 1);
+            cfg_inout->channel_psk[sizeof(cfg_inout->channel_psk) - 1] = '\0';
+            if (cfg_changed) *cfg_changed = true;
+            lora_widget_apply(cfg_inout);
+        }
+        snprintf(reply, reply_sz, "Channel PSK: %s (hash 0x%02X)\n",
+                 s_current_cfg.channel_psk, s_stats.channel_hash);
+    } else if (strcasecmp(op, "repeat") == 0) {
+        if (arg[0] != '\0' && cfg_inout) {
+            cfg_inout->client_repeat = parse_on_off(arg, cfg_inout->client_repeat);
+            if (cfg_changed) *cfg_changed = true;
+            lora_widget_apply(cfg_inout);
+        }
+        snprintf(reply, reply_sz, "Client repeat: %s\n", s_current_cfg.client_repeat ? "ON" : "OFF");
+    } else if (strcasecmp(op, "loc") == 0) {
+        if (arg[0] != '\0' && cfg_inout) {
+            cfg_inout->share_loc = parse_on_off(arg, cfg_inout->share_loc);
+            if (cfg_changed) *cfg_changed = true;
+            lora_widget_apply(cfg_inout);
+        }
+        snprintf(reply, reply_sz, "Share location: %s\n", s_current_cfg.share_loc ? "ON" : "OFF");
+    } else if (strcasecmp(op, "boost") == 0) {
+        if (arg[0] != '\0' && cfg_inout) {
+            cfg_inout->rx_boosted = parse_on_off(arg, cfg_inout->rx_boosted);
+            if (cfg_changed) *cfg_changed = true;
+            lora_widget_apply(cfg_inout);
+        }
+        snprintf(reply, reply_sz, "RX Boosted: %s\n", s_current_cfg.rx_boosted ? "ON" : "OFF");
+    } else if (strcasecmp(op, "power") == 0) {
+        if (arg[0] != '\0' && cfg_inout) {
+            cfg_inout->tx_power_dbm = (int8_t)atoi(arg);
+            if (cfg_changed) *cfg_changed = true;
+            lora_widget_apply(cfg_inout);
+        }
+        snprintf(reply, reply_sz, "TX Power: %d dBm\n", s_current_cfg.tx_power_dbm);
+    } else if (strcasecmp(op, "sf") == 0) {
+        if (arg[0] != '\0' && cfg_inout) {
+            cfg_inout->sf = (uint8_t)atoi(arg);
+            if (cfg_changed) *cfg_changed = true;
+            lora_widget_apply(cfg_inout);
+        }
+        snprintf(reply, reply_sz, "SF: %u\n", s_current_cfg.sf);
+    } else if (strcasecmp(op, "cr") == 0) {
+        if (arg[0] != '\0' && cfg_inout) {
+            cfg_inout->cr = (uint8_t)atoi(arg);
+            if (cfg_changed) *cfg_changed = true;
+            lora_widget_apply(cfg_inout);
+        }
+        snprintf(reply, reply_sz, "CR: 4/%u\n", s_current_cfg.cr);
+    } else if (strcasecmp(op, "freq") == 0) {
+        if (arg[0] != '\0' && cfg_inout) {
+            float f = (float)atof(arg);
+            cfg_inout->freq_khz = (f < 3000.0f) ? (uint32_t)(f * 1000.0f + 0.5f) : (uint32_t)f;
+            if (cfg_changed) *cfg_changed = true;
+            lora_widget_apply(cfg_inout);
+        }
+        snprintf(reply, reply_sz, "Frequency: %lu kHz\n", (unsigned long)s_current_cfg.freq_khz);
+    } else if (strcasecmp(op, "bw") == 0) {
+        if (arg[0] != '\0' && cfg_inout) {
+            float bw = (float)atof(arg);
+            uint32_t hz = (bw < 1000.0f) ? (uint32_t)(bw * 1000.0f + 0.5f) : (uint32_t)bw;
+            cfg_inout->bw_hz = hz;
+            cfg_inout->bw_khz = (uint16_t)(hz / 1000);
+            if (cfg_changed) *cfg_changed = true;
+            lora_widget_apply(cfg_inout);
+        }
+        snprintf(reply, reply_sz, "Bandwidth: %lu Hz (%u kHz)\n",
+                 (unsigned long)s_current_cfg.bw_hz, s_current_cfg.bw_khz);
+    } else if (strcasecmp(op, "stats") == 0 || strcasecmp(op, "status") == 0) {
+        lora_stats_t st = lora_widget_get_stats();
+        snprintf(reply, reply_sz,
+                 "LoRa Statistics:\n"
+                 "  Enabled: %s, Init: %s\n"
+                 "  RX Packets: %lu (Flood: %lu, Direct: %lu, Errors: %lu)\n"
+                 "  TX Packets: %lu (Flood: %lu, Direct: %lu)\n"
+                 "  Signal: Last RSSI %d dBm, SNR %.2f dB, Noise %d dBm\n"
+                 "  Airtime: TX %lu ms, RX %lu ms\n",
+                 st.enabled ? "YES" : "NO", st.initialized ? "YES" : "NO",
+                 (unsigned long)st.packet_count, (unsigned long)st.recv_flood,
+                 (unsigned long)st.recv_direct, (unsigned long)st.recv_errors,
+                 (unsigned long)st.packets_sent, (unsigned long)st.sent_flood,
+                 (unsigned long)st.sent_direct,
+                 st.last_rssi_dbm, (double)st.last_snr_q4 / 4.0, st.noise_floor_dbm,
+                 (unsigned long)st.tx_air_ms, (unsigned long)st.rx_air_ms);
+    } else if (strcasecmp(op, "nodes") == 0 || strcasecmp(op, "adverts") == 0 || strcasecmp(op, "peers") == 0) {
+        lora_stats_t st = lora_widget_get_stats();
+        size_t off = snprintf(reply, reply_sz, "Discovered Nodes (%u):\n", st.advert_count);
+        for (int i = 0; i < st.advert_count && off < reply_sz - 64; i++) {
+            off += snprintf(reply + off, reply_sz - off,
+                            "  [%d] %-16s type %u, hops %u, RSSI %d dBm\n",
+                            i + 1, s_adverts[i].name, s_adverts[i].node_type,
+                            s_adverts[i].hops, s_adverts[i].rssi_dbm);
+        }
+    } else if (strcasecmp(op, "neighbors") == 0) {
+        lora_stats_t st = lora_widget_get_stats();
+        size_t off = snprintf(reply, reply_sz, "Direct Neighbors (%u):\n", st.neighbor_count);
+        for (int i = 0; i < st.neighbor_count && off < reply_sz - 64; i++) {
+            off += snprintf(reply + off, reply_sz - off,
+                            "  [%d] prefix %02x%02x%02x%02x, RSSI %d dBm, SNR in %.2f dB\n",
+                            i + 1,
+                            s_neighbors[i].pub_key_prefix[0], s_neighbors[i].pub_key_prefix[1],
+                            s_neighbors[i].pub_key_prefix[2], s_neighbors[i].pub_key_prefix[3],
+                            s_neighbors[i].rssi_dbm, (double)s_neighbors[i].snr_in_q4 / 4.0);
+        }
+    } else if (strcasecmp(op, "messages") == 0) {
+        lora_stats_t st = lora_widget_get_stats();
+        size_t off = snprintf(reply, reply_sz, "Recent Messages (%u):\n", st.msg_count);
+        for (int i = 0; i < st.msg_count && off < reply_sz - 128; i++) {
+            off += snprintf(reply + off, reply_sz - off,
+                            "  %s [%s]\n",
+                            s_messages[i].text,
+                            s_messages[i].outgoing ? "TX" : "RX");
+        }
+    } else {
+        snprintf(reply, reply_sz, "Unknown command '%s'. Try 'help'.\n", op);
+    }
 }

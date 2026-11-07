@@ -51,6 +51,11 @@ typedef enum {
     UI_MI_TEMP_OFFSET, /* number, 0.1 °C, -10.0 to +10.0 */
     UI_MI_HUM_OFFSET,  /* number, 0.1 %, -20.0 to +20.0 in 0.5 steps */
     UI_MI_UNITS,       /* choice: °C, °F */
+    UI_MI_LORA,        /* section on root menu */
+    UI_MI_LORA_ENABLED, /* toggle: LoRa radio */
+    UI_MI_LORA_ADVERT,  /* action: Send advert */
+    UI_MI_LORA_DISCOVER, /* action: Find repeaters */
+    UI_MI_LORA_STATUS,  /* info: status string */
     UI_MI_INFO,
     UI_MI_INFO_BATTERY, /* info texts */
     UI_MI_INFO_FIRMWARE,
@@ -131,3 +136,25 @@ void ui_menu_value_text(ui_menu_item_t item, int32_t value, const ui_menu_model_
 
 /* The menu screen: the current list, or the editor or question it shows (spec §5.7). */
 void ui_draw_menu(gfx_fb_t *fb, const ui_menu_t *m, const ui_menu_model_t *model, const lang_t *lang);
+
+#define UI_MENU_TEXT_LEN 32
+
+typedef enum {
+    UI_MENU_SAVE_NONE = 0,
+    UI_MENU_SAVE_LORA_ENABLED,
+} ui_menu_save_t;
+
+typedef enum {
+    UI_MENU_ACT_NONE = 0,
+    UI_MENU_ACT_LORA_ADVERT,
+    UI_MENU_ACT_LORA_DISCOVER,
+} ui_menu_action_t;
+
+typedef struct {
+    bool lora_enabled;
+    char lora_status[UI_MENU_TEXT_LEN];
+} ui_menu_values_t;
+
+void step_value(ui_menu_item_t item, ui_menu_values_t *v);
+void format_value(ui_menu_item_t item, const ui_menu_values_t *v, const lang_t *lang, char *out, size_t size);
+

@@ -210,6 +210,7 @@ void app_ui_apply_settings(void)
             ESP_LOGW(TAG, "panel rate: %s", esp_err_to_name(err));
         }
     }
+    lora_widget_set_location(s.settings.lat_e4, s.settings.lon_e4);
     lora_widget_apply(&s.settings.lora);
     if (s.cold_boot_at == 0 && timekeeping_valid()) {
         s.cold_boot_at = time(NULL); /* Info > Uptime counts from the first valid clock after a cold boot */

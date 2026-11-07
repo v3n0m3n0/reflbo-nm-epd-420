@@ -297,18 +297,113 @@ static void get_status(uint8_t *out, size_t size, webui_reply_t *reply)
     cJSON *lora = cJSON_AddObjectToObject(o, "lora");
     cJSON_AddBoolToObject(lora, "enabled", ls.enabled);
     cJSON_AddBoolToObject(lora, "initialized", ls.initialized);
+    cJSON_AddStringToObject(lora, "node_name", ls.node_name);
+    cJSON_AddStringToObject(lora, "pub_key", ls.pub_key_hex);
     cJSON_AddNumberToObject(lora, "freq_khz", ls.freq_khz);
+    cJSON_AddNumberToObject(lora, "bw_hz", ls.bw_hz);
+    cJSON_AddNumberToObject(lora, "bw_khz", (double)ls.bw_hz / 1000.0);
     cJSON_AddNumberToObject(lora, "sf", ls.sf);
-    cJSON_AddNumberToObject(lora, "bw_khz", ls.bw_khz);
     cJSON_AddNumberToObject(lora, "cr", ls.cr);
+    cJSON_AddNumberToObject(lora, "tx_power_dbm", ls.tx_power_dbm);
     cJSON_AddNumberToObject(lora, "sync_word", ls.sync_word);
+    cJSON_AddBoolToObject(lora, "rx_boosted", ls.rx_boosted);
+    cJSON_AddBoolToObject(lora, "cad_enabled", ls.cad_enabled);
+    cJSON_AddBoolToObject(lora, "client_repeat", ls.client_repeat);
+    cJSON_AddNumberToObject(lora, "path_hash_mode", ls.path_hash_mode);
+    cJSON_AddNumberToObject(lora, "airtime_factor", (double)ls.airtime_factor_x10 / 10.0);
     cJSON_AddBoolToObject(lora, "wake_on_rx", ls.wake_on_rx);
-    cJSON_AddNumberToObject(lora, "packet_count", ls.packet_count);
+    cJSON_AddBoolToObject(lora, "share_loc", ls.share_loc);
+    cJSON_AddStringToObject(lora, "channel_name", ls.channel_name);
+    cJSON_AddNumberToObject(lora, "channel_hash", ls.channel_hash);
+    cJSON_AddNumberToObject(lora, "noise_floor_dbm", ls.noise_floor_dbm);
     cJSON_AddNumberToObject(lora, "last_rssi_dbm", ls.last_rssi_dbm);
-    cJSON_AddNumberToObject(lora, "last_snr_db", ls.last_snr_db);
+    cJSON_AddNumberToObject(lora, "last_snr_db", (double)ls.last_snr_q4 / 4.0);
+    cJSON_AddNumberToObject(lora, "packet_count", ls.packet_count);
+    cJSON_AddNumberToObject(lora, "packets_sent", ls.packets_sent);
+    cJSON_AddNumberToObject(lora, "recv_flood", ls.recv_flood);
+    cJSON_AddNumberToObject(lora, "recv_direct", ls.recv_direct);
+    cJSON_AddNumberToObject(lora, "sent_flood", ls.sent_flood);
+    cJSON_AddNumberToObject(lora, "sent_direct", ls.sent_direct);
+    cJSON_AddNumberToObject(lora, "recv_errors", ls.recv_errors);
+    cJSON_AddNumberToObject(lora, "tx_air_ms", ls.tx_air_ms);
+    cJSON_AddNumberToObject(lora, "rx_air_ms", ls.rx_air_ms);
     cJSON_AddNumberToObject(lora, "last_packet_at", ls.last_packet_time_s);
     if (ls.last_packet_time_s != 0 && now >= (time_t)ls.last_packet_time_s) {
         cJSON_AddNumberToObject(lora, "age_s", (double)(now - (time_t)ls.last_packet_time_s));
+    } else {
+        cJSON_AddNullToObject(lora, "age_s");
+    }
+
+    cJSON *advs = cJSON_AddArrayToObject(lora, "adverts");
+    for (size_t i = 0; i < ls.advert_count && i < MESHCORE_MAX_ADVERTS; i++) {
+        meshcore_advert_t adv;
+        if (!lora_widget_get_advert(i, &adv)) break;
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "name", adv.name);
+        cJSON_AddNumberToObject(item, "node_type", adv.node_type);
+        char pk_hex[17];
+        for (int j = 0; j < 8; j++) {
+            snprintf(pk_hex + j * 2, 3, "%02x", adv.pub_key[j]);
+        }
+        cJSON_AddStringToObject(item, "pub_key", pk_hex);
+        cJSON_AddNumberToObject(item, "hops", adv.hops);
+        cJSON_AddNumberToObject(item, "rssi_dbm", adv.rssi_dbm);
+        cJSON_AddNumberToObject(item, "snr_db", (double)adv.snr_q4 / 4.0);
+        cJSON_AddBoolToObject(item, "has_loc", adv.has_loc);
+        if (adv.has_loc) {
+            cJSON_AddNumberToObject(item, "lat", (double)adv.lat_e6 / 1000000.0);
+            cJSON_AddNumberToObject(item, "lon", (double)adv.lon_e6 / 1000000.0);
+        } else {
+            cJSON_AddNullToObject(item, "lat");
+            cJSON_AddNullToObject(item, "lon");
+        }
+        if (adv.rx_time_s != 0 && now >= (time_t)adv.rx_time_s) {
+            cJSON_AddNumberToObject(item, "age_s", (double)(now - (time_t)adv.rx_time_s));
+        } else {
+            cJSON_AddNullToObject(item, "age_s");
+        }
+        cJSON_AddItemToArray(advs, item);
+    }
+
+    cJSON *nbrs = cJSON_AddArrayToObject(lora, "neighbors");
+    for (size_t i = 0; i < ls.neighbor_count && i < MESHCORE_MAX_NEIGHBORS; i++) {
+        meshcore_neighbor_t nbr;
+        if (!lora_widget_get_neighbor(i, &nbr)) break;
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "name", nbr.name);
+        cJSON_AddNumberToObject(item, "node_type", nbr.node_type);
+        char pk_hex[17];
+        for (int j = 0; j < 8; j++) {
+            snprintf(pk_hex + j * 2, 3, "%02x", nbr.pub_key_prefix[j]);
+        }
+        cJSON_AddStringToObject(item, "pub_key", pk_hex);
+        cJSON_AddNumberToObject(item, "snr_in_db", (double)nbr.snr_in_q4 / 4.0);
+        cJSON_AddNumberToObject(item, "snr_out_db", (double)nbr.snr_out_q4 / 4.0);
+        cJSON_AddNumberToObject(item, "rssi_dbm", nbr.rssi_dbm);
+        if (nbr.rx_time_s != 0 && now >= (time_t)nbr.rx_time_s) {
+            cJSON_AddNumberToObject(item, "age_s", (double)(now - (time_t)nbr.rx_time_s));
+        } else {
+            cJSON_AddNullToObject(item, "age_s");
+        }
+        cJSON_AddItemToArray(nbrs, item);
+    }
+
+    cJSON *msgs = cJSON_AddArrayToObject(lora, "messages");
+    for (size_t i = 0; i < ls.msg_count && i < MESHCORE_MAX_MESSAGES; i++) {
+        meshcore_msg_t m;
+        if (!lora_widget_get_message(i, &m)) break;
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "text", m.text);
+        cJSON_AddNumberToObject(item, "rssi_dbm", m.rssi_dbm);
+        cJSON_AddNumberToObject(item, "snr_db", (double)m.snr_q4 / 4.0);
+        cJSON_AddNumberToObject(item, "hops", m.hops);
+        cJSON_AddBoolToObject(item, "outgoing", m.outgoing);
+        if (m.rx_time_s != 0 && now >= (time_t)m.rx_time_s) {
+            cJSON_AddNumberToObject(item, "age_s", (double)(now - (time_t)m.rx_time_s));
+        } else {
+            cJSON_AddNullToObject(item, "age_s");
+        }
+        cJSON_AddItemToArray(msgs, item);
     }
 
     reply_cjson(reply, out, size, o);
@@ -711,6 +806,67 @@ void app_web_api(const char *method, const char *path, const char *query, const 
     } else if (strcmp(path, "/api/lora/reset") == 0 && strcmp(method, "POST") == 0) {
         lora_widget_reset_stats();
         reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
+    } else if (strcmp(path, "/api/lora/advert") == 0 && strcmp(method, "POST") == 0) {
+        bool flood = true;
+        if (body != NULL && body[0] != '\0') {
+            cJSON *in = cJSON_Parse(body);
+            if (in != NULL) {
+                const cJSON *f = cJSON_GetObjectItemCaseSensitive(in, "flood");
+                if (cJSON_IsBool(f)) {
+                    flood = cJSON_IsTrue(f);
+                }
+                cJSON_Delete(in);
+            }
+        }
+        esp_err_t err = lora_widget_send_advert(flood);
+        if (err == ESP_OK) {
+            reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
+        } else {
+            reply_error(reply, out, size, 500, "failed to send advert");
+        }
+    } else if (strcmp(path, "/api/lora/discover") == 0 && strcmp(method, "POST") == 0) {
+        esp_err_t err = lora_widget_send_discover();
+        if (err == ESP_OK) {
+            reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
+        } else {
+            reply_error(reply, out, size, 500, "failed to send discover");
+        }
+    } else if (strcmp(path, "/api/lora/send") == 0 && strcmp(method, "POST") == 0) {
+        cJSON *in = cJSON_Parse(body);
+        const cJSON *t = in != NULL ? cJSON_GetObjectItemCaseSensitive(in, "text") : NULL;
+        if (!cJSON_IsString(t) || t->valuestring == NULL || t->valuestring[0] == '\0') {
+            cJSON_Delete(in);
+            reply_error(reply, out, size, 400, "missing text");
+        } else {
+            esp_err_t err = lora_widget_send_channel_msg(t->valuestring);
+            cJSON_Delete(in);
+            if (err == ESP_OK) {
+                reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
+            } else {
+                reply_error(reply, out, size, 500, "failed to send message");
+            }
+        }
+    } else if (strcmp(path, "/api/lora/cli") == 0 && strcmp(method, "POST") == 0) {
+        cJSON *in = cJSON_Parse(body);
+        const cJSON *cmd = in != NULL ? cJSON_GetObjectItemCaseSensitive(in, "cmd") : NULL;
+        if (!cJSON_IsString(cmd) || cmd->valuestring == NULL) {
+            cJSON_Delete(in);
+            reply_error(reply, out, size, 400, "missing cmd");
+        } else {
+            app_ui_state_t *s = app_state();
+            bool changed = false;
+            char reply_buf[512] = { 0 };
+            lora_widget_exec_cli(cmd->valuestring, &s->settings.lora, &changed, reply_buf, sizeof(reply_buf));
+            cJSON_Delete(in);
+            if (changed) {
+                lora_widget_apply(&s->settings.lora);
+                app_ui_save_settings();
+            }
+            cJSON *res = cJSON_CreateObject();
+            cJSON_AddBoolToObject(res, "ok", true);
+            cJSON_AddStringToObject(res, "reply", reply_buf);
+            reply_cjson(reply, out, size, res);
+        }
     } else {
         reply_error(reply, out, size, 404, "no such API");
     }

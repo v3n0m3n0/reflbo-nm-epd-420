@@ -76,14 +76,31 @@ typedef enum { SETTINGS_BATTERY_AUTO, SETTINGS_BATTERY_ON, SETTINGS_BATTERY_OFF 
 
 #ifndef _LORA_CONFIG_T_DEFINED
 #define _LORA_CONFIG_T_DEFINED
+
+#define LORA_NODE_NAME_LEN    32
+#define LORA_CHANNEL_NAME_LEN 24
+#define LORA_CHANNEL_PSK_LEN  48
+#define LORA_DEFAULT_PUBLIC_PSK "izOH6cXN6mrJ5e26oRXNcg=="
+
 typedef struct {
     bool enabled;
-    uint32_t freq_khz;     /* 430000..928000: kHz */
-    uint8_t sf;            /* 7..12 */
-    uint16_t bw_khz;       /* 125, 250, 500 */
-    uint8_t cr;            /* 5..8 (4/5..4/8) */
-    uint16_t sync_word;    /* 0x0000..0xFFFF */
-    bool wake_on_rx;
+    uint32_t freq_khz;     /* 430000..928000: kHz (default 868000) */
+    uint32_t bw_hz;        /* 7800, 10400, 15600, 20800, 31250, 41700, 62500, 125000, 250000, 500000 (default 250000) */
+    uint16_t bw_khz;       /* integer kHz helper (e.g. 62 for 62.5 kHz, 125, 250, 500) kept in sync with bw_hz */
+    uint8_t sf;            /* 5..12 (default 7) */
+    uint8_t cr;            /* 5..8 (4/5..4/8, default 5) */
+    int8_t tx_power_dbm;   /* -9..22 dBm (default 22) */
+    uint16_t sync_word;    /* 0x0000..0xFFFF (default 0x1424) */
+    bool rx_boosted;       /* SX1262 RX boosted gain (default true) */
+    bool cad_enabled;      /* Channel Activity Detection / LBT (default false) */
+    bool client_repeat;    /* Forward flood packets (default false) */
+    uint8_t path_hash_mode;/* 0=1B, 1=2B, 2=3B path hashes (default 0) */
+    uint8_t airtime_factor_x10; /* 0..90 -> 0.0..9.0 (default 10 = 1.0) */
+    bool wake_on_rx;       /* Wake from sleep on DIO1 RX (default false) */
+    bool share_loc;        /* Include lat/lon in adverts (default false) */
+    char node_name[LORA_NODE_NAME_LEN];       /* default "NM-EPD-420" */
+    char channel_name[LORA_CHANNEL_NAME_LEN]; /* default "Public" */
+    char channel_psk[LORA_CHANNEL_PSK_LEN];   /* default LORA_DEFAULT_PUBLIC_PSK */
 } lora_config_t;
 #endif
 

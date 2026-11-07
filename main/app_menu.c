@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lang.h"
+#include "lora_widget.h"
 #include "netmgr.h"
 #include "power.h"
 #include "st7305.h"
@@ -127,6 +128,64 @@ static int zone_list(int *current)
     return count;
 }
 
+static void fill_menu_values(ui_menu_values_t *v)
+{
+    const app_ui_state_t *st = app_state();
+    const lang_t *l = lang();
+    v->lora_enabled = st->settings.lora.enabled;
+    lora_stats_t ls = lora_widget_get_stats();
+    if (!ls.enabled) {
+        snprintf(v->lora_status, sizeof(v->lora_status), "%s", lang_str(l, LS_OFF));
+    } else if (!ls.initialized) {
+        snprintf(v->lora_status, sizeof(v->lora_status), "No module");
+    } else {
+        snprintf(v->lora_status, sizeof(v->lora_status), "%lu.%02luM RX:%lu TX:%lu",
+                 (unsigned long)(ls.freq_khz / 1000), (unsigned long)((ls.freq_khz % 1000) / 10),
+                 (unsigned long)ls.packet_count, (unsigned long)ls.packets_sent);
+    }
+}
+
+static bool apply_save(ui_menu_save_t save, const ui_menu_values_t *v)
+{
+    app_ui_state_t *st = app_state();
+    const lang_t *l = lang();
+    switch (save) {
+    case UI_MENU_SAVE_LORA_ENABLED:
+        st->settings.lora.enabled = v->lora_enabled;
+        lora_widget_apply(&st->settings.lora);
+        app_ui_toast(lang_str(l, v->lora_enabled ? LS_T_LORA_ON : LS_T_LORA_OFF));
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void run_action(ui_menu_action_t act)
+{
+    app_ui_state_t *st = app_state();
+    const lang_t *l = lang();
+    switch (act) {
+    case UI_MENU_ACT_LORA_ADVERT:
+        if (!st->settings.lora.enabled) {
+            app_ui_toast(lang_str(l, LS_T_LORA_OFF));
+        } else {
+            lora_widget_send_advert(true);
+            app_ui_toast(lang_str(l, LS_T_LORA_ADVERT_SENT));
+        }
+        break;
+    case UI_MENU_ACT_LORA_DISCOVER:
+        if (!st->settings.lora.enabled) {
+            app_ui_toast(lang_str(l, LS_T_LORA_OFF));
+        } else {
+            lora_widget_send_discover();
+            app_ui_toast(lang_str(l, LS_T_LORA_DISCOVER_SENT));
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 static void build_model(void)
 {
     const app_ui_state_t *st = app_state();
@@ -193,6 +252,13 @@ static void build_model(void)
     m->choices[UI_MI_UNITS] = k_units;
     m->choice_count[UI_MI_UNITS] = 2;
     m->value[UI_MI_UNITS] = set->fahrenheit;
+
+    ui_menu_values_t lv;
+    fill_menu_values(&lv);
+    m->value[UI_MI_LORA_ENABLED] = lv.lora_enabled;
+    static char s_lora_status[UI_MENU_TEXT_LEN];
+    snprintf(s_lora_status, sizeof(s_lora_status), "%s", lv.lora_status);
+    m->info[UI_MI_LORA_STATUS] = s_lora_status;
 
     for (int i = 0; i < LANGUAGE_COUNT; i++) {
         s_language_names[i] = lang_get(k_languages[i])->name;
@@ -344,6 +410,13 @@ static void apply(const ui_menu_intent_t *in)
                      k_languages[in->value < LANGUAGE_COUNT ? in->value : 0]);
             save_settings = true;
             break;
+        case UI_MI_LORA_ENABLED: {
+            ui_menu_values_t v = { .lora_enabled = in->value != 0 };
+            if (apply_save(UI_MENU_SAVE_LORA_ENABLED, &v)) {
+                save_settings = true;
+            }
+            break;
+        }
         default:
             break;
         }
@@ -380,6 +453,14 @@ static void apply(const ui_menu_intent_t *in)
         case UI_MI_SYNC_NOW:
             app_menu_close();
             app_sync_now_toast();
+            return;
+        case UI_MI_LORA_ADVERT:
+            app_menu_close();
+            run_action(UI_MENU_ACT_LORA_ADVERT);
+            return;
+        case UI_MI_LORA_DISCOVER:
+            app_menu_close();
+            run_action(UI_MENU_ACT_LORA_DISCOVER);
             return;
         case UI_MI_REBOOT:
             app_restart(LS_T_REBOOTING, false);

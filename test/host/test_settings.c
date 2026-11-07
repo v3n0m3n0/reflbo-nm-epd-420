@@ -840,6 +840,12 @@ static void test_the_largest_settings_fit_the_file_buffer(void)
     memset(s.pc_preset, 'p', sizeof(s.pc_preset) - 1);
     s.pc_preset[sizeof(s.pc_preset) - 1] = '\0';
     s.pc_interval_ms = 10000;
+    memset(s.lora.node_name, 'n', sizeof(s.lora.node_name) - 1);
+    s.lora.node_name[sizeof(s.lora.node_name) - 1] = '\0';
+    memset(s.lora.channel_name, 'c', sizeof(s.lora.channel_name) - 1);
+    s.lora.channel_name[sizeof(s.lora.channel_name) - 1] = '\0';
+    memset(s.lora.channel_psk, 'k', sizeof(s.lora.channel_psk) - 1);
+    s.lora.channel_psk[sizeof(s.lora.channel_psk) - 1] = '\0';
     size_t n = settings_to_json(&s, NULL, s_json, sizeof(s_json));
     TEST_ASSERT_TRUE(n > 0);
     TEST_ASSERT_TRUE(n < SETTINGS_FILE_MAX * 3 / 4); /* room for keys a later firmware adds */
@@ -852,52 +858,112 @@ static void test_the_lora_defaults_are_the_specs(void)
     settings_lora_defaults(&defaults);
     TEST_ASSERT_TRUE(defaults.lora.enabled);
     TEST_ASSERT_EQUAL_UINT32(868000, defaults.lora.freq_khz);
-    TEST_ASSERT_EQUAL_UINT8(7, defaults.lora.sf);
+    TEST_ASSERT_EQUAL_UINT32(250000, defaults.lora.bw_hz);
     TEST_ASSERT_EQUAL_UINT16(250, defaults.lora.bw_khz);
+    TEST_ASSERT_EQUAL_UINT8(7, defaults.lora.sf);
     TEST_ASSERT_EQUAL_UINT8(5, defaults.lora.cr);
+    TEST_ASSERT_EQUAL_INT8(22, defaults.lora.tx_power_dbm);
     TEST_ASSERT_EQUAL_HEX16(0x1424, defaults.lora.sync_word);
+    TEST_ASSERT_TRUE(defaults.lora.rx_boosted);
+    TEST_ASSERT_FALSE(defaults.lora.cad_enabled);
+    TEST_ASSERT_FALSE(defaults.lora.client_repeat);
+    TEST_ASSERT_EQUAL_UINT8(0, defaults.lora.path_hash_mode);
+    TEST_ASSERT_EQUAL_UINT8(10, defaults.lora.airtime_factor_x10);
     TEST_ASSERT_FALSE(defaults.lora.wake_on_rx);
+    TEST_ASSERT_FALSE(defaults.lora.share_loc);
+    TEST_ASSERT_EQUAL_STRING("NM-EPD-420", defaults.lora.node_name);
+    TEST_ASSERT_EQUAL_STRING("Public", defaults.lora.channel_name);
+    TEST_ASSERT_EQUAL_STRING(LORA_DEFAULT_PUBLIC_PSK, defaults.lora.channel_psk);
 }
 
 static void test_the_lora_settings_parse_clamp_and_round_trip(void)
 {
     /* Out-of-range clamped */
-    const char *bad = "{\"schema\":1,\"lora\":{\"freq_khz\":100000,\"sf\":4,\"bw_khz\":999,\"cr\":10,\"sync_word\":70000}}";
+    const char *bad = "{\"schema\":1,\"lora\":{\"freq_khz\":100000,\"sf\":4,\"bw_khz\":999,\"bw_hz\":999999,"
+                      "\"cr\":10,\"tx_power_dbm\":-20,\"sync_word\":70000,\"path_hash_mode\":10,\"airtime_factor\":-2.0}}";
     TEST_ASSERT_TRUE_MESSAGE(settings_from_json(bad, &s_defaults, &s_out, s_err, sizeof(s_err)), s_err);
     TEST_ASSERT_EQUAL_UINT32(430000, s_out.lora.freq_khz); /* clamped to min 430000 */
-    TEST_ASSERT_EQUAL_UINT8(7, s_out.lora.sf);             /* clamped to min 7 */
-    TEST_ASSERT_EQUAL_UINT16(250, s_out.lora.bw_khz);      /* kept default since 999 is invalid */
+    TEST_ASSERT_EQUAL_UINT8(5, s_out.lora.sf);             /* clamped to min 5 */
+    TEST_ASSERT_EQUAL_UINT32(250000, s_out.lora.bw_hz);   /* kept default since 999/999999 are invalid */
+    TEST_ASSERT_EQUAL_UINT16(250, s_out.lora.bw_khz);
     TEST_ASSERT_EQUAL_UINT8(8, s_out.lora.cr);             /* clamped to max 8 */
+    TEST_ASSERT_EQUAL_INT8(-9, s_out.lora.tx_power_dbm);   /* clamped to min -9 */
     TEST_ASSERT_EQUAL_HEX16(0x1424, s_out.lora.sync_word); /* kept default since > 0xFFFF */
+    TEST_ASSERT_EQUAL_UINT8(2, s_out.lora.path_hash_mode); /* clamped to max 2 */
+    TEST_ASSERT_EQUAL_UINT8(0, s_out.lora.airtime_factor_x10); /* clamped to min 0 */
 
-    /* Valid with string hex sync word */
-    const char *good = "{\"schema\":1,\"lora\":{\"enabled\":false,\"freq_khz\":915000,\"sf\":11,\"bw_khz\":125,\"cr\":7,\"sync_word\":\"0x2B24\",\"wake_on_rx\":true}}";
+    /* Upper clamps */
+    const char *bad_hi = "{\"schema\":1,\"lora\":{\"freq_khz\":999000,\"sf\":15,\"tx_power_dbm\":30,\"airtime_factor\":15.0}}";
+    TEST_ASSERT_TRUE_MESSAGE(settings_from_json(bad_hi, &s_defaults, &s_out, s_err, sizeof(s_err)), s_err);
+    TEST_ASSERT_EQUAL_UINT32(928000, s_out.lora.freq_khz); /* clamped to max 928000 */
+    TEST_ASSERT_EQUAL_UINT8(12, s_out.lora.sf);            /* clamped to max 12 */
+    TEST_ASSERT_EQUAL_INT8(22, s_out.lora.tx_power_dbm);   /* clamped to max 22 */
+    TEST_ASSERT_EQUAL_UINT8(90, s_out.lora.airtime_factor_x10); /* clamped to max 90 */
+
+    /* Valid with narrowband bw_khz: 62.5, sf 5, string hex sync word, booleans, strings */
+    const char *good = "{\"schema\":1,\"lora\":{\"enabled\":false,\"freq_khz\":915000,\"sf\":5,\"bw_khz\":62.5,"
+                       "\"cr\":7,\"tx_power_dbm\":14,\"sync_word\":\"0x2B24\",\"rx_boosted\":false,\"cad_enabled\":true,"
+                       "\"client_repeat\":true,\"path_hash_mode\":1,\"airtime_factor\":2.5,\"wake_on_rx\":true,"
+                       "\"share_loc\":true,\"node_name\":\"MeshNode-1\",\"channel_name\":\"PrivateCh\","
+                       "\"channel_psk\":\"abcdefghijklmnopqrstuv==\"}}";
     TEST_ASSERT_TRUE_MESSAGE(settings_from_json(good, &s_defaults, &s_out, s_err, sizeof(s_err)), s_err);
     TEST_ASSERT_FALSE(s_out.lora.enabled);
     TEST_ASSERT_EQUAL_UINT32(915000, s_out.lora.freq_khz);
-    TEST_ASSERT_EQUAL_UINT8(11, s_out.lora.sf);
-    TEST_ASSERT_EQUAL_UINT16(125, s_out.lora.bw_khz);
+    TEST_ASSERT_EQUAL_UINT8(5, s_out.lora.sf);
+    TEST_ASSERT_EQUAL_UINT32(62500, s_out.lora.bw_hz);
+    TEST_ASSERT_EQUAL_UINT16(62, s_out.lora.bw_khz);
     TEST_ASSERT_EQUAL_UINT8(7, s_out.lora.cr);
+    TEST_ASSERT_EQUAL_INT8(14, s_out.lora.tx_power_dbm);
     TEST_ASSERT_EQUAL_HEX16(0x2B24, s_out.lora.sync_word);
+    TEST_ASSERT_FALSE(s_out.lora.rx_boosted);
+    TEST_ASSERT_TRUE(s_out.lora.cad_enabled);
+    TEST_ASSERT_TRUE(s_out.lora.client_repeat);
+    TEST_ASSERT_EQUAL_UINT8(1, s_out.lora.path_hash_mode);
+    TEST_ASSERT_EQUAL_UINT8(25, s_out.lora.airtime_factor_x10);
     TEST_ASSERT_TRUE(s_out.lora.wake_on_rx);
+    TEST_ASSERT_TRUE(s_out.lora.share_loc);
+    TEST_ASSERT_EQUAL_STRING("MeshNode-1", s_out.lora.node_name);
+    TEST_ASSERT_EQUAL_STRING("PrivateCh", s_out.lora.channel_name);
+    TEST_ASSERT_EQUAL_STRING("abcdefghijklmnopqrstuv==", s_out.lora.channel_psk);
 
     /* Round-trip */
     TEST_ASSERT_TRUE(settings_to_json(&s_out, NULL, s_json, sizeof(s_json)) > 0);
+    TEST_ASSERT_NOT_NULL(strstr(s_json, "\"bw_hz\":\t62500"));
+    TEST_ASSERT_NOT_NULL(strstr(s_json, "\"bw_khz\":\t62.5"));
+    TEST_ASSERT_NOT_NULL(strstr(s_json, "\"airtime_factor\":\t2.5"));
+    TEST_ASSERT_NOT_NULL(strstr(s_json, "\"node_name\":\t\"MeshNode-1\""));
+
     settings_t again;
     TEST_ASSERT_TRUE(settings_from_json(s_json, &s_defaults, &again, s_err, sizeof(s_err)));
     TEST_ASSERT_FALSE(again.lora.enabled);
     TEST_ASSERT_EQUAL_UINT32(915000, again.lora.freq_khz);
-    TEST_ASSERT_EQUAL_UINT8(11, again.lora.sf);
-    TEST_ASSERT_EQUAL_UINT16(125, again.lora.bw_khz);
+    TEST_ASSERT_EQUAL_UINT8(5, again.lora.sf);
+    TEST_ASSERT_EQUAL_UINT32(62500, again.lora.bw_hz);
+    TEST_ASSERT_EQUAL_UINT16(62, again.lora.bw_khz);
     TEST_ASSERT_EQUAL_UINT8(7, again.lora.cr);
+    TEST_ASSERT_EQUAL_INT8(14, again.lora.tx_power_dbm);
     TEST_ASSERT_EQUAL_HEX16(0x2B24, again.lora.sync_word);
+    TEST_ASSERT_FALSE(again.lora.rx_boosted);
+    TEST_ASSERT_TRUE(again.lora.cad_enabled);
+    TEST_ASSERT_TRUE(again.lora.client_repeat);
+    TEST_ASSERT_EQUAL_UINT8(1, again.lora.path_hash_mode);
+    TEST_ASSERT_EQUAL_UINT8(25, again.lora.airtime_factor_x10);
     TEST_ASSERT_TRUE(again.lora.wake_on_rx);
+    TEST_ASSERT_TRUE(again.lora.share_loc);
+    TEST_ASSERT_EQUAL_STRING("MeshNode-1", again.lora.node_name);
+    TEST_ASSERT_EQUAL_STRING("PrivateCh", again.lora.channel_name);
+    TEST_ASSERT_EQUAL_STRING("abcdefghijklmnopqrstuv==", again.lora.channel_psk);
 }
 
 static void test_the_lora_settings_patch_and_partial_updates(void)
 {
-    const char *base = "{\"schema\":1,\"lora\":{\"enabled\":true,\"freq_khz\":868000,\"sf\":7,\"bw_khz\":250,\"cr\":5,\"sync_word\":5156,\"wake_on_rx\":false}}";
-    const char *patch = "{\"lora\":{\"sf\":12,\"freq_khz\":869525,\"wake_on_rx\":true,\"sync_word\":\"2B24\"}}";
+    const char *base = "{\"schema\":1,\"lora\":{\"enabled\":true,\"freq_khz\":868000,\"bw_hz\":250000,\"bw_khz\":250,"
+                       "\"sf\":7,\"cr\":5,\"tx_power_dbm\":22,\"sync_word\":5156,\"rx_boosted\":true,\"cad_enabled\":false,"
+                       "\"client_repeat\":false,\"path_hash_mode\":0,\"airtime_factor\":1.0,\"wake_on_rx\":false,"
+                       "\"share_loc\":false,\"node_name\":\"NM-EPD-420\",\"channel_name\":\"Public\","
+                       "\"channel_psk\":\"" LORA_DEFAULT_PUBLIC_PSK "\"}}";
+    const char *patch = "{\"lora\":{\"sf\":12,\"freq_khz\":869525,\"bw_khz\":62.5,\"tx_power_dbm\":18,"
+                        "\"cad_enabled\":true,\"node_name\":\"PatchedNode\",\"sync_word\":\"2B24\"}}";
     char patched[SETTINGS_FILE_MAX];
     size_t len = settings_patch(base, patch, patched, sizeof(patched), s_err, sizeof(s_err));
     TEST_ASSERT_TRUE_MESSAGE(len > 0, s_err);
@@ -907,10 +973,79 @@ static void test_the_lora_settings_patch_and_partial_updates(void)
     TEST_ASSERT_TRUE(out.lora.enabled); /* unchanged by patch */
     TEST_ASSERT_EQUAL_UINT32(869525, out.lora.freq_khz);
     TEST_ASSERT_EQUAL_UINT8(12, out.lora.sf);
-    TEST_ASSERT_EQUAL_UINT16(250, out.lora.bw_khz); /* unchanged by patch */
+    TEST_ASSERT_EQUAL_UINT32(62500, out.lora.bw_hz); /* updated by bw_khz: 62.5 */
+    TEST_ASSERT_EQUAL_UINT16(62, out.lora.bw_khz);
     TEST_ASSERT_EQUAL_UINT8(5, out.lora.cr);        /* unchanged by patch */
+    TEST_ASSERT_EQUAL_INT8(18, out.lora.tx_power_dbm);
     TEST_ASSERT_EQUAL_HEX16(0x2B24, out.lora.sync_word);
-    TEST_ASSERT_TRUE(out.lora.wake_on_rx);
+    TEST_ASSERT_TRUE(out.lora.rx_boosted);          /* unchanged */
+    TEST_ASSERT_TRUE(out.lora.cad_enabled);         /* patched */
+    TEST_ASSERT_FALSE(out.lora.client_repeat);      /* unchanged */
+    TEST_ASSERT_EQUAL_UINT8(0, out.lora.path_hash_mode); /* unchanged */
+    TEST_ASSERT_EQUAL_UINT8(10, out.lora.airtime_factor_x10); /* unchanged */
+    TEST_ASSERT_FALSE(out.lora.wake_on_rx);         /* unchanged */
+    TEST_ASSERT_FALSE(out.lora.share_loc);          /* unchanged */
+    TEST_ASSERT_EQUAL_STRING("PatchedNode", out.lora.node_name);
+    TEST_ASSERT_EQUAL_STRING("Public", out.lora.channel_name); /* unchanged */
+    TEST_ASSERT_EQUAL_STRING(LORA_DEFAULT_PUBLIC_PSK, out.lora.channel_psk); /* unchanged */
+}
+
+static void test_the_lora_narrowband_and_ranges(void)
+{
+    /* Test all valid bandwidth values via bw_hz */
+    static const uint32_t valid_hz[] = { 7800, 10400, 15600, 20800, 31250, 41700, 62500, 125000, 250000, 500000 };
+    for (size_t i = 0; i < sizeof(valid_hz) / sizeof(valid_hz[0]); i++) {
+        char json[128];
+        snprintf(json, sizeof(json), "{\"schema\":1,\"lora\":{\"bw_hz\":%lu}}", (unsigned long)valid_hz[i]);
+        TEST_ASSERT_TRUE(settings_from_json(json, &s_defaults, &s_out, s_err, sizeof(s_err)));
+        TEST_ASSERT_EQUAL_UINT32(valid_hz[i], s_out.lora.bw_hz);
+        TEST_ASSERT_EQUAL_UINT16((uint16_t)(valid_hz[i] / 1000), s_out.lora.bw_khz);
+    }
+
+    /* Test float bw_khz values */
+    static const struct { double khz; uint32_t expected_hz; uint16_t expected_khz; } khz_tests[] = {
+        { 7.8,   7800,   7 },
+        { 10.4,  10400,  10 },
+        { 15.6,  15600,  15 },
+        { 20.8,  20800,  20 },
+        { 31.25, 31250,  31 },
+        { 41.7,  41700,  41 },
+        { 62.5,  62500,  62 },
+        { 125.0, 125000, 125 },
+        { 250.0, 250000, 250 },
+        { 500.0, 500000, 500 },
+        /* Integer mapping aliases */
+        { 8.0,   7800,   7 },
+        { 10.0,  10400,  10 },
+        { 16.0,  15600,  15 },
+        { 21.0,  20800,  20 },
+        { 31.0,  31250,  31 },
+        { 42.0,  41700,  41 },
+        { 62.0,  62500,  62 },
+    };
+    for (size_t i = 0; i < sizeof(khz_tests) / sizeof(khz_tests[0]); i++) {
+        char json[128];
+        snprintf(json, sizeof(json), "{\"schema\":1,\"lora\":{\"bw_khz\":%.2f}}", khz_tests[i].khz);
+        TEST_ASSERT_TRUE(settings_from_json(json, &s_defaults, &s_out, s_err, sizeof(s_err)));
+        TEST_ASSERT_EQUAL_UINT32(khz_tests[i].expected_hz, s_out.lora.bw_hz);
+        TEST_ASSERT_EQUAL_UINT16(khz_tests[i].expected_khz, s_out.lora.bw_khz);
+    }
+
+    /* Test SF boundary values 5..12 */
+    for (uint8_t sf = 5; sf <= 12; sf++) {
+        char json[128];
+        snprintf(json, sizeof(json), "{\"schema\":1,\"lora\":{\"sf\":%u}}", (unsigned)sf);
+        TEST_ASSERT_TRUE(settings_from_json(json, &s_defaults, &s_out, s_err, sizeof(s_err)));
+        TEST_ASSERT_EQUAL_UINT8(sf, s_out.lora.sf);
+    }
+
+    /* Test tx_power_dbm boundary values -9..22 */
+    for (int pwr = -9; pwr <= 22; pwr++) {
+        char json[128];
+        snprintf(json, sizeof(json), "{\"schema\":1,\"lora\":{\"tx_power_dbm\":%d}}", pwr);
+        TEST_ASSERT_TRUE(settings_from_json(json, &s_defaults, &s_out, s_err, sizeof(s_err)));
+        TEST_ASSERT_EQUAL_INT8((int8_t)pwr, s_out.lora.tx_power_dbm);
+    }
 }
 
 int main(void)
@@ -919,6 +1054,7 @@ int main(void)
     RUN_TEST(test_the_lora_defaults_are_the_specs);
     RUN_TEST(test_the_lora_settings_parse_clamp_and_round_trip);
     RUN_TEST(test_the_lora_settings_patch_and_partial_updates);
+    RUN_TEST(test_the_lora_narrowband_and_ranges);
     RUN_TEST(test_the_spec_sketch_parses);
     RUN_TEST(test_missing_keys_take_the_defaults);
     RUN_TEST(test_bad_values_are_clamped_or_ignored_one_by_one);

@@ -235,6 +235,16 @@ typedef enum {
     LS_M_PC_SESSION,
     LS_PC_NONE,      /* its session's state: none yet, waiting for a sync */
     LS_PC_OFF,       /* PC stats off */
+    /* LoRa mesh widget & menu */
+    LS_M_LORA,
+    LS_M_LORA_RADIO,
+    LS_M_LORA_ADVERT,
+    LS_M_LORA_DISCOVER,
+    LS_M_LORA_STATUS,
+    LS_T_LORA_ON,
+    LS_T_LORA_OFF,
+    LS_T_LORA_ADVERT_SENT,
+    LS_T_LORA_DISCOVER_SENT,
     LS_COUNT,
 } lang_str_t;
 

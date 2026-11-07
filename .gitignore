@@ -1,6 +1,7 @@
 # ESP-IDF build output and generated config
 /build/
 /build-*/
+/build_host/
 sdkconfig
 sdkconfig.old
 /managed_components/

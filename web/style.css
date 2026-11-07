@@ -125,3 +125,59 @@ progress { width: 100%; height: 14px; }
 @media (min-width: 640px) {
   .slots { grid-template-columns: 1fr 1fr; }
 }
+
+/* LoRa & MeshCore styles */
+pre#lora-cli-output {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 12px;
+  max-height: 240px;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.chat-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+  padding: 6px 0;
+}
+.chat-msg {
+  border-left: 3px solid var(--accent);
+  padding: 4px 8px;
+  background: var(--bg);
+  border-radius: 0 6px 6px 0;
+}
+.chat-msg.out {
+  border-left-color: var(--muted);
+  opacity: 0.9;
+}
+.chat-meta {
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+.badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  background: var(--line);
+  color: var(--ink);
+}
+.badge.repeater { background: #2b7de9; color: #fff; }
+.badge.chat { background: #16a34a; color: #fff; }
+.badge.room { background: #9333ea; color: #fff; }
+.badge.sensor { background: #d97706; color: #fff; }
+
