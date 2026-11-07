@@ -871,6 +871,7 @@ static void test_the_lora_defaults_are_the_specs(void)
     TEST_ASSERT_EQUAL_UINT8(10, defaults.lora.airtime_factor_x10);
     TEST_ASSERT_FALSE(defaults.lora.wake_on_rx);
     TEST_ASSERT_FALSE(defaults.lora.share_loc);
+    TEST_ASSERT_EQUAL_UINT32(0, defaults.lora.ble_pin);
     TEST_ASSERT_EQUAL_STRING("NM-EPD-420", defaults.lora.node_name);
     TEST_ASSERT_EQUAL_STRING("Public", defaults.lora.channel_name);
     TEST_ASSERT_EQUAL_STRING(LORA_DEFAULT_PUBLIC_PSK, defaults.lora.channel_psk);
@@ -904,7 +905,7 @@ static void test_the_lora_settings_parse_clamp_and_round_trip(void)
     const char *good = "{\"schema\":1,\"lora\":{\"enabled\":false,\"freq_khz\":915000,\"sf\":5,\"bw_khz\":62.5,"
                        "\"cr\":7,\"tx_power_dbm\":14,\"sync_word\":\"0x2B24\",\"rx_boosted\":false,\"cad_enabled\":true,"
                        "\"client_repeat\":true,\"path_hash_mode\":1,\"airtime_factor\":2.5,\"wake_on_rx\":true,"
-                       "\"share_loc\":true,\"node_name\":\"MeshNode-1\",\"channel_name\":\"PrivateCh\","
+                       "\"share_loc\":true,\"ble_pin\":482915,\"node_name\":\"MeshNode-1\",\"channel_name\":\"PrivateCh\","
                        "\"channel_psk\":\"abcdefghijklmnopqrstuv==\"}}";
     TEST_ASSERT_TRUE_MESSAGE(settings_from_json(good, &s_defaults, &s_out, s_err, sizeof(s_err)), s_err);
     TEST_ASSERT_FALSE(s_out.lora.enabled);
@@ -922,6 +923,7 @@ static void test_the_lora_settings_parse_clamp_and_round_trip(void)
     TEST_ASSERT_EQUAL_UINT8(25, s_out.lora.airtime_factor_x10);
     TEST_ASSERT_TRUE(s_out.lora.wake_on_rx);
     TEST_ASSERT_TRUE(s_out.lora.share_loc);
+    TEST_ASSERT_EQUAL_UINT32(482915, s_out.lora.ble_pin);
     TEST_ASSERT_EQUAL_STRING("MeshNode-1", s_out.lora.node_name);
     TEST_ASSERT_EQUAL_STRING("PrivateCh", s_out.lora.channel_name);
     TEST_ASSERT_EQUAL_STRING("abcdefghijklmnopqrstuv==", s_out.lora.channel_psk);
@@ -931,6 +933,7 @@ static void test_the_lora_settings_parse_clamp_and_round_trip(void)
     TEST_ASSERT_NOT_NULL(strstr(s_json, "\"bw_hz\":\t62500"));
     TEST_ASSERT_NOT_NULL(strstr(s_json, "\"bw_khz\":\t62.5"));
     TEST_ASSERT_NOT_NULL(strstr(s_json, "\"airtime_factor\":\t2.5"));
+    TEST_ASSERT_NOT_NULL(strstr(s_json, "\"ble_pin\":\t482915"));
     TEST_ASSERT_NOT_NULL(strstr(s_json, "\"node_name\":\t\"MeshNode-1\""));
 
     settings_t again;
@@ -950,6 +953,7 @@ static void test_the_lora_settings_parse_clamp_and_round_trip(void)
     TEST_ASSERT_EQUAL_UINT8(25, again.lora.airtime_factor_x10);
     TEST_ASSERT_TRUE(again.lora.wake_on_rx);
     TEST_ASSERT_TRUE(again.lora.share_loc);
+    TEST_ASSERT_EQUAL_UINT32(482915, again.lora.ble_pin);
     TEST_ASSERT_EQUAL_STRING("MeshNode-1", again.lora.node_name);
     TEST_ASSERT_EQUAL_STRING("PrivateCh", again.lora.channel_name);
     TEST_ASSERT_EQUAL_STRING("abcdefghijklmnopqrstuv==", again.lora.channel_psk);
@@ -1048,11 +1052,35 @@ static void test_the_lora_narrowband_and_ranges(void)
     }
 }
 
+static void test_the_lora_ble_pin_validation(void)
+{
+    const char *bad_low = "{\"schema\":1,\"lora\":{\"ble_pin\":12345}}";
+    TEST_ASSERT_FALSE(settings_from_json(bad_low, &s_defaults, &s_out, s_err, sizeof(s_err)));
+    TEST_ASSERT_EQUAL_STRING("lora.ble_pin must be 0 or 100000-999999", s_err);
+
+    const char *bad_high = "{\"schema\":1,\"lora\":{\"ble_pin\":1000000}}";
+    TEST_ASSERT_FALSE(settings_from_json(bad_high, &s_defaults, &s_out, s_err, sizeof(s_err)));
+    TEST_ASSERT_EQUAL_STRING("lora.ble_pin must be 0 or 100000-999999", s_err);
+
+    const char *bad_type = "{\"schema\":1,\"lora\":{\"ble_pin\":\"123456\"}}";
+    TEST_ASSERT_FALSE(settings_from_json(bad_type, &s_defaults, &s_out, s_err, sizeof(s_err)));
+    TEST_ASSERT_EQUAL_STRING("lora.ble_pin must be 0 or 100000-999999", s_err);
+
+    const char *zero_pin = "{\"schema\":1,\"lora\":{\"ble_pin\":0}}";
+    TEST_ASSERT_TRUE(settings_from_json(zero_pin, &s_defaults, &s_out, s_err, sizeof(s_err)));
+    TEST_ASSERT_EQUAL_UINT32(0, s_out.lora.ble_pin);
+
+    const char *ok_pin = "{\"schema\":1,\"lora\":{\"ble_pin\":482915}}";
+    TEST_ASSERT_TRUE(settings_from_json(ok_pin, &s_defaults, &s_out, s_err, sizeof(s_err)));
+    TEST_ASSERT_EQUAL_UINT32(482915, s_out.lora.ble_pin);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_the_lora_defaults_are_the_specs);
     RUN_TEST(test_the_lora_settings_parse_clamp_and_round_trip);
+    RUN_TEST(test_the_lora_ble_pin_validation);
     RUN_TEST(test_the_lora_settings_patch_and_partial_updates);
     RUN_TEST(test_the_lora_narrowband_and_ranges);
     RUN_TEST(test_the_spec_sketch_parses);

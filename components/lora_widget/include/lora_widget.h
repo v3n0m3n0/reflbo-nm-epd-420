@@ -3,7 +3,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#ifdef ESP_PLATFORM
 #include "esp_err.h"
+#else
+typedef int esp_err_t;
+#define ESP_OK 0
+#define ESP_FAIL -1
+#endif
 #include "meshcore_proto.h"
 
 #ifndef _LORA_CONFIG_T_DEFINED
@@ -30,6 +36,7 @@ typedef struct {
     uint8_t airtime_factor_x10; /* 0..90 -> 0.0..9.0 (default 10 = 1.0) */
     bool wake_on_rx;       /* Wake from sleep on DIO1 RX (default false) */
     bool share_loc;        /* Include lat/lon in adverts (default false) */
+    uint32_t ble_pin;      /* 0 = auto-generate, or 100000..999999 */
     char node_name[LORA_NODE_NAME_LEN];       /* default "NM-EPD-420" */
     char channel_name[LORA_CHANNEL_NAME_LEN]; /* default "Public" */
     char channel_psk[LORA_CHANNEL_PSK_LEN];   /* default LORA_DEFAULT_PUBLIC_PSK */
@@ -79,6 +86,10 @@ typedef struct {
     uint8_t advert_count;
     uint8_t neighbor_count;
     uint8_t msg_count;
+
+    /* BLE companion state */
+    uint32_t ble_pin;
+    bool     ble_connected;
 } lora_stats_t;
 
 /* Starts SX1262 in EU868 RX mode and launches background listener task */
@@ -118,3 +129,11 @@ bool lora_widget_get_message(size_t index, meshcore_msg_t *out);
 
 /* Executes a MeshCore CLI command string and formats reply */
 void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_changed, char *reply, size_t reply_sz);
+
+/* Handles a MeshCore Companion binary command and generates response */
+size_t lora_widget_handle_companion_cmd(const uint8_t *cmd, size_t cmd_len,
+                                        lora_config_t *cfg_inout, bool *cfg_changed,
+                                        uint8_t *resp_out, size_t resp_max);
+
+/* Pops an unread pushed frame for companion app tickle/sync */
+bool lora_widget_pop_companion_push(uint8_t *push_out, size_t push_max, size_t *push_len);

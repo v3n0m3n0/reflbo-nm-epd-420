@@ -3,6 +3,8 @@ idf_component_register(
         "lora_widget.c"
         "meshcore_proto.c"
         "meshcore_crypto.c"
+        "meshcore_companion.c"
+        "meshcore_ble.c"
         "ed25519/fe.c"
         "ed25519/ge.c"
         "ed25519/sc.c"
@@ -12,5 +14,5 @@ idf_component_register(
         "ed25519/verify.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "." "ed25519"
-    PRIV_REQUIRES board esp_driver_gpio esp_driver_spi freertos esp_timer esp_hw_support log util
+    PRIV_REQUIRES board esp_driver_gpio esp_driver_spi freertos esp_timer esp_hw_support log util bt
 )

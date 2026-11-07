@@ -711,6 +711,7 @@ static int lora_body(int argc, char **argv)
     printf("lora: %s\n", s.initialized ? "initialized (SX1262 continuous RX)" : "disabled or not populated");
     printf("  enabled: %s\n", s.enabled ? "yes" : "no");
     printf("  node name: %s\n", s.node_name);
+    printf("  BLE PIN: %06lu (%s)\n", (unsigned long)s.ble_pin, s.ble_connected ? "connected" : "advertising");
     printf("  public key: %s\n", s.pub_key_hex[0] != '\0' ? s.pub_key_hex : "(none)");
     if (s.freq_khz > 0) {
         printf("  frequency: %lu.%03lu MHz\n", (unsigned long)(s.freq_khz / 1000), (unsigned long)(s.freq_khz % 1000));

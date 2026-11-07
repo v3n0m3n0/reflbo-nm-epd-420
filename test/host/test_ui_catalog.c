@@ -57,7 +57,7 @@ static void test_layouts_list_their_slots_with_rectangles_sizes_and_kinds(void)
     TEST_ASSERT_EQUAL_INT(400, num(s_root, "width"));
     TEST_ASSERT_EQUAL_INT(300, num(s_root, "height"));
     const cJSON *layouts = cJSON_GetObjectItemCaseSensitive(s_root, "layouts");
-    TEST_ASSERT_EQUAL_INT(10, cJSON_GetArraySize(layouts));
+    TEST_ASSERT_EQUAL_INT(11, cJSON_GetArraySize(layouts));
     const cJSON *pc = by_id(layouts, "pc"); /* M7: four charts and three bars */
     TEST_ASSERT_NOT_NULL(pc);
     TEST_ASSERT_EQUAL_INT(7, cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(pc, "slots")));
@@ -70,6 +70,7 @@ static void test_layouts_list_their_slots_with_rectangles_sizes_and_kinds(void)
     TEST_ASSERT_NOT_NULL(radar);
     TEST_ASSERT_EQUAL_INT(0, cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(radar, "slots")));
     TEST_ASSERT_NOT_NULL(by_id(layouts, "flights"));
+    TEST_ASSERT_NOT_NULL(by_id(layouts, "lora"));
     const cJSON *split = by_id(layouts, "split"); /* M6b: its cells come from each preset's tree */
     TEST_ASSERT_NOT_NULL(split);
     TEST_ASSERT_EQUAL_INT(0, cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(split, "slots")));

@@ -50,8 +50,8 @@ static void test_the_pc_layout_has_four_charts_and_three_bars(void)
 static void test_the_built_in_pc_preset_waits_for_the_first_catalogue(void)
 {
     int i = ui_presets_find(&s_p, "pc");
-    TEST_ASSERT_EQUAL_INT(8, i);
-    TEST_ASSERT_EQUAL_INT(9, s_p.count);
+    TEST_ASSERT_EQUAL_INT(9, i);
+    TEST_ASSERT_EQUAL_INT(10, s_p.count);
     const ui_preset_t *pc = &s_p.presets[i];
     TEST_ASSERT_EQUAL_STRING("PC", pc->name);
     TEST_ASSERT_EQUAL(UI_LAYOUT_PC, pc->layout);
@@ -112,13 +112,13 @@ static void test_the_owners_pc_preset_is_left_as_it_is(void)
     ui_presets_defaults(&s_p);
     s_p.presets[ui_presets_find(&s_p, "pc")].layout = UI_LAYOUT_GRID; /* a preset of its own with that id */
     TEST_ASSERT_FALSE(ui_presets_fill_pc(&s_p, &s_cat));
-    s_p.count = 8; /* deleted */
+    s_p.count = 9; /* deleted */
     TEST_ASSERT_FALSE(ui_presets_fill_pc(&s_p, &s_cat));
 }
 
 static void test_a_file_from_m6d_gains_the_pc_preset_once(void)
 {
-    static const char k_m6d[] = "{\"schema\":1,\"active\":\"home\",\"offered\":[\"rain\",\"flights\",\"solar\","
+    static const char k_m6d[] = "{\"schema\":1,\"active\":\"home\",\"offered\":[\"rain\",\"flights\",\"lora\",\"solar\","
                                 "\"energy\"],\"presets\":[{\"id\":\"home\",\"layout\":\"classic\"}]}";
     TEST_ASSERT_TRUE_MESSAGE(ui_presets_from_json(k_m6d, &s_p, s_err, sizeof(s_err)), s_err);
     TEST_ASSERT_TRUE(ui_presets_offer_builtins(&s_p));
@@ -126,7 +126,7 @@ static void test_a_file_from_m6d_gains_the_pc_preset_once(void)
     TEST_ASSERT_EQUAL_INT(1, ui_presets_find(&s_p, "pc"));
     TEST_ASSERT_FALSE(ui_presets_offer_builtins(&s_p));
     ui_presets_to_json(&s_p, s_json, sizeof(s_json));
-    TEST_ASSERT_NOT_NULL(strstr(s_json, "\"offered\":[\"rain\",\"flights\",\"solar\",\"energy\",\"pc\"]"));
+    TEST_ASSERT_NOT_NULL(strstr(s_json, "\"offered\":[\"rain\",\"flights\",\"solar\",\"energy\",\"pc\",\"lora\"]"));
 }
 
 static void test_the_charted_fields_are_the_historys_series(void)

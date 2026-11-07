@@ -54,6 +54,7 @@ typedef enum {
     UI_MI_LORA,        /* section on root menu */
     UI_MI_LORA_ENABLED, /* toggle: LoRa radio */
     UI_MI_LORA_ADVERT,  /* action: Send advert */
+    UI_MI_LORA_PIN,     /* action: Companion PIN preview */
     UI_MI_LORA_DISCOVER, /* action: Find repeaters */
     UI_MI_LORA_STATUS,  /* info: status string */
     UI_MI_INFO,
@@ -147,13 +148,18 @@ typedef enum {
 typedef enum {
     UI_MENU_ACT_NONE = 0,
     UI_MENU_ACT_LORA_ADVERT,
+    UI_MENU_ACT_LORA_PIN,
     UI_MENU_ACT_LORA_DISCOVER,
 } ui_menu_action_t;
 
 typedef struct {
     bool lora_enabled;
+    uint32_t ble_pin;
+    bool ble_connected;
     char lora_status[UI_MENU_TEXT_LEN];
 } ui_menu_values_t;
+
+typedef ui_menu_values_t ui_menu_lora_t;
 
 void step_value(ui_menu_item_t item, ui_menu_values_t *v);
 void format_value(ui_menu_item_t item, const ui_menu_values_t *v, const lang_t *lang, char *out, size_t size);

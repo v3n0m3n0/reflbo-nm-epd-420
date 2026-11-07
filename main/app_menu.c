@@ -134,6 +134,8 @@ static void fill_menu_values(ui_menu_values_t *v)
     const lang_t *l = lang();
     v->lora_enabled = st->settings.lora.enabled;
     lora_stats_t ls = lora_widget_get_stats();
+    v->ble_pin = ls.ble_pin;
+    v->ble_connected = ls.ble_connected;
     if (!ls.enabled) {
         snprintf(v->lora_status, sizeof(v->lora_status), "%s", lang_str(l, LS_OFF));
     } else if (!ls.initialized) {
@@ -173,6 +175,15 @@ static void run_action(ui_menu_action_t act)
             app_ui_toast(lang_str(l, LS_T_LORA_ADVERT_SENT));
         }
         break;
+    case UI_MENU_ACT_LORA_PIN: {
+        lora_stats_t st_lora = lora_widget_get_stats();
+        char toast[64];
+        snprintf(toast, sizeof(toast), "BLE: MeshCore-%s \xC2\xB7 PIN %06lu",
+                 st_lora.node_name[0] ? st_lora.node_name : "NM-EPD-420",
+                 (unsigned long)st_lora.ble_pin);
+        app_ui_toast(toast);
+        break;
+    }
     case UI_MENU_ACT_LORA_DISCOVER:
         if (!st->settings.lora.enabled) {
             app_ui_toast(lang_str(l, LS_T_LORA_OFF));
@@ -256,6 +267,9 @@ static void build_model(void)
     ui_menu_values_t lv;
     fill_menu_values(&lv);
     m->value[UI_MI_LORA_ENABLED] = lv.lora_enabled;
+    static char s_lora_pin[UI_MENU_TEXT_LEN];
+    format_value(UI_MI_LORA_PIN, &lv, l, s_lora_pin, sizeof(s_lora_pin));
+    m->info[UI_MI_LORA_PIN] = s_lora_pin;
     static char s_lora_status[UI_MENU_TEXT_LEN];
     snprintf(s_lora_status, sizeof(s_lora_status), "%s", lv.lora_status);
     m->info[UI_MI_LORA_STATUS] = s_lora_status;
@@ -414,6 +428,7 @@ static void apply(const ui_menu_intent_t *in)
             ui_menu_values_t v = { .lora_enabled = in->value != 0 };
             if (apply_save(UI_MENU_SAVE_LORA_ENABLED, &v)) {
                 save_settings = true;
+                apply_settings = true;
             }
             break;
         }
@@ -457,6 +472,10 @@ static void apply(const ui_menu_intent_t *in)
         case UI_MI_LORA_ADVERT:
             app_menu_close();
             run_action(UI_MENU_ACT_LORA_ADVERT);
+            return;
+        case UI_MI_LORA_PIN:
+            app_menu_close();
+            run_action(UI_MENU_ACT_LORA_PIN);
             return;
         case UI_MI_LORA_DISCOVER:
             app_menu_close();

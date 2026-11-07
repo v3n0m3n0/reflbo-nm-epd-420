@@ -15,6 +15,7 @@
 #include "storage.h"
 #include "timekeeping.h"
 #include "ui_dashboard.h"
+#include "ui_lora.h"
 #include "ui_screens.h"
 #include "util_base64.h"
 #include "util_snapshot.h"
@@ -33,6 +34,9 @@ EXT_RAM_BSS_ATTR static char s_settings_base[SETTINGS_FILE_MAX]; /* settings.jso
 static char s_err[UI_PRESET_ERR_LEN];
 static char s_toast[64];
 static int64_t s_toast_until_ms;
+static ui_lora_t s_lora_ui;
+static uint32_t s_last_lora_pkt_count;
+static uint32_t s_last_lora_sent_count;
 
 #define LEARN_PATH "/fs/state/battery_learn.txt" /* the battery learning session in base64 (D21) */
 #define FORECAST_PATH "/fs/state/datastore.bin"    /* the last weather and air quality (spec §6) */
@@ -212,6 +216,9 @@ void app_ui_apply_settings(void)
     }
     lora_widget_set_location(s.settings.lat_e4, s.settings.lon_e4);
     lora_widget_apply(&s.settings.lora);
+    if (!s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
+        app_ui_select(ui_presets_next_with_lora(&s_presets, s.settings.sync_mode == SETTINGS_SYNC_ALWAYS, false), false);
+    }
     if (s.cold_boot_at == 0 && timekeeping_valid()) {
         s.cold_boot_at = time(NULL); /* Info > Uptime counts from the first valid clock after a cold boot */
     }
@@ -247,6 +254,80 @@ void app_ui_context(ui_context_t *ctx)
     ctx->pc = app_pc_ui();
     ctx->history = app_pc_history();
     ctx->now_ms = (uint32_t)app_uptime_ms();
+
+    lora_stats_t st = lora_widget_get_stats();
+    memset(&s_lora_ui, 0, sizeof(s_lora_ui));
+    s_lora_ui.enabled = st.enabled;
+    s_lora_ui.initialized = st.initialized;
+    s_lora_ui.ble_connected = st.ble_connected;
+    s_lora_ui.ble_pin = st.ble_pin;
+    s_lora_ui.freq_khz = st.freq_khz;
+    s_lora_ui.bw_hz = st.bw_hz;
+    s_lora_ui.sf = st.sf;
+    s_lora_ui.cr = st.cr;
+    s_lora_ui.tx_power_dbm = st.tx_power_dbm;
+    snprintf(s_lora_ui.node_name, sizeof(s_lora_ui.node_name), "%.*s",
+             (int)(sizeof(s_lora_ui.node_name) - 1), st.node_name);
+    snprintf(s_lora_ui.channel_name, sizeof(s_lora_ui.channel_name), "%.*s",
+             (int)(sizeof(s_lora_ui.channel_name) - 1), st.channel_name);
+    s_lora_ui.packet_count = st.packet_count;
+    s_lora_ui.packets_sent = st.packets_sent;
+    s_lora_ui.sent_flood = st.sent_flood;
+    s_lora_ui.last_rssi_dbm = st.last_rssi_dbm;
+    s_lora_ui.last_snr_q4 = st.last_snr_q4;
+    s_lora_ui.noise_floor_dbm = st.noise_floor_dbm;
+
+    s_lora_ui.msg_count = 0;
+    for (size_t i = 0; i < UI_LORA_MAX_MSGS; i++) {
+        meshcore_msg_t msg;
+        if (!lora_widget_get_message(i, &msg)) {
+            break;
+        }
+        ui_lora_msg_t *dst = &s_lora_ui.msgs[s_lora_ui.msg_count++];
+        dst->timestamp = msg.timestamp;
+        snprintf(dst->text, sizeof(dst->text), "%.*s",
+                 (int)(sizeof(dst->text) - 1), msg.text);
+        dst->snr_q4 = msg.snr_q4;
+        dst->hop_count = msg.hops;
+        dst->outgoing = msg.outgoing;
+        dst->is_direct = false;
+        dst->sender[0] = '\0';
+    }
+
+    s_lora_ui.node_count = 0;
+    for (size_t i = 0; i < UI_LORA_MAX_NODES; i++) {
+        meshcore_advert_t adv;
+        if (!lora_widget_get_advert(i, &adv)) {
+            break;
+        }
+        ui_lora_node_t *dst = &s_lora_ui.nodes[s_lora_ui.node_count++];
+        snprintf(dst->name, sizeof(dst->name), "%.*s",
+                 (int)(sizeof(dst->name) - 1), adv.name);
+        memcpy(dst->pub_key_prefix, adv.pub_key, 4);
+        dst->node_type = adv.node_type;
+        dst->last_rssi_dbm = adv.rssi_dbm;
+        dst->last_snr_q4 = adv.snr_q4;
+        dst->hops = adv.hops;
+        dst->last_seen = adv.rx_time_s ? adv.rx_time_s : adv.timestamp;
+    }
+    if (s_lora_ui.node_count == 0) {
+        for (size_t i = 0; i < UI_LORA_MAX_NODES; i++) {
+            meshcore_neighbor_t nbr;
+            if (!lora_widget_get_neighbor(i, &nbr)) {
+                break;
+            }
+            ui_lora_node_t *dst = &s_lora_ui.nodes[s_lora_ui.node_count++];
+            snprintf(dst->name, sizeof(dst->name), "%.*s",
+                     (int)(sizeof(dst->name) - 1), nbr.name);
+            memcpy(dst->pub_key_prefix, nbr.pub_key_prefix, 4);
+            dst->node_type = nbr.node_type;
+            dst->last_rssi_dbm = nbr.rssi_dbm;
+            dst->last_snr_q4 = nbr.snr_out_q4;
+            dst->hops = 0;
+            dst->last_seen = nbr.rx_time_s;
+        }
+    }
+    ctx->lora = &s_lora_ui;
 }
 
 void app_ui_render(void)
@@ -397,6 +478,7 @@ void app_ui_save_forecast(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "forecast not saved: %s", esp_err_to_name(err));
     }
+    app_seal_snapshot();
 }
 
 void app_ui_restore_forecast(void)
@@ -508,7 +590,9 @@ esp_err_t app_ui_save_presets(void)
     if (err == ESP_OK) {
         err = storage_write_atomic(STORAGE_PRESETS_PATH, s_file, n);
     }
-    if (err != ESP_OK) {
+    if (err == ESP_OK) {
+        app_seal_snapshot();
+    } else {
         ESP_LOGE(TAG, "saving presets: %s", esp_err_to_name(err));
     }
     return err;
@@ -545,6 +629,7 @@ esp_err_t app_ui_save_settings(void)
     err = storage_write_atomic(STORAGE_SETTINGS_PATH, out, n);
     if (err == ESP_OK) {
         memcpy(s_settings_base, out, n + 1); /* the next save builds on what is now in the file */
+        app_seal_snapshot();
     } else {
         ESP_LOGE(TAG, "saving settings: %s", esp_err_to_name(err));
     }
@@ -672,14 +757,25 @@ void app_ui_tick(bool force)
     }
     if (s_presets.cycle_enabled && now >= s.cycle_at) {
         time_t at = timekeeping_valid() ? now : 0; /* without a valid clock every window is open (spec §5.4) */
-        app_ui_select(ui_presets_cycle_next(&s_presets, s.settings.sync_mode == SETTINGS_SYNC_ALWAYS, at,
-                                            s.settings.lat_e4, s.settings.lon_e4),
+        app_ui_select(ui_presets_cycle_next_with_lora(&s_presets, s.settings.sync_mode == SETTINGS_SYNC_ALWAYS,
+                                                      s.settings.lora.enabled, at,
+                                                      s.settings.lat_e4, s.settings.lon_e4),
                       false); /* renders; not saved, the cycle will move on */
+        app_seal_snapshot();
         return;
+    }
+    if (s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
+        lora_stats_t st = lora_widget_get_stats();
+        if (st.packet_count != s_last_lora_pkt_count || st.packets_sent != s_last_lora_sent_count) {
+            s_last_lora_pkt_count = st.packet_count;
+            s_last_lora_sent_count = st.packets_sent;
+            render = true;
+        }
     }
     if (render) {
         app_ui_render();
     }
+    app_seal_snapshot();
 }
 
 sched_wake_t app_ui_next_wake(time_t now)

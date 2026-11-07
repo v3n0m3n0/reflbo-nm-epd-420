@@ -297,6 +297,8 @@ static void get_status(uint8_t *out, size_t size, webui_reply_t *reply)
     cJSON *lora = cJSON_AddObjectToObject(o, "lora");
     cJSON_AddBoolToObject(lora, "enabled", ls.enabled);
     cJSON_AddBoolToObject(lora, "initialized", ls.initialized);
+    cJSON_AddNumberToObject(lora, "ble_pin", ls.ble_pin);
+    cJSON_AddBoolToObject(lora, "ble_connected", ls.ble_connected);
     cJSON_AddStringToObject(lora, "node_name", ls.node_name);
     cJSON_AddStringToObject(lora, "pub_key", ls.pub_key_hex);
     cJSON_AddNumberToObject(lora, "freq_khz", ls.freq_khz);

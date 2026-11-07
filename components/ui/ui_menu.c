@@ -71,6 +71,7 @@ static const node_t k_nodes[UI_MI_COUNT] = {
     [UI_MI_LORA] = { .label = LS_M_LORA, .kind = K_SECTION, .parent = UI_MI_ROOT },
     [UI_MI_LORA_ENABLED] = { .label = LS_M_LORA_RADIO, .kind = K_TOGGLE, .parent = UI_MI_LORA },
     [UI_MI_LORA_ADVERT] = { .label = LS_M_LORA_ADVERT, .kind = K_ACTION, .parent = UI_MI_LORA },
+    [UI_MI_LORA_PIN] = { .label = LS_LORA_PIN, .kind = K_ACTION, .parent = UI_MI_LORA },
     [UI_MI_LORA_DISCOVER] = { .label = LS_M_LORA_DISCOVER, .kind = K_ACTION, .parent = UI_MI_LORA },
     [UI_MI_LORA_STATUS] = { .label = LS_M_LORA_STATUS, .kind = K_INFO, .parent = UI_MI_LORA },
     [UI_MI_INFO] = { .label = LS_M_INFO, .kind = K_SECTION, .parent = UI_MI_ROOT },
@@ -155,6 +156,7 @@ void ui_menu_value_text(ui_menu_item_t item, int32_t value, const ui_menu_model_
         snprintf(out, size, "%s%s %s", signed_offset && value > 0 ? "+" : "", num, n->unit);
         break;
     }
+    case K_ACTION:
     case K_INFO:
         snprintf(out, size, "%s", model->info[item] != NULL ? model->info[item] : "");
         break;
@@ -364,6 +366,16 @@ void format_value(ui_menu_item_t item, const ui_menu_values_t *v, const lang_t *
     }
     if (item == UI_MI_LORA_ENABLED) {
         snprintf(out, size, "%s", lang_str(lang, v->lora_enabled ? LS_ON : LS_OFF));
+    } else if (item == UI_MI_LORA_PIN) {
+        if (v->ble_pin > 0) {
+            if (v->lora_enabled && v->ble_connected) {
+                snprintf(out, size, "%06lu \xC2\xB7 BLE", (unsigned long)v->ble_pin);
+            } else {
+                snprintf(out, size, "%06lu", (unsigned long)v->ble_pin);
+            }
+        } else {
+            snprintf(out, size, "\xE2\x80\x94");
+        }
     } else if (item == UI_MI_LORA_STATUS) {
         snprintf(out, size, "%s", v->lora_status);
     }

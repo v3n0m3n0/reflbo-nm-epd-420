@@ -55,6 +55,7 @@ static const ui_layout_t k_layouts[UI_LAYOUT_COUNT] = {
     [UI_LAYOUT_SOLAR] = { "solar", NULL, 0 },
     [UI_LAYOUT_ENERGY] = { "energy", NULL, 0 },
     [UI_LAYOUT_PC] = { "pc", k_pc, sizeof(k_pc) / sizeof(k_pc[0]) },
+    [UI_LAYOUT_LORA] = { "lora", NULL, 0 },
 };
 
 const ui_layout_t *ui_layout(ui_layout_id_t id)

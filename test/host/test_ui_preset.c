@@ -23,9 +23,9 @@ void setUp(void)
 
 void tearDown(void) {}
 
-static void test_defaults_are_the_nine_built_ins(void)
+static void test_defaults_are_the_ten_built_ins(void)
 {
-    TEST_ASSERT_EQUAL_INT(9, s_p.count);
+    TEST_ASSERT_EQUAL_INT(10, s_p.count);
     TEST_ASSERT_EQUAL_STRING("home", s_p.presets[s_p.active].id);
     TEST_ASSERT_EQUAL(UI_LAYOUT_CLASSIC, s_p.presets[0].layout);
     TEST_ASSERT_EQUAL(UI_FIELD_TIME_CLOCK, s_p.presets[0].slots[0]);
@@ -38,20 +38,43 @@ static void test_defaults_are_the_nine_built_ins(void)
     TEST_ASSERT_EQUAL_INT(5, ui_presets_find(&s_p, "flights"));
     TEST_ASSERT_EQUAL(UI_LAYOUT_FLIGHTS, s_p.presets[5].layout);
     TEST_ASSERT_TRUE(s_p.presets[5].in_cycle);
-    TEST_ASSERT_TRUE(s_p.presets[4].status_clock && s_p.presets[5].status_clock); /* a map fills the screen */
-    TEST_ASSERT_EQUAL_INT(6, ui_presets_find(&s_p, "solar")); /* M6d (D35, D36) */
-    TEST_ASSERT_EQUAL(UI_LAYOUT_SOLAR, s_p.presets[6].layout);
-    TEST_ASSERT_EQUAL_STRING("Solar", s_p.presets[6].name);
-    TEST_ASSERT_EQUAL_INT(7, ui_presets_find(&s_p, "energy"));
-    TEST_ASSERT_EQUAL(UI_LAYOUT_ENERGY, s_p.presets[7].layout);
-    TEST_ASSERT_EQUAL_STRING("Energy", s_p.presets[7].name);
-    TEST_ASSERT_FALSE(s_p.presets[6].in_cycle || s_p.presets[7].in_cycle); /* outside the cycle */
-    TEST_ASSERT_TRUE(s_p.presets[6].status_clock && s_p.presets[7].status_clock);
-    TEST_ASSERT_EQUAL_INT(8, ui_presets_find(&s_p, "pc")); /* M7 (D44), outside the cycle */
-    TEST_ASSERT_EQUAL(UI_LAYOUT_PC, s_p.presets[8].layout);
-    TEST_ASSERT_FALSE(s_p.presets[8].in_cycle);
+    TEST_ASSERT_EQUAL_INT(6, ui_presets_find(&s_p, "lora"));
+    TEST_ASSERT_EQUAL(UI_LAYOUT_LORA, s_p.presets[6].layout);
+    TEST_ASSERT_EQUAL_STRING("LoRa", s_p.presets[6].name);
+    TEST_ASSERT_TRUE(s_p.presets[6].in_cycle);
+    TEST_ASSERT_TRUE(s_p.presets[4].status_clock && s_p.presets[5].status_clock && s_p.presets[6].status_clock);
+    TEST_ASSERT_EQUAL_INT(7, ui_presets_find(&s_p, "solar")); /* M6d (D35, D36) */
+    TEST_ASSERT_EQUAL(UI_LAYOUT_SOLAR, s_p.presets[7].layout);
+    TEST_ASSERT_EQUAL_STRING("Solar", s_p.presets[7].name);
+    TEST_ASSERT_EQUAL_INT(8, ui_presets_find(&s_p, "energy"));
+    TEST_ASSERT_EQUAL(UI_LAYOUT_ENERGY, s_p.presets[8].layout);
+    TEST_ASSERT_EQUAL_STRING("Energy", s_p.presets[8].name);
+    TEST_ASSERT_FALSE(s_p.presets[7].in_cycle || s_p.presets[8].in_cycle); /* outside the cycle */
+    TEST_ASSERT_TRUE(s_p.presets[7].status_clock && s_p.presets[8].status_clock);
+    TEST_ASSERT_EQUAL_INT(9, ui_presets_find(&s_p, "pc")); /* M7 (D44), outside the cycle */
+    TEST_ASSERT_EQUAL(UI_LAYOUT_PC, s_p.presets[9].layout);
+    TEST_ASSERT_FALSE(s_p.presets[9].in_cycle);
     TEST_ASSERT_EQUAL_UINT8(UI_OFFERED_ALL, s_p.offered); /* nothing left to add */
     TEST_ASSERT_EQUAL_INT(-1, ui_presets_find(&s_p, "nope"));
+}
+
+static void test_the_cycle_visits_lora_only_when_lora_is_on(void)
+{
+    s_p.active = 5; /* flights */
+    /* When always is true:
+     * - with lora_on = false: skips lora (6), wraps to home (0)
+     * - with lora_on = true: advances to lora (6) */
+    TEST_ASSERT_EQUAL_INT(0, ui_presets_next_with_lora(&s_p, true, false));
+    TEST_ASSERT_EQUAL_INT(6, ui_presets_next_with_lora(&s_p, true, true));
+
+    /* From lora (6): solar, energy, pc are not in cycle, so next wraps to home (0) */
+    s_p.active = 6;
+    TEST_ASSERT_EQUAL_INT(0, ui_presets_next_with_lora(&s_p, true, true));
+    TEST_ASSERT_EQUAL_INT(0, ui_presets_next_with_lora(&s_p, true, false));
+
+    /* Standard ui_presets_next has lora_on = false */
+    s_p.active = 5;
+    TEST_ASSERT_EQUAL_INT(0, ui_presets_next(&s_p, true));
 }
 
 static void test_next_follows_cycle_order_and_skips_presets_out_of_it(void)
@@ -222,17 +245,18 @@ static void test_a_file_from_before_m6_gains_the_radars_once(void)
     TEST_ASSERT_TRUE_MESSAGE(ui_presets_from_json(k_m5_file, &s_p, s_err, sizeof(s_err)), s_err);
     TEST_ASSERT_EQUAL_UINT8(0, s_p.offered);
     TEST_ASSERT_TRUE(ui_presets_offer_builtins(&s_p)); /* changed: save it */
-    TEST_ASSERT_EQUAL_INT(9, s_p.count); /* M7's PC too */
+    TEST_ASSERT_EQUAL_INT(10, s_p.count); /* M7's PC and LoRa too */
     TEST_ASSERT_EQUAL_INT(4, ui_presets_find(&s_p, "rain"));
     TEST_ASSERT_EQUAL_INT(5, ui_presets_find(&s_p, "flights"));
-    TEST_ASSERT_EQUAL_INT(6, ui_presets_find(&s_p, "solar")); /* and M6d's */
+    TEST_ASSERT_EQUAL_INT(6, ui_presets_find(&s_p, "lora"));
+    TEST_ASSERT_EQUAL_INT(7, ui_presets_find(&s_p, "solar")); /* and M6d's */
     TEST_ASSERT_EQUAL_STRING("weather", s_p.presets[s_p.active].id); /* the active one stays */
     TEST_ASSERT_FALSE(ui_presets_offer_builtins(&s_p));
 
     TEST_ASSERT_TRUE(ui_presets_to_json(&s_p, s_json, sizeof(s_json)) > 0);
-    TEST_ASSERT_NOT_NULL(strstr(s_json, "\"offered\":[\"rain\",\"flights\",\"solar\",\"energy\",\"pc\"]"));
-    memmove(&s_p.presets[5], &s_p.presets[6], 3 * sizeof(s_p.presets[0])); /* the owner deletes Flights */
-    s_p.count = 8;
+    TEST_ASSERT_NOT_NULL(strstr(s_json, "\"offered\":[\"rain\",\"flights\",\"solar\",\"energy\",\"pc\",\"lora\"]"));
+    memmove(&s_p.presets[5], &s_p.presets[6], 4 * sizeof(s_p.presets[0])); /* the owner deletes Flights */
+    s_p.count = 9;
     TEST_ASSERT_TRUE(ui_presets_to_json(&s_p, s_json, sizeof(s_json)) > 0);
     TEST_ASSERT_TRUE_MESSAGE(ui_presets_from_json(s_json, &s_p, s_err, sizeof(s_err)), s_err);
     TEST_ASSERT_FALSE(ui_presets_offer_builtins(&s_p)); /* and it stays deleted */
@@ -250,20 +274,22 @@ static void test_a_file_from_m6c_gains_solar_and_energy_once(void)
     TEST_ASSERT_TRUE_MESSAGE(ui_presets_from_json(k_m6c_file, &s_p, s_err, sizeof(s_err)), s_err);
     TEST_ASSERT_EQUAL_UINT8(UI_OFFERED_RAIN | UI_OFFERED_FLIGHTS, s_p.offered);
     TEST_ASSERT_TRUE(ui_presets_offer_builtins(&s_p));
-    TEST_ASSERT_EQUAL_INT(6, s_p.count); /* Flights was deleted under M6c: it stays deleted; M7's PC joins */
+    TEST_ASSERT_EQUAL_INT(7, s_p.count); /* Flights was deleted under M6c: it stays deleted; LoRa, Solar, Energy, PC join */
     TEST_ASSERT_EQUAL_INT(-1, ui_presets_find(&s_p, "flights"));
-    TEST_ASSERT_EQUAL_INT(3, ui_presets_find(&s_p, "solar"));
-    TEST_ASSERT_EQUAL_INT(4, ui_presets_find(&s_p, "energy"));
-    TEST_ASSERT_FALSE(s_p.presets[3].in_cycle || s_p.presets[4].in_cycle);
+    TEST_ASSERT_EQUAL_INT(3, ui_presets_find(&s_p, "lora"));
+    TEST_ASSERT_EQUAL_INT(4, ui_presets_find(&s_p, "solar"));
+    TEST_ASSERT_EQUAL_INT(5, ui_presets_find(&s_p, "energy"));
+    TEST_ASSERT_EQUAL_INT(6, ui_presets_find(&s_p, "pc"));
+    TEST_ASSERT_FALSE(s_p.presets[4].in_cycle || s_p.presets[5].in_cycle);
     TEST_ASSERT_EQUAL_STRING("weather", s_p.presets[s_p.active].id);
     TEST_ASSERT_FALSE(ui_presets_offer_builtins(&s_p));
-    s_p.presets[4] = s_p.presets[5]; /* the owner deletes Energy */
-    s_p.count = 5;
+    s_p.presets[5] = s_p.presets[6]; /* the owner deletes Energy */
+    s_p.count = 6;
     TEST_ASSERT_TRUE(ui_presets_to_json(&s_p, s_json, sizeof(s_json)) > 0);
     TEST_ASSERT_TRUE_MESSAGE(ui_presets_from_json(s_json, &s_p, s_err, sizeof(s_err)), s_err);
     TEST_ASSERT_FALSE(ui_presets_offer_builtins(&s_p)); /* and it stays deleted */
     TEST_ASSERT_EQUAL_INT(-1, ui_presets_find(&s_p, "energy"));
-    TEST_ASSERT_EQUAL_INT(4, ui_presets_find(&s_p, "pc"));
+    TEST_ASSERT_EQUAL_INT(5, ui_presets_find(&s_p, "pc"));
 }
 
 static void test_the_radars_need_room_and_a_free_id(void)
@@ -282,10 +308,11 @@ static void test_the_radars_need_room_and_a_free_id(void)
     s_p.presets[0].layout = UI_LAYOUT_GRID;
     s_p.count = 1;
     TEST_ASSERT_TRUE(ui_presets_offer_builtins(&s_p));
-    TEST_ASSERT_EQUAL_INT(5, s_p.count); /* Flights, Solar, Energy and PC */
+    TEST_ASSERT_EQUAL_INT(6, s_p.count); /* Flights, LoRa, Solar, Energy and PC */
     TEST_ASSERT_EQUAL(UI_LAYOUT_GRID, s_p.presets[0].layout);
     TEST_ASSERT_EQUAL_STRING("flights", s_p.presets[1].id);
-    TEST_ASSERT_EQUAL_STRING("energy", s_p.presets[3].id);
+    TEST_ASSERT_EQUAL_STRING("lora", s_p.presets[2].id);
+    TEST_ASSERT_EQUAL_STRING("energy", s_p.presets[4].id);
 }
 
 static void test_the_solar_layouts_have_no_slots(void)
@@ -973,9 +1000,10 @@ static void test_defaults_have_no_titles(void)
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_defaults_are_the_nine_built_ins);
+    RUN_TEST(test_defaults_are_the_ten_built_ins);
     RUN_TEST(test_next_follows_cycle_order_and_skips_presets_out_of_it);
     RUN_TEST(test_the_cycle_visits_flights_only_in_sync_mode_always);
+    RUN_TEST(test_the_cycle_visits_lora_only_when_lora_is_on);
     RUN_TEST(test_the_auto_cycle_skips_a_closed_window);
     RUN_TEST(test_the_auto_cycle_keeps_the_preset_when_none_is_open);
     RUN_TEST(test_the_built_in_solar_preset_has_a_daylight_window);

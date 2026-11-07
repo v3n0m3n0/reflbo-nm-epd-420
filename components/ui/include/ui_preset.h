@@ -110,8 +110,9 @@ enum {
     UI_OFFERED_SOLAR = 1u << 2,   /* "solar": Solar (M6d) */
     UI_OFFERED_ENERGY = 1u << 3,  /* "energy": Energy (M6d) */
     UI_OFFERED_PC = 1u << 4,      /* "pc": PC (M7) */
+    UI_OFFERED_LORA = 1u << 5,    /* "lora": LoRa (MeshCore) */
 };
-#define UI_OFFERED_ALL (UI_OFFERED_RAIN | UI_OFFERED_FLIGHTS | UI_OFFERED_SOLAR | UI_OFFERED_ENERGY | UI_OFFERED_PC)
+#define UI_OFFERED_ALL (UI_OFFERED_RAIN | UI_OFFERED_FLIGHTS | UI_OFFERED_SOLAR | UI_OFFERED_ENERGY | UI_OFFERED_PC | UI_OFFERED_LORA)
 
 /* A slot's visual (spec §5.4, M7): its preset, its slot (or cell) and how it shows. */
 typedef struct {
@@ -156,10 +157,14 @@ int ui_presets_find(const ui_presets_t *p, const char *id); /* index, or -1 */
  * preset is in the cycle (spec §5.4, KEY short). Presets on the Flights layout are in it only in
  * sync mode `always` (D28). */
 int ui_presets_next(const ui_presets_t *p, bool always);
+/* LoRa-aware preset cycling: skips UI_LAYOUT_LORA when lora_on is false */
+int ui_presets_next_with_lora(const ui_presets_t *p, bool always, bool lora_on);
 /* The auto-cycle's next preset (spec §5.4, D41): as ui_presets_next(), skipping presets whose cycle window is
  * closed at `now` at the location (1e-4 degrees); the active one when no other is open. `now` 0, the clock not
  * set: every window counts as open. */
 int ui_presets_cycle_next(const ui_presets_t *p, bool always, time_t now, int32_t lat_e4, int32_t lon_e4);
+int ui_presets_cycle_next_with_lora(const ui_presets_t *p, bool always, bool lora_on,
+                                    time_t now, int32_t lat_e4, int32_t lon_e4);
 /* Offers the built-ins `offered` doesn't name yet: each joins at the end if its id is free and
  * there is room, and is marked offered either way. True if anything changed: save the file. */
 bool ui_presets_offer_builtins(ui_presets_t *p);

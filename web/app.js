@@ -1083,7 +1083,9 @@ async function loraPage() {
   const lora = s.lora || {};
 
   /* Card 1: Now (Live status, telemetry & quick controls) */
-  const summary = h('div');
+  const summary = h('div', { id: 'lora-live-status' });
+  summary.id = 'lora-live-status';
+  summary.setAttribute('id', 'lora-live-status');
   const nowNote = h('p');
   const showNow = (status) => {
     const l = (status && status.lora) || {};
@@ -1107,8 +1109,21 @@ async function loraPage() {
       }, 'small')
     ) : '—';
 
+    const bleState = !l.enabled
+      ? 'Off'
+      : l.ble_connected
+        ? 'Connected'
+        : 'Advertising';
+    const blePinStr = l.ble_pin ? String(l.ble_pin).padStart(6, '0') : '—';
+    const bleBadge = h('span', { class: 'ble-status' },
+      h('span', { class: l.ble_connected ? 'good' : 'muted' }, bleState),
+      ` (MeshCore-${l.node_name || 'NM-EPD-420'}) · PIN: `,
+      h('code', { class: 'badge' }, blePinStr)
+    );
+
     summary.replaceChildren(facts([
       ['State', loraState(l)],
+      ['Companion BLE', bleBadge],
       ['Node', l.node_name || '—'],
       ['Public key', pubKeyKid],
       ['Noise floor', l.noise_floor_dbm !== undefined ? `${l.noise_floor_dbm} dBm` : '—'],
@@ -1297,6 +1312,29 @@ async function loraPage() {
   enabled.name = 'enabled';
   const nodeName = h('input', { type: 'text', name: 'node_name', maxLength: '31', value: lora.node_name || 'NM-EPD-420' });
   nodeName.name = 'node_name';
+
+  const blePinVal = lora.ble_pin ? String(lora.ble_pin).padStart(6, '0') : '';
+  const blePin = h('input', {
+    type: 'text',
+    id: 'f-lora-ble-pin',
+    name: 'ble_pin',
+    maxLength: '6',
+    placeholder: 'Auto (000000)',
+    value: blePinVal,
+  });
+  blePin.id = 'f-lora-ble-pin';
+  blePin.setAttribute('id', 'f-lora-ble-pin');
+  blePin.name = 'ble_pin';
+
+  const genPinBtn = button('Generate PIN', () => {
+    const randomPin = Math.floor(100000 + Math.random() * 900000);
+    blePin.value = String(randomPin);
+  }, 'small');
+  genPinBtn.id = 'btn-lora-gen-pin';
+  genPinBtn.setAttribute('id', 'btn-lora-gen-pin');
+
+  const blePinRow = h('div', { class: 'inline' }, blePin, ' ', genPinBtn);
+
   const shareLoc = h('input', { type: 'checkbox', name: 'share_loc', checked: !!lora.share_loc });
   shareLoc.name = 'share_loc';
   const channelName = h('input', { type: 'text', name: 'channel_name', maxLength: '23', value: lora.channel_name || 'Public' });
@@ -1364,6 +1402,7 @@ async function loraPage() {
     presetActions,
     h('label', { class: 'check' }, enabled, 'Enabled'),
     field('Node name', nodeName, 'Up to 31 characters.'),
+    field('BLE Companion PIN', blePinRow, '6-digit PIN (100000–999999) for companion app pairing. Leave blank or 0 for auto-generated PIN.'),
     h('label', { class: 'check' }, shareLoc, 'Share location in adverts'),
     field('Channel name', channelName, 'Up to 23 characters.'),
     field('Channel PSK (Base64)', channelPsk, 'AES-128 key in Base64 (default: Public channel).'),
@@ -1396,9 +1435,19 @@ async function loraPage() {
       const afX10 = Math.round(afNum * 10);
       const txPwr = Number(txPower.value);
 
+      let pinNum = 0;
+      const pinStr = (blePin.value || '').trim();
+      if (pinStr !== '' && pinStr !== '0') {
+        pinNum = Number(pinStr);
+        if (isNaN(pinNum) || pinNum < 100000 || pinNum > 999999) {
+          throw new ApiError('BLE PIN must be 0 (auto) or a 6-digit number between 100000 and 999999.');
+        }
+      }
+
       await api('PATCH', '/api/settings', {
         lora: {
           enabled: enabled.checked,
+          ble_pin: pinNum,
           freq_khz: Math.round(f * 1000),
           sf: Number(sf.value),
           bw_khz: bwKhzNum,
@@ -1618,11 +1667,12 @@ async function devicePage() {
 /* ---- Presets (spec §5.4) ---- */
 
 const LAYOUT_NAMES = { classic: 'Classic', weather: 'Weather', grid: 'Grid', focus: 'Focus', radar: 'Radar',
-                       flights: 'Flights', split: 'Split', solar: 'Solar', energy: 'Energy' };
+                       flights: 'Flights', split: 'Split', solar: 'Solar', energy: 'Energy', lora: 'LoRa' };
 const NO_SLOTS = { radar: 'This layout draws the weather radar: its centre and zoom are on the Radar page.',
                    flights: 'This layout draws the flight radar: its centre, range and filters are on the Radar page.',
                    solar: 'This layout draws today\'s PV forecast: its source is on the Solar page.',
-                   energy: 'This layout draws the house\'s energy now: its source is on the Solar page.' };
+                   energy: 'This layout draws the house\'s energy now: its source is on the Solar page.',
+                   lora: 'This layout draws the LoRa MeshCore dashboard: nodes, signal and companion status.' };
 /* The sync step a field's data come from (spec §9.3, D35): a field whose step is off ages out. */
 const fieldStep = (id) => (/^(wx\.)/.test(id) ? 'weather' : /^(aq|pollen)\./.test(id) ? 'air' : id === 'rain.map' ? 'radar'
   : id.startsWith('pv.') ? 'solar' : id.startsWith('energy.') ? 'energy' : id.startsWith('pc.') ? 'pc' : null);

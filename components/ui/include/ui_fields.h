@@ -143,6 +143,7 @@ typedef struct ui_radar ui_radar_t; /* ui_radar.h */
 typedef struct ui_solar ui_solar_t; /* ui_solar.h */
 typedef struct ui_pc ui_pc_t;       /* ui_pc.h */
 typedef struct ui_history ui_history_t; /* ui_history.h */
+typedef struct ui_lora ui_lora_t;   /* ui_lora.h */
 
 /* Everything the dashboard reads, gathered by the app for one render. */
 typedef struct {
@@ -165,6 +166,7 @@ typedef struct {
     const ui_pc_t *pc;       /* M7: the PC's catalogue and last readings; NULL for none */
     const char (*pc_ids)[PC_ID_LEN]; /* the rendered presets' PC reading ids (ui_presets_t.pc_ids); NULL: none */
     const ui_history_t *history;     /* M7: the charts' history; NULL for none */
+    const ui_lora_t *lora;           /* LoRa view; NULL for none */
     uint32_t now_ms;                 /* the history's clock now */
 } ui_context_t;
 

@@ -365,25 +365,27 @@ static void test_the_sync_steps_switch_on_and_off(void)
     TEST_ASSERT_EQUAL_INT(UI_MI_SYNC_STEPS, ui_menu_current(&s_m, &s_model)); /* back where it was */
 }
 
-/* LoRa section: radio toggle, advert action, discover action, and status info */
+/* LoRa section: radio toggle, advert action, PIN action, discover action, and status info */
 static void test_the_lora_section_offers_radio_advert_discover_and_status(void)
 {
     open_item(UI_MI_LORA);
     ui_menu_item_t items[UI_MI_COUNT];
-    const ui_menu_item_t expected[] = { UI_MI_LORA_ENABLED, UI_MI_LORA_ADVERT, UI_MI_LORA_DISCOVER, UI_MI_LORA_STATUS };
-    TEST_ASSERT_EQUAL_INT(4, ui_menu_visible(&s_m, &s_model, items, UI_MI_COUNT));
-    TEST_ASSERT_EQUAL_INT_ARRAY(expected, items, 4);
+    const ui_menu_item_t expected[] = { UI_MI_LORA_ENABLED, UI_MI_LORA_ADVERT, UI_MI_LORA_PIN, UI_MI_LORA_DISCOVER, UI_MI_LORA_STATUS };
+    TEST_ASSERT_EQUAL_INT(5, ui_menu_visible(&s_m, &s_model, items, UI_MI_COUNT));
+    TEST_ASSERT_EQUAL_INT_ARRAY(expected, items, 5);
 
     const lang_t *en = lang_get("en"), *cs = lang_get("cs");
     TEST_ASSERT_EQUAL_STRING("LoRa", ui_menu_label(UI_MI_LORA, en));
     TEST_ASSERT_EQUAL_STRING("LoRa radio", ui_menu_label(UI_MI_LORA_ENABLED, en));
     TEST_ASSERT_EQUAL_STRING("Send advert", ui_menu_label(UI_MI_LORA_ADVERT, en));
+    TEST_ASSERT_EQUAL_STRING("Companion PIN", ui_menu_label(UI_MI_LORA_PIN, en));
     TEST_ASSERT_EQUAL_STRING("Find repeaters", ui_menu_label(UI_MI_LORA_DISCOVER, en));
     TEST_ASSERT_EQUAL_STRING("Status", ui_menu_label(UI_MI_LORA_STATUS, en));
 
     TEST_ASSERT_EQUAL_STRING("LoRa", ui_menu_label(UI_MI_LORA, cs));
     TEST_ASSERT_EQUAL_STRING("Rádio LoRa", ui_menu_label(UI_MI_LORA_ENABLED, cs));
     TEST_ASSERT_EQUAL_STRING("Odeslat maják", ui_menu_label(UI_MI_LORA_ADVERT, cs));
+    TEST_ASSERT_EQUAL_STRING("PIN Companion", ui_menu_label(UI_MI_LORA_PIN, cs));
     TEST_ASSERT_EQUAL_STRING("Hledat převaděče", ui_menu_label(UI_MI_LORA_DISCOVER, cs));
     TEST_ASSERT_EQUAL_STRING("Stav", ui_menu_label(UI_MI_LORA_STATUS, cs));
 
@@ -395,7 +397,7 @@ static void test_the_lora_section_offers_radio_advert_discover_and_status(void)
     TEST_ASSERT_EQUAL_INT(1, in.value);
 
     /* Test helper step_value / format_value */
-    ui_menu_values_t v = { .lora_enabled = false, .lora_status = "868.00M RX:10 TX:2" };
+    ui_menu_values_t v = { .lora_enabled = false, .ble_pin = 482915, .ble_connected = false, .lora_status = "868.00M RX:10 TX:2" };
     step_value(UI_MI_LORA_ENABLED, &v);
     TEST_ASSERT_TRUE(v.lora_enabled);
     char text[32];
@@ -404,10 +406,25 @@ static void test_the_lora_section_offers_radio_advert_discover_and_status(void)
     format_value(UI_MI_LORA_STATUS, &v, en, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING("868.00M RX:10 TX:2", text);
 
+    /* Format PIN */
+    format_value(UI_MI_LORA_PIN, &v, en, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("482915", text);
+    v.ble_connected = true;
+    format_value(UI_MI_LORA_PIN, &v, en, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("482915 \xC2\xB7 BLE", text);
+    v.ble_pin = 0;
+    format_value(UI_MI_LORA_PIN, &v, en, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("\xE2\x80\x94", text);
+
     /* Trigger UI_MI_LORA_ADVERT */
     in = open_item(UI_MI_LORA_ADVERT);
     TEST_ASSERT_EQUAL(UI_MENU_ACTION, in.kind);
     TEST_ASSERT_EQUAL_INT(UI_MI_LORA_ADVERT, in.item);
+
+    /* Trigger UI_MI_LORA_PIN */
+    in = open_item(UI_MI_LORA_PIN);
+    TEST_ASSERT_EQUAL(UI_MENU_ACTION, in.kind);
+    TEST_ASSERT_EQUAL_INT(UI_MI_LORA_PIN, in.item);
 
     /* Trigger UI_MI_LORA_DISCOVER */
     in = open_item(UI_MI_LORA_DISCOVER);

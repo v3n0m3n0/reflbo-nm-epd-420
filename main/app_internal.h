@@ -83,6 +83,7 @@ ui_presets_t *app_presets(void);
 /* The presets through deep sleep, apart from app_ui_state_t: RTC slow memory can't hold them as they grow. */
 void app_ui_export_presets(ui_presets_t *out);
 void app_ui_import_presets(const ui_presets_t *in);
+void app_seal_snapshot(void);
 
 /* Applies the settings that live outside the app: time zone, sensor offsets, freshness, panel rate. */
 void app_ui_apply_settings(void);

@@ -2,6 +2,7 @@
 
 #include "gfx_fonts.h"
 #include "ui_history.h"
+#include "ui_lora.h"
 #include "ui_pc.h"
 #include "ui_internal.h"
 #include "ui_radar.h"
@@ -204,6 +205,8 @@ void ui_draw_dashboard(gfx_fb_t *fb, const ui_context_t *ctx, const ui_preset_t 
         any_stale = ui_draw_solar_layout(fb, below, &c);
     } else if (preset->layout == UI_LAYOUT_ENERGY) {
         any_stale = ui_draw_energy_layout(fb, below, &c);
+    } else if (preset->layout == UI_LAYOUT_LORA) {
+        ui_draw_lora_view(fb, below, &c);
     } else if (layout != NULL) {
         bool asleep = preset->layout == UI_LAYOUT_PC && (c.pc == NULL || !c.pc->session);
         if (asleep) {

@@ -245,6 +245,11 @@ typedef enum {
     LS_T_LORA_OFF,
     LS_T_LORA_ADVERT_SENT,
     LS_T_LORA_DISCOVER_SENT,
+    LS_LORA_PIN,
+    LS_LORA_MESSAGES,
+    LS_LORA_NODES,
+    LS_LORA_NO_MESSAGES,
+    LS_LORA_NO_NODES,
     LS_COUNT,
 } lang_str_t;
 

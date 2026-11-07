@@ -41,7 +41,7 @@
 #include "util_snapshot.h"
 #include "util_ticks.h"
 
-#define APP_STACK         8192 /* internal RAM: deep-sleep entry requires it */
+#define APP_STACK         12288 /* internal RAM: deep-sleep entry requires it */
 #define APP_PRIORITY      5
 #define APP_CORE          1
 #define QUEUE_DEPTH       16
@@ -104,7 +104,7 @@ typedef struct {
 } app_snapshot_t;
 _Static_assert(sizeof(app_snapshot_t) <= 7168, "the RTC-RAM snapshot is at most 7 KB (spec §6, M6c, D42)");
 
-static RTC_DATA_ATTR app_snapshot_t s_snap;
+static RTC_NOINIT_ATTR app_snapshot_t s_snap;
 
 /* The presets, with their titles and from M7 the PC ids and the visuals, in RTC FAST memory, which deep sleep keeps
  * powered as it holds heap too (CONFIG_ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP): RTC slow memory had 330 bytes
@@ -321,7 +321,8 @@ static void handle_button(board_button_t button, gesture_t gesture)
             }
         }
     } else if (button == BOARD_BUTTON_KEY && gesture == GESTURE_SHORT) {
-        app_ui_select(ui_presets_next(app_presets(), app_state()->settings.sync_mode == SETTINGS_SYNC_ALWAYS), true);
+        app_ui_select(ui_presets_next_with_lora(app_presets(), app_state()->settings.sync_mode == SETTINGS_SYNC_ALWAYS,
+                                                app_state()->settings.lora.enabled), true);
         snprintf(text, sizeof(text), "%s: %s", lang_str(lang, LS_T_PRESET), preset_name());
         app_ui_toast(text);
     } else if (button == BOARD_BUTTON_KEY && gesture == GESTURE_DOUBLE) {
@@ -337,6 +338,11 @@ static void handle_button(board_button_t button, gesture_t gesture)
             ESP_LOGI(TAG, "BOOT short: a sync for a fresh frame"); /* D30: no hour to play */
             app_sync_now_toast();
         }
+    } else if (button == BOARD_BUTTON_BOOT && gesture == GESTURE_SHORT &&
+               app_presets()->presets[app_presets()->active].layout == UI_LAYOUT_LORA &&
+               app_state()->settings.lora.enabled) {
+        lora_widget_send_advert(true);
+        app_ui_toast(lang_str(lang, LS_T_LORA_ADVERT_SENT));
     } else if (button == BOARD_BUTTON_BOOT && gesture == GESTURE_SHORT) {
         app_ui_sample(time(NULL));
         app_ui_render();
@@ -449,9 +455,7 @@ static void handle_wake(power_wake_t wake)
     ignore_held_buttons();
 }
 
-/* Seals the RTC-RAM snapshot and holds the panel pins; false if the holds failed, in which case
- * the chip must not deep-sleep (the panel would reset). */
-static bool prepare_deep_sleep(void)
+static void seal_snapshot(void)
 {
     sensors_export(&s_snap.sensors);
     display_export(&s_snap.display);
@@ -460,6 +464,18 @@ static bool prepare_deep_sleep(void)
     s_snap.next_alarm = s_next_alarm;
     util_snapshot_seal(&s_snap, sizeof(s_snap), SNAP_MAGIC, SNAP_VERSION);
     util_snapshot_seal(&s_presets_snap, sizeof(s_presets_snap), PRESETS_MAGIC, PRESETS_VERSION);
+}
+
+void app_seal_snapshot(void)
+{
+    seal_snapshot();
+}
+
+/* Seals the RTC-RAM snapshot and holds the panel pins; false if the holds failed, in which case
+ * the chip must not deep-sleep (the panel would reset). */
+static bool prepare_deep_sleep(void)
+{
+    seal_snapshot();
     esp_err_t err = display_prepare_deep_sleep();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "panel pins: %s; light sleep this time", esp_err_to_name(err));
@@ -594,8 +610,9 @@ static esp_err_t boot(void)
         resume_config_set(false);
     }
     ESP_RETURN_ON_ERROR(err, TAG, "power");
-    bool warm = wake != POWER_WAKE_COLD && util_snapshot_valid(&s_snap, sizeof(s_snap), SNAP_MAGIC, SNAP_VERSION) &&
-                util_snapshot_valid(&s_presets_snap, sizeof(s_presets_snap), PRESETS_MAGIC, PRESETS_VERSION);
+    bool snap_ok = util_snapshot_valid(&s_snap, sizeof(s_snap), SNAP_MAGIC, SNAP_VERSION) &&
+                   util_snapshot_valid(&s_presets_snap, sizeof(s_presets_snap), PRESETS_MAGIC, PRESETS_VERSION);
+    bool warm = wake != POWER_WAKE_COLD && snap_ok;
     if (warm) {
         app_ui_import(&s_snap.ui); /* routine wakes skip storage: everything is in RTC RAM */
         app_ui_import_presets(&s_presets_snap.presets);
@@ -605,6 +622,15 @@ static esp_err_t boot(void)
         app_ui_load();
         app_ui_restore_forecast(); /* spec §6: shown as stale by its age */
         app_solar_restore();       /* spec §11.5, §11.6: the forecast and today's readings */
+        if (wake == POWER_WAKE_COLD && snap_ok) {
+            app_ui_state_t *st = app_state();
+            st->ds = s_snap.ui.ds;
+            st->cold_boot_at = s_snap.ui.cold_boot_at;
+            st->done_slot = s_snap.ui.done_slot;
+            if (s_snap.ui.sync.ok_at != 0) {
+                st->sync = s_snap.ui.sync;
+            }
+        }
     }
     app_pc_init(); /* M7: the cached catalogue (a cold boot's), the charts' history from nothing */
     if (s_alive) { /* a cold boot came alive before its presets loaded: their charts' history now */

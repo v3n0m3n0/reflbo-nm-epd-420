@@ -333,6 +333,7 @@ void settings_lora_defaults(settings_t *out)
     out->lora.airtime_factor_x10 = 10;
     out->lora.wake_on_rx = false;
     out->lora.share_loc = false;
+    out->lora.ble_pin = 0;
     memset(out->lora.node_name, 0, sizeof(out->lora.node_name));
     snprintf(out->lora.node_name, sizeof(out->lora.node_name), "%s", "NM-EPD-420");
     memset(out->lora.channel_name, 0, sizeof(out->lora.channel_name));
@@ -410,10 +411,10 @@ static long lora_bw_khz_to_hz(double khz)
     }
 }
 
-static void read_lora(const cJSON *lora, settings_t *out)
+static bool read_lora(const cJSON *lora, settings_t *out, char *err, size_t err_size)
 {
     if (!cJSON_IsObject(lora)) {
-        return;
+        return true;
     }
     read_bool(lora, "enabled", &out->lora.enabled);
     out->lora.freq_khz = (uint32_t)read_scaled(lora, "freq_khz", out->lora.freq_khz, 1, 430000, 928000);
@@ -489,6 +490,22 @@ static void read_lora(const cJSON *lora, settings_t *out)
     read_string(lora, "node_name", out->lora.node_name, sizeof(out->lora.node_name));
     read_string(lora, "channel_name", out->lora.channel_name, sizeof(out->lora.channel_name));
     read_string(lora, "channel_psk", out->lora.channel_psk, sizeof(out->lora.channel_psk));
+
+    const cJSON *bp = child(lora, "ble_pin");
+    if (bp != NULL) {
+        if (!cJSON_IsNumber(bp)) {
+            return fail(err, err_size, "lora.ble_pin must be 0 or 100000-999999");
+        }
+        double val = bp->valuedouble;
+        if (val == 0.0) {
+            out->lora.ble_pin = 0;
+        } else if (val >= 100000.0 && val <= 999999.0 && val == (double)(uint32_t)val) {
+            out->lora.ble_pin = (uint32_t)val;
+        } else {
+            return fail(err, err_size, "lora.ble_pin must be 0 or 100000-999999");
+        }
+    }
+    return true;
 }
 
 const char *settings_step_name(settings_step_t step)
@@ -623,7 +640,10 @@ bool settings_from_json(const char *json, const settings_t *defaults, settings_t
     }
     read_solar(child(root, "solar"), child(root, "energy"), out);
     read_pc(child(root, "pc"), out);
-    read_lora(child(root, "lora"), out);
+    if (!read_lora(child(root, "lora"), out, err, err_size)) {
+        cJSON_Delete(root);
+        return false;
+    }
     cJSON_Delete(root);
     return true;
 }
@@ -793,6 +813,7 @@ size_t settings_to_json(const settings_t *s, const char *base_json, char *out, s
     put(lora, "node_name", cJSON_CreateString(s->lora.node_name));
     put(lora, "channel_name", cJSON_CreateString(s->lora.channel_name));
     put(lora, "channel_psk", cJSON_CreateString(s->lora.channel_psk));
+    put(lora, "ble_pin", cJSON_CreateNumber(s->lora.ble_pin));
     bool ok = size > 0 && cJSON_PrintPreallocated(root, out, (int)size, true);
     cJSON_Delete(root);
     return ok ? strlen(out) : 0;

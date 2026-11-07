@@ -1,4 +1,5 @@
 #include "meshcore_proto.h"
+#include "meshcore_companion.h"
 #include "unity.h"
 #include <string.h>
 
@@ -271,6 +272,605 @@ void test_lora_airtime_calculation(void)
     TEST_ASSERT_EQUAL_UINT32(0, meshcore_calc_airtime_ms(62500, 13, 5, 32, 100));
 }
 
+static uint32_t s_mock_time = 1700000000;
+static uint32_t mock_get_time(void) { return s_mock_time; }
+static void mock_set_time(uint32_t t) { s_mock_time = t; }
+static void mock_exec_cli(const char *cmd, char *reply, size_t reply_sz) {
+    snprintf(reply, reply_sz, "MOCK:%s", cmd);
+}
+
+static char s_last_sent_channel_txt[128] = {0};
+static uint8_t s_last_sent_channel_idx = 0;
+static bool mock_send_channel_txt(uint8_t channel_idx, const char *text) {
+    s_last_sent_channel_idx = channel_idx;
+    strncpy(s_last_sent_channel_txt, text, sizeof(s_last_sent_channel_txt) - 1);
+    s_last_sent_channel_txt[sizeof(s_last_sent_channel_txt) - 1] = '\0';
+    return true;
+}
+
+#define MOCK_FRAMES_MAX 8
+static uint8_t s_cb_frames[MOCK_FRAMES_MAX][COMPANION_CONTACT_FRAME_SIZE];
+static size_t s_cb_frame_lens[MOCK_FRAMES_MAX];
+static size_t s_cb_frame_count = 0;
+static void mock_send_frame_cb(const uint8_t *frame, size_t len, void *user_data) {
+    (void)user_data;
+    if (s_cb_frame_count < MOCK_FRAMES_MAX) {
+        size_t cpy = len > COMPANION_CONTACT_FRAME_SIZE ? COMPANION_CONTACT_FRAME_SIZE : len;
+        memcpy(s_cb_frames[s_cb_frame_count], frame, cpy);
+        s_cb_frame_lens[s_cb_frame_count] = len;
+        s_cb_frame_count++;
+    }
+}
+
+void test_companion_app_start(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+
+    lora_config_t cfg = {
+        .enabled = true,
+        .freq_khz = 869618,
+        .bw_hz = 62500,
+        .bw_khz = 62,
+        .sf = 8,
+        .cr = 5,
+        .tx_power_dbm = 22,
+        .sync_word = 0x1424,
+        .node_name = "CompanionNode"
+    };
+
+    companion_env_t env = {
+        .lat_e6 = 50061400,
+        .lon_e6 = 19936600,
+        .batt_mv = 4120,
+        .storage_used_kb = 128,
+        .storage_total_kb = 2048,
+        .get_time_s = mock_get_time,
+        .set_time_s = mock_set_time,
+    };
+    for (int i = 0; i < 32; i++) env.pub_key[i] = (uint8_t)(i + 1);
+
+    uint8_t cmd[] = { CMD_APP_START };
+    uint8_t resp[128];
+    bool changed = false;
+    size_t resp_len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, sizeof(cmd), resp, sizeof(resp));
+
+    TEST_ASSERT_TRUE(resp_len >= 58 + strlen("CompanionNode"));
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_SELF_INFO, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(1, resp[1]); /* ADV_TYPE_CHAT */
+    TEST_ASSERT_EQUAL_UINT8(22, resp[2]); /* tx_power_dbm */
+    TEST_ASSERT_EQUAL_UINT8(22, resp[3]); /* MAX_LORA_TX_POWER */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(env.pub_key, &resp[4], 32);
+
+    int32_t lat, lon;
+    memcpy(&lat, &resp[36], 4);
+    memcpy(&lon, &resp[40], 4);
+    TEST_ASSERT_EQUAL_INT32(50061400, lat);
+    TEST_ASSERT_EQUAL_INT32(19936600, lon);
+
+    uint32_t freq, bw;
+    memcpy(&freq, &resp[48], 4);
+    memcpy(&bw, &resp[52], 4);
+    TEST_ASSERT_EQUAL_UINT32(869618, freq);
+    TEST_ASSERT_EQUAL_UINT32(62500, bw);
+    TEST_ASSERT_EQUAL_UINT8(8, resp[56]); /* sf */
+    TEST_ASSERT_EQUAL_UINT8(5, resp[57]); /* cr */
+    TEST_ASSERT_EQUAL_STRING_LEN("CompanionNode", (char *)&resp[58], strlen("CompanionNode"));
+}
+
+void test_companion_device_query(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+
+    lora_config_t cfg = {
+        .ble_pin = 482915,
+        .client_repeat = true,
+        .path_hash_mode = 1
+    };
+    companion_env_t env = {0};
+
+    uint8_t cmd[] = { CMD_DEVICE_QUERY };
+    uint8_t resp[128];
+    bool changed = false;
+    size_t resp_len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, sizeof(cmd), resp, sizeof(resp));
+
+    TEST_ASSERT_EQUAL_INT(82, (int)resp_len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_DEVICE_INFO, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(10, resp[1]); /* COMPANION_FIRMWARE_VER_CODE */
+    TEST_ASSERT_EQUAL_UINT8(16, resp[2]); /* max_contacts / 2 */
+    TEST_ASSERT_EQUAL_UINT8(8, resp[3]);  /* max_channels */
+
+    uint32_t pin;
+    memcpy(&pin, &resp[4], 4);
+    TEST_ASSERT_EQUAL_UINT32(482915, pin);
+
+    TEST_ASSERT_EQUAL_STRING("7 Nov 2026", (char *)&resp[8]);
+    TEST_ASSERT_EQUAL_STRING("RockBase NM-EPD-420", (char *)&resp[20]);
+    TEST_ASSERT_EQUAL_STRING("v1.18.0-mod-rev0.2", (char *)&resp[60]);
+    TEST_ASSERT_EQUAL_UINT8(1, resp[80]); /* client_repeat */
+    TEST_ASSERT_EQUAL_UINT8(1, resp[81]); /* path_hash_mode */
+}
+
+void test_companion_channel_management(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+    lora_config_t cfg = {0};
+    companion_env_t env = {0};
+    uint8_t resp[128];
+    bool changed = false;
+
+    /* Get slot 0 (Public) */
+    uint8_t get_ch0[] = { CMD_GET_CHANNEL, 0 };
+    size_t len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, get_ch0, sizeof(get_ch0), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(50, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_CHANNEL_INFO, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, resp[1]);
+    TEST_ASSERT_EQUAL_STRING("Public", (char *)&resp[2]);
+
+    /* Set slot 1 (Custom channel) */
+    uint8_t set_ch1[2 + 32 + 16] = {0};
+    set_ch1[0] = CMD_SET_CHANNEL;
+    set_ch1[1] = 1;
+    strncpy((char *)&set_ch1[2], "EmergencyNet", 31);
+    for (int i = 0; i < 16; i++) set_ch1[34 + i] = (uint8_t)(0xAA + i);
+
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, set_ch1, sizeof(set_ch1), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+
+    /* Get slot 1 */
+    uint8_t get_ch1[] = { CMD_GET_CHANNEL, 1 };
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, get_ch1, sizeof(get_ch1), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(50, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_CHANNEL_INFO, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(1, resp[1]);
+    TEST_ASSERT_EQUAL_STRING("EmergencyNet", (char *)&resp[2]);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(&set_ch1[34], &resp[34], 16);
+
+    /* Get invalid slot 8 */
+    uint8_t get_ch8[] = { CMD_GET_CHANNEL, 8 };
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, get_ch8, sizeof(get_ch8), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(2, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_ERR, resp[0]);
+}
+
+void test_companion_radio_params_and_tx_power(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+    lora_config_t cfg = { .freq_khz = 868000, .bw_hz = 250000, .sf = 7, .cr = 5, .tx_power_dbm = 22 };
+    companion_env_t env = {0};
+    uint8_t resp[64];
+    bool changed = false;
+
+    /* SET_RADIO_PARAMS: freq=869400, bw=62500, sf=8, cr=6, client_repeat=1 */
+    uint8_t set_radio[12];
+    set_radio[0] = CMD_SET_RADIO_PARAMS;
+    uint32_t f = 869400, bw = 62500;
+    memcpy(&set_radio[1], &f, 4);
+    memcpy(&set_radio[5], &bw, 4);
+    set_radio[9] = 8;
+    set_radio[10] = 6;
+    set_radio[11] = 1;
+
+    size_t len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, set_radio, sizeof(set_radio), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_TRUE(changed);
+    TEST_ASSERT_EQUAL_UINT32(869400, cfg.freq_khz);
+    TEST_ASSERT_EQUAL_UINT32(62500, cfg.bw_hz);
+    TEST_ASSERT_EQUAL_UINT16(62, cfg.bw_khz);
+    TEST_ASSERT_EQUAL_UINT8(8, cfg.sf);
+    TEST_ASSERT_EQUAL_UINT8(6, cfg.cr);
+    TEST_ASSERT_TRUE(cfg.client_repeat);
+
+    /* SET_RADIO_TX_POWER: 14 dBm */
+    changed = false;
+    uint8_t set_pwr[] = { CMD_SET_RADIO_TX_POWER, 14 };
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, set_pwr, sizeof(set_pwr), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_TRUE(changed);
+    TEST_ASSERT_EQUAL_INT8(14, cfg.tx_power_dbm);
+
+    /* Invalid power: 30 dBm */
+    uint8_t bad_pwr[] = { CMD_SET_RADIO_TX_POWER, 30 };
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, bad_pwr, sizeof(bad_pwr), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(2, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_ERR, resp[0]);
+}
+
+void test_companion_device_pin(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+    lora_config_t cfg = { .ble_pin = 0 };
+    companion_env_t env = {0};
+    uint8_t resp[64];
+    bool changed = false;
+
+    /* Valid PIN 482915 */
+    uint8_t set_pin[5] = { CMD_SET_DEVICE_PIN };
+    uint32_t pin = 482915;
+    memcpy(&set_pin[1], &pin, 4);
+
+    size_t len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, set_pin, sizeof(set_pin), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_TRUE(changed);
+    TEST_ASSERT_EQUAL_UINT32(482915, cfg.ble_pin);
+
+    /* Invalid PIN 12345 */
+    changed = false;
+    pin = 12345;
+    memcpy(&set_pin[1], &pin, 4);
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, set_pin, sizeof(set_pin), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(2, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_ERR, resp[0]);
+    TEST_ASSERT_FALSE(changed);
+    TEST_ASSERT_EQUAL_UINT32(482915, cfg.ble_pin);
+}
+
+void test_companion_contacts_crud(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+    lora_config_t cfg = {0};
+    companion_env_t env = {0};
+    uint8_t resp[256];
+    bool changed = false;
+
+    uint8_t add_cmd[1 + 32 + 1 + 1 + 1 + 64 + 32 + 4 + 8 + 4] = {0};
+    add_cmd[0] = CMD_ADD_UPDATE_CONTACT;
+    uint8_t pub[32];
+    for (int i = 0; i < 32; i++) pub[i] = (uint8_t)(0xC0 + i);
+    memcpy(&add_cmd[1], pub, 32);
+    add_cmd[33] = 1; /* type */
+    add_cmd[34] = 0; /* flags */
+    add_cmd[35] = 2; /* out_path_len */
+    add_cmd[36] = 0x11; add_cmd[37] = 0x22; /* path */
+    strncpy((char *)&add_cmd[100], "Alice-Node", 31);
+    uint32_t ts = 1710000000;
+    memcpy(&add_cmd[132], &ts, 4);
+    int32_t lat = 50000000, lon = 20000000;
+    memcpy(&add_cmd[136], &lat, 4);
+    memcpy(&add_cmd[140], &lon, 4);
+    uint32_t lastmod = 1710000005;
+    memcpy(&add_cmd[144], &lastmod, 4);
+
+    size_t len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, add_cmd, sizeof(add_cmd), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_EQUAL_UINT32(1, (uint32_t)ctx.contact_count);
+
+    /* Query contact by key */
+    uint8_t get_cmd[1 + 32];
+    get_cmd[0] = CMD_GET_CONTACT_BY_KEY;
+    memcpy(&get_cmd[1], pub, 32);
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, get_cmd, sizeof(get_cmd), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(COMPANION_CONTACT_FRAME_SIZE, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_CONTACT, resp[0]);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(pub, &resp[1], 32);
+    TEST_ASSERT_EQUAL_STRING("Alice-Node", (char *)&resp[1 + 32 + 1 + 1 + 1 + 64]);
+
+    /* Remove contact */
+    uint8_t del_cmd[1 + 32];
+    del_cmd[0] = CMD_REMOVE_CONTACT;
+    memcpy(&del_cmd[1], pub, 32);
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, del_cmd, sizeof(del_cmd), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)ctx.contact_count);
+
+    /* Query contact by key again -> not found */
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, get_cmd, sizeof(get_cmd), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(2, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_ERR, resp[0]);
+}
+
+void test_companion_get_stats(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+    lora_config_t cfg = {0};
+    lora_stats_t stats = {
+        .noise_floor_dbm = -118,
+        .last_rssi_dbm = -75,
+        .last_snr_q4 = 28, /* 7 dB */
+        .packet_count = 100,
+        .packets_sent = 50,
+        .sent_flood = 30,
+        .sent_direct = 20,
+        .recv_flood = 60,
+        .recv_direct = 40,
+        .recv_errors = 5,
+        .tx_air_ms = 4000,
+        .rx_air_ms = 8000
+    };
+    companion_env_t env = {
+        .batt_mv = 3950,
+        .get_time_s = mock_get_time,
+        .stats = &stats
+    };
+    uint8_t resp[64];
+    bool changed = false;
+
+    /* Core stats (type 0) */
+    uint8_t cmd_core[] = { CMD_GET_STATS, STATS_TYPE_CORE };
+    size_t len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd_core, sizeof(cmd_core), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(11, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_STATS, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(STATS_TYPE_CORE, resp[1]);
+    uint16_t mv;
+    memcpy(&mv, &resp[2], 2);
+    TEST_ASSERT_EQUAL_UINT16(3950, mv);
+
+    /* Radio stats (type 1) */
+    uint8_t cmd_radio[] = { CMD_GET_STATS, STATS_TYPE_RADIO };
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd_radio, sizeof(cmd_radio), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(14, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_STATS, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(STATS_TYPE_RADIO, resp[1]);
+    int16_t nf;
+    memcpy(&nf, &resp[2], 2);
+    TEST_ASSERT_EQUAL_INT16(-118, nf);
+    TEST_ASSERT_EQUAL_INT8(-75, (int8_t)resp[4]);
+    TEST_ASSERT_EQUAL_INT8(28, (int8_t)resp[5]);
+
+    /* Packet stats (type 2) */
+    uint8_t cmd_pkt[] = { CMD_GET_STATS, STATS_TYPE_PACKETS };
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd_pkt, sizeof(cmd_pkt), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(30, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_STATS, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(STATS_TYPE_PACKETS, resp[1]);
+    uint32_t total, sent;
+    memcpy(&total, &resp[2], 4);
+    memcpy(&sent, &resp[6], 4);
+    TEST_ASSERT_EQUAL_UINT32(100, total);
+    TEST_ASSERT_EQUAL_UINT32(50, sent);
+}
+
+void test_companion_time_and_cli(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+    lora_config_t cfg = {0};
+    companion_env_t env = {
+        .get_time_s = mock_get_time,
+        .set_time_s = mock_set_time,
+        .exec_cli = mock_exec_cli
+    };
+    uint8_t resp[128];
+    bool changed = false;
+
+    /* GET_DEVICE_TIME */
+    s_mock_time = 1720000000;
+    uint8_t get_time[] = { CMD_GET_DEVICE_TIME };
+    size_t len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, get_time, sizeof(get_time), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(5, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_CURR_TIME, resp[0]);
+    uint32_t t;
+    memcpy(&t, &resp[1], 4);
+    TEST_ASSERT_EQUAL_UINT32(1720000000, t);
+
+    /* SET_DEVICE_TIME */
+    uint8_t set_time[5] = { CMD_SET_DEVICE_TIME };
+    uint32_t new_t = 1730000000;
+    memcpy(&set_time[1], &new_t, 4);
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, set_time, sizeof(set_time), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_EQUAL_UINT32(1730000000, s_mock_time);
+
+    /* RUN_CLI_COMMAND */
+    const char *cli_cmd = "help";
+    uint8_t run_cli[1 + 4];
+    run_cli[0] = CMD_RUN_CLI_COMMAND;
+    memcpy(&run_cli[1], cli_cmd, 4);
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, run_cli, sizeof(run_cli), resp, sizeof(resp));
+    TEST_ASSERT_TRUE(len > 1);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_CLI_REPLY, resp[0]);
+    TEST_ASSERT_EQUAL_STRING_LEN("MOCK:help", (char *)&resp[1], len - 1);
+}
+
+void test_companion_send_txt_msgs(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+    lora_config_t cfg = {0};
+    companion_env_t env = {
+        .send_channel_txt = mock_send_channel_txt
+    };
+    uint8_t resp[128];
+    bool changed = false;
+
+    /* CMD_SEND_CHANNEL_TXT_MSG */
+    s_last_sent_channel_txt[0] = '\0';
+    s_last_sent_channel_idx = 0xFF;
+    const char *ch_text = "Hello Channel 2!";
+    uint8_t ch_cmd[7 + 32] = {0};
+    ch_cmd[0] = CMD_SEND_CHANNEL_TXT_MSG;
+    ch_cmd[1] = 0; /* plain text */
+    ch_cmd[2] = 2; /* channel index 2 */
+    uint32_t ts = 1715000000;
+    memcpy(&ch_cmd[3], &ts, 4);
+    memcpy(&ch_cmd[7], ch_text, strlen(ch_text));
+
+    size_t len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, ch_cmd, 7 + strlen(ch_text), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(2, s_last_sent_channel_idx);
+    TEST_ASSERT_EQUAL_STRING("Hello Channel 2!", s_last_sent_channel_txt);
+
+    /* CMD_SEND_TXT_MSG */
+    s_last_sent_channel_txt[0] = '\0';
+    s_last_sent_channel_idx = 0xFF;
+    const char *dm_text = "Direct message!";
+    uint8_t dm_cmd[13 + 32] = {0};
+    dm_cmd[0] = CMD_SEND_TXT_MSG;
+    dm_cmd[1] = 0; /* plain text */
+    dm_cmd[2] = 0; /* attempt */
+    uint32_t dm_tag = 0x87654321;
+    memcpy(&dm_cmd[3], &dm_tag, 4);
+    for (int i = 0; i < 6; i++) dm_cmd[7 + i] = (uint8_t)(0x10 + i);
+    memcpy(&dm_cmd[13], dm_text, strlen(dm_text));
+
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, dm_cmd, 13 + strlen(dm_text), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(10, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_SENT, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(1, resp[1]); /* flood */
+    uint32_t ret_tag, ret_timeout;
+    memcpy(&ret_tag, &resp[2], 4);
+    memcpy(&ret_timeout, &resp[6], 4);
+    TEST_ASSERT_EQUAL_HEX32(0x87654321, ret_tag);
+    TEST_ASSERT_EQUAL_UINT32(5000, ret_timeout);
+    TEST_ASSERT_EQUAL_UINT8(0, s_last_sent_channel_idx);
+    TEST_ASSERT_EQUAL_STRING("Direct message!", s_last_sent_channel_txt);
+}
+
+void test_companion_get_contacts_streaming_and_since(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+    lora_config_t cfg = {0};
+
+    /* Add Contact 1 (lastmod = 100) */
+    companion_contact_t c1 = { .lastmod = 100 };
+    memset(c1.pub_key, 0x11, 32);
+    strncpy(c1.name, "NodeA", sizeof(c1.name) - 1);
+    TEST_ASSERT_TRUE(meshcore_companion_add_update_contact(&ctx, &c1));
+
+    /* Add Contact 2 (lastmod = 200) */
+    companion_contact_t c2 = { .lastmod = 200 };
+    memset(c2.pub_key, 0x22, 32);
+    strncpy(c2.name, "NodeB", sizeof(c2.name) - 1);
+    TEST_ASSERT_TRUE(meshcore_companion_add_update_contact(&ctx, &c2));
+
+    uint8_t resp[256];
+    bool changed = false;
+
+    /* 1. Test buffer mode (send_frame_cb == NULL) with since = 150 */
+    companion_env_t env_buf = {0};
+    uint8_t cmd_since[5] = { CMD_GET_CONTACTS };
+    uint32_t since = 150;
+    memcpy(&cmd_since[1], &since, 4);
+
+    size_t len = meshcore_companion_handle_cmd(&ctx, &env_buf, &cfg, &changed, cmd_since, sizeof(cmd_since), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(5, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_CONTACTS_START, resp[0]);
+    uint32_t match_count;
+    memcpy(&match_count, &resp[1], 4);
+    TEST_ASSERT_EQUAL_UINT32(1, match_count); /* only NodeB has lastmod > 150 */
+
+    /* 2. Test streaming mode (send_frame_cb != NULL) with since = 0 */
+    companion_env_t env_stream = {
+        .send_frame_cb = mock_send_frame_cb
+    };
+    s_cb_frame_count = 0;
+    uint8_t cmd_all[1] = { CMD_GET_CONTACTS };
+    len = meshcore_companion_handle_cmd(&ctx, &env_stream, &cfg, &changed, cmd_all, sizeof(cmd_all), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(0, (int)len); /* Return 0 so caller doesn't send resp_out duplicate */
+    TEST_ASSERT_EQUAL_UINT32(4, (uint32_t)s_cb_frame_count);
+
+    /* Frame 0: START (5 bytes) */
+    TEST_ASSERT_EQUAL_INT(5, (int)s_cb_frame_lens[0]);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_CONTACTS_START, s_cb_frames[0][0]);
+    memcpy(&match_count, &s_cb_frames[0][1], 4);
+    TEST_ASSERT_EQUAL_UINT32(2, match_count);
+
+    /* Frame 1: CONTACT NodeA (148 bytes) */
+    TEST_ASSERT_EQUAL_INT(COMPANION_CONTACT_FRAME_SIZE, (int)s_cb_frame_lens[1]);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_CONTACT, s_cb_frames[1][0]);
+
+    /* Frame 2: CONTACT NodeB (148 bytes) */
+    TEST_ASSERT_EQUAL_INT(COMPANION_CONTACT_FRAME_SIZE, (int)s_cb_frame_lens[2]);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_CONTACT, s_cb_frames[2][0]);
+
+    /* Frame 3: END_OF_CONTACTS (5 bytes) with most_recent_lastmod = 200 */
+    TEST_ASSERT_EQUAL_INT(5, (int)s_cb_frame_lens[3]);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_END_OF_CONTACTS, s_cb_frames[3][0]);
+    uint32_t end_lastmod;
+    memcpy(&end_lastmod, &s_cb_frames[3][1], 4);
+    TEST_ASSERT_EQUAL_UINT32(200, end_lastmod);
+
+    /* 3. Test streaming mode with since = 150 */
+    s_cb_frame_count = 0;
+    len = meshcore_companion_handle_cmd(&ctx, &env_stream, &cfg, &changed, cmd_since, sizeof(cmd_since), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(0, (int)len);
+    TEST_ASSERT_EQUAL_UINT32(3, (uint32_t)s_cb_frame_count);
+
+    /* Frame 0: START with count = 1 */
+    TEST_ASSERT_EQUAL_INT(5, (int)s_cb_frame_lens[0]);
+    memcpy(&match_count, &s_cb_frames[0][1], 4);
+    TEST_ASSERT_EQUAL_UINT32(1, match_count);
+
+    /* Frame 1: CONTACT NodeB */
+    TEST_ASSERT_EQUAL_INT(COMPANION_CONTACT_FRAME_SIZE, (int)s_cb_frame_lens[1]);
+
+    /* Frame 2: END_OF_CONTACTS (5 bytes) with most_recent_lastmod = 200 */
+    TEST_ASSERT_EQUAL_INT(5, (int)s_cb_frame_lens[2]);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_END_OF_CONTACTS, s_cb_frames[2][0]);
+    memcpy(&end_lastmod, &s_cb_frames[2][1], 4);
+    TEST_ASSERT_EQUAL_UINT32(200, end_lastmod);
+}
+
+void test_companion_v10_startup_commands(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+    lora_config_t cfg = {0};
+    companion_env_t env = {0};
+    uint8_t resp[64];
+    bool changed = false;
+
+    /* CMD_GET_AUTOADD_CONFIG (59) */
+    uint8_t get_autoadd[] = { CMD_GET_AUTOADD_CONFIG };
+    size_t len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, get_autoadd, sizeof(get_autoadd), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(3, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_AUTOADD_CONFIG, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x1E, resp[1]);
+    TEST_ASSERT_EQUAL_UINT8(64, resp[2]);
+
+    /* CMD_SET_AUTOADD_CONFIG (58) */
+    uint8_t set_autoadd[] = { CMD_SET_AUTOADD_CONFIG, 0x1E, 64 };
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, set_autoadd, sizeof(set_autoadd), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+
+    /* CMD_GET_DEFAULT_FLOOD_SCOPE (64) */
+    uint8_t get_scope[] = { CMD_GET_DEFAULT_FLOOD_SCOPE };
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, get_scope, sizeof(get_scope), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_DEFAULT_FLOOD_SCOPE, resp[0]);
+
+    /* CMD_SET_DEFAULT_FLOOD_SCOPE (63) */
+    uint8_t set_scope[] = { CMD_SET_DEFAULT_FLOOD_SCOPE, 1 };
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, set_scope, sizeof(set_scope), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+
+    /* CMD_GET_ALLOWED_REPEAT_FREQ (60) */
+    uint8_t get_freq[] = { CMD_GET_ALLOWED_REPEAT_FREQ };
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, get_freq, sizeof(get_freq), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(25, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_ALLOWED_REPEAT_FREQ, resp[0]);
+    uint32_t f1, f2, f3, f4, f5, f6;
+    memcpy(&f1, &resp[1], 4);
+    memcpy(&f2, &resp[5], 4);
+    memcpy(&f3, &resp[9], 4);
+    memcpy(&f4, &resp[13], 4);
+    memcpy(&f5, &resp[17], 4);
+    memcpy(&f6, &resp[21], 4);
+    TEST_ASSERT_EQUAL_UINT32(433000, f1);
+    TEST_ASSERT_EQUAL_UINT32(433000, f2);
+    TEST_ASSERT_EQUAL_UINT32(869495, f3);
+    TEST_ASSERT_EQUAL_UINT32(869495, f4);
+    TEST_ASSERT_EQUAL_UINT32(918000, f5);
+    TEST_ASSERT_EQUAL_UINT32(918000, f6);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -282,5 +882,16 @@ int main(void)
     RUN_TEST(test_discover_req_resp_roundtrip);
     RUN_TEST(test_group_text_public_channel_polish_utf8);
     RUN_TEST(test_lora_airtime_calculation);
+    RUN_TEST(test_companion_app_start);
+    RUN_TEST(test_companion_device_query);
+    RUN_TEST(test_companion_channel_management);
+    RUN_TEST(test_companion_radio_params_and_tx_power);
+    RUN_TEST(test_companion_device_pin);
+    RUN_TEST(test_companion_contacts_crud);
+    RUN_TEST(test_companion_get_stats);
+    RUN_TEST(test_companion_time_and_cli);
+    RUN_TEST(test_companion_send_txt_msgs);
+    RUN_TEST(test_companion_get_contacts_streaming_and_since);
+    RUN_TEST(test_companion_v10_startup_commands);
     return UNITY_END();
 }

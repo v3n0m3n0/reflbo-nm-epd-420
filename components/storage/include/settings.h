@@ -98,6 +98,7 @@ typedef struct {
     uint8_t airtime_factor_x10; /* 0..90 -> 0.0..9.0 (default 10 = 1.0) */
     bool wake_on_rx;       /* Wake from sleep on DIO1 RX (default false) */
     bool share_loc;        /* Include lat/lon in adverts (default false) */
+    uint32_t ble_pin;      /* 0 = auto-generate, or 100000..999999 */
     char node_name[LORA_NODE_NAME_LEN];       /* default "NM-EPD-420" */
     char channel_name[LORA_CHANNEL_NAME_LEN]; /* default "Public" */
     char channel_psk[LORA_CHANNEL_PSK_LEN];   /* default LORA_DEFAULT_PUBLIC_PSK */

@@ -1,10 +1,13 @@
 #include "lora_widget.h"
 #include "meshcore_proto.h"
+#include "meshcore_companion.h"
+#include "meshcore_ble.h"
 #include "util_sha256.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "board_pins.h"
@@ -37,6 +40,44 @@ static bool s_has_loc = false;
 static uint8_t s_pub_key[32];
 static uint8_t s_prv_key[64];
 static bool s_keys_initialized = false;
+
+#define COMPANION_PUSH_QUEUE_SIZE 8
+typedef struct {
+    uint8_t len;
+    uint8_t data[COMPANION_MAX_FRAME_SIZE];
+} companion_frame_t;
+
+static companion_context_t s_companion_ctx;
+static bool s_companion_initialized = false;
+static companion_frame_t s_push_queue[COMPANION_PUSH_QUEUE_SIZE];
+static size_t s_push_head = 0;
+static size_t s_push_tail = 0;
+static size_t s_push_count = 0;
+static SemaphoreHandle_t s_push_mutex = NULL;
+
+#define COMPANION_MSG_QUEUE_SIZE 8
+static companion_frame_t s_msg_queue[COMPANION_MSG_QUEUE_SIZE];
+static size_t s_msg_head = 0;
+static size_t s_msg_tail = 0;
+static size_t s_msg_count = 0;
+static SemaphoreHandle_t s_msg_mutex = NULL;
+
+#define BLE_CMD_QUEUE_SIZE 8
+typedef struct {
+    uint16_t len;
+    uint8_t  data[256];
+} ble_cmd_frame_t;
+
+static ble_cmd_frame_t s_ble_cmd_queue[BLE_CMD_QUEUE_SIZE];
+static size_t s_ble_cmd_head = 0;
+static size_t s_ble_cmd_tail = 0;
+static size_t s_ble_cmd_count = 0;
+static SemaphoreHandle_t s_ble_cmd_mutex = NULL;
+
+static void on_ble_rx(const uint8_t *data, size_t len);
+static void push_companion_event(const uint8_t *data, size_t len);
+static bool companion_pop_msg(uint8_t *msg_out, size_t max, size_t *out_len);
+static uint32_t get_default_ble_pin(void);
 
 /* Forward declarations */
 static esp_err_t sx1262_transmit(const uint8_t *data, size_t len);
@@ -71,6 +112,13 @@ static void init_node_keys(void)
     s_keys_initialized = true;
 
     ESP_LOGI(TAG, "MeshCore Ed25519 Node Key derived. PubKey prefix: %.16s...", s_stats.pub_key_hex);
+}
+
+static uint32_t get_default_ble_pin(void)
+{
+    uint8_t mac[6] = {0};
+    esp_efuse_mac_get_default(mac);
+    return 100000u + ((((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5]) % 900000u);
 }
 
 static bool lora_wait_busy(uint32_t timeout_ms)
@@ -462,25 +510,55 @@ static void lora_rx_task(void *arg)
     ESP_LOGI(TAG, "LoRa SX1262 MeshCore monitor task started (interrupt-driven)");
 
     for (;;) {
-        /* Wait up to 1000 ms for packet interrupt */
-        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+        /* Wait up to 200 ms for packet interrupt or BLE companion command */
+        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
+
+        /* Drain pending BLE companion commands */
+        for (;;) {
+            ble_cmd_frame_t frame;
+            bool have_frame = false;
+            if (s_ble_cmd_mutex && xSemaphoreTake(s_ble_cmd_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                if (s_ble_cmd_count > 0) {
+                    frame = s_ble_cmd_queue[s_ble_cmd_head];
+                    s_ble_cmd_head = (s_ble_cmd_head + 1) % BLE_CMD_QUEUE_SIZE;
+                    s_ble_cmd_count--;
+                    have_frame = true;
+                }
+                xSemaphoreGive(s_ble_cmd_mutex);
+            }
+            if (!have_frame) break;
+
+            bool cfg_changed = false;
+            uint8_t resp[COMPANION_MAX_FRAME_SIZE];
+            size_t resp_len = lora_widget_handle_companion_cmd(frame.data, frame.len, &s_current_cfg, &cfg_changed, resp, sizeof(resp));
+            if (resp_len > 0) {
+                meshcore_ble_send(resp, resp_len);
+            }
+            if (cfg_changed) {
+                lora_widget_apply(&s_current_cfg);
+            }
+        }
 
         if (!s_stats.enabled || !s_stats.initialized) {
             continue;
         }
 
         if (notified == 0) {
-            /* Background timeout: sample instantaneous noise floor */
-            uint8_t rssi_raw = 0;
-            if (lora_read_cmd(0x15, &rssi_raw, 1) == ESP_OK) {
-                int16_t inst = -(int16_t)(rssi_raw / 2);
-                if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-                    if (s_stats.noise_floor_dbm == 0) {
-                        s_stats.noise_floor_dbm = inst;
-                    } else {
-                        s_stats.noise_floor_dbm = (int16_t)((s_stats.noise_floor_dbm * 7 + inst) / 8);
+            static uint8_t s_nf_tick = 0;
+            if (++s_nf_tick >= 5) {
+                s_nf_tick = 0;
+                /* Background timeout: sample instantaneous noise floor */
+                uint8_t rssi_raw = 0;
+                if (lora_read_cmd(0x15, &rssi_raw, 1) == ESP_OK) {
+                    int16_t inst = -(int16_t)(rssi_raw / 2);
+                    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                        if (s_stats.noise_floor_dbm == 0) {
+                            s_stats.noise_floor_dbm = inst;
+                        } else {
+                            s_stats.noise_floor_dbm = (int16_t)((s_stats.noise_floor_dbm * 7 + inst) / 8);
+                        }
+                        xSemaphoreGive(s_stats_mutex);
                     }
-                    xSemaphoreGive(s_stats_mutex);
                 }
             }
             continue;
@@ -523,9 +601,9 @@ static void lora_rx_task(void *arg)
             }
 
             /* Read packet buffer */
-            uint8_t rx_bytes[256];
+            static uint8_t s_rx_bytes[256];
             bool read_ok = false;
-            if (payload_len > 0 && lora_read_buffer(start_offset, rx_bytes, payload_len) == ESP_OK) {
+            if (payload_len > 0 && lora_read_buffer(start_offset, s_rx_bytes, payload_len) == ESP_OK) {
                 read_ok = true;
             }
 
@@ -553,15 +631,15 @@ static void lora_rx_task(void *arg)
             }
 
             /* Parse MeshCore packet */
-            meshcore_packet_t pkt;
-            if (!meshcore_packet_decode(&pkt, rx_bytes, payload_len)) {
+            static meshcore_packet_t s_pkt;
+            if (!meshcore_packet_decode(&s_pkt, s_rx_bytes, payload_len)) {
                 ESP_LOGD(TAG, "Non-MeshCore packet received (%u bytes)", (unsigned)payload_len);
                 continue;
             }
 
-            uint8_t route = meshcore_packet_get_route_type(&pkt);
-            uint8_t ptype = meshcore_packet_get_payload_type(&pkt);
-            uint8_t hops = meshcore_packet_get_hop_count(&pkt);
+            uint8_t route = meshcore_packet_get_route_type(&s_pkt);
+            uint8_t ptype = meshcore_packet_get_payload_type(&s_pkt);
+            uint8_t hops = meshcore_packet_get_hop_count(&s_pkt);
 
             if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 if (route == MESHCORE_ROUTE_FLOOD || route == MESHCORE_ROUTE_TRANSPORT_FLOOD) {
@@ -574,29 +652,59 @@ static void lora_rx_task(void *arg)
 
             /* Handle payload types */
             if (ptype == MESHCORE_PAYLOAD_ADVERT) {
-                meshcore_advert_t adv;
-                if (meshcore_parse_advert_payload(pkt.payload, pkt.payload_len, &adv)) {
-                    adv.hops = hops;
-                    adv.rssi_dbm = rssi;
-                    adv.snr_q4 = snr_q4;
-                    adv.rx_time_s = (uint32_t)time(NULL);
+                static meshcore_advert_t s_adv;
+                if (meshcore_parse_advert_payload(s_pkt.payload, s_pkt.payload_len, &s_adv)) {
+                    s_adv.hops = hops;
+                    s_adv.rssi_dbm = rssi;
+                    s_adv.snr_q4 = snr_q4;
+                    s_adv.rx_time_s = (uint32_t)time(NULL);
 
                     if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                        update_advert_table(&adv);
-                        strncpy(s_stats.last_sender, adv.name, sizeof(s_stats.last_sender) - 1);
+                        update_advert_table(&s_adv);
+                        strncpy(s_stats.last_sender, s_adv.name, sizeof(s_stats.last_sender) - 1);
                         s_stats.last_sender[sizeof(s_stats.last_sender) - 1] = '\0';
                         xSemaphoreGive(s_stats_mutex);
                     }
+
+                    /* Add/update contact in companion table */
+                    if (!s_companion_initialized) {
+                        meshcore_companion_init(&s_companion_ctx);
+                        s_companion_initialized = true;
+                    }
+                    companion_contact_t c;
+                    memset(&c, 0, sizeof(c));
+                    memcpy(c.pub_key, s_adv.pub_key, COMPANION_PUB_KEY_SIZE);
+                    c.type = s_adv.node_type;
+                    c.flags = 0;
+                    c.out_path_len = (int8_t)hops;
+                    if (hops > 0 && s_pkt.path_len > 0) {
+                        size_t c_path_len = s_pkt.path_len;
+                        if (c_path_len > COMPANION_MAX_PATH_SIZE) c_path_len = COMPANION_MAX_PATH_SIZE;
+                        memcpy(c.out_path, s_pkt.path, c_path_len);
+                    }
+                    strncpy(c.name, s_adv.name, sizeof(c.name) - 1);
+                    c.last_advert_ts = s_adv.timestamp;
+                    c.lat_e6 = s_adv.has_loc ? s_adv.lat_e6 : 0;
+                    c.lon_e6 = s_adv.has_loc ? s_adv.lon_e6 : 0;
+                    c.lastmod = (uint32_t)time(NULL);
+                    meshcore_companion_add_update_contact(&s_companion_ctx, &c);
+
+                    /* Push advert notification to BLE Companion */
+                    uint8_t adv_push[1 + COMPANION_PUB_KEY_SIZE];
+                    adv_push[0] = PUSH_CODE_ADVERT;
+                    memcpy(&adv_push[1], s_adv.pub_key, COMPANION_PUB_KEY_SIZE);
+                    push_companion_event(adv_push, sizeof(adv_push));
+
                     ESP_LOGI(TAG, "Discovered Node Advert: '%s' (type %u, hops %u, RSSI %d dBm)",
-                             adv.name, adv.node_type, adv.hops, rssi);
+                             s_adv.name, s_adv.node_type, s_adv.hops, rssi);
                 }
             } else if (ptype == MESHCORE_PAYLOAD_CONTROL) {
-                if (pkt.payload_len >= 6 && (pkt.payload[0] & 0xF0) == 0x80) {
+                if (s_pkt.payload_len >= 6 && (s_pkt.payload[0] & 0xF0) == 0x80) {
                     /* Discover Request received: reply with Discover Response */
                     uint8_t resp_payload[14];
                     resp_payload[0] = 0x90 | MESHCORE_ADV_CHAT;
                     resp_payload[1] = (uint8_t)snr_q4;
-                    memcpy(&resp_payload[2], &pkt.payload[2], 4); /* Match request tag */
+                    memcpy(&resp_payload[2], &s_pkt.payload[2], 4); /* Match request tag */
                     memcpy(&resp_payload[6], s_pub_key, 8);        /* Our pubkey prefix */
 
                     uint8_t resp_raw[64];
@@ -616,11 +724,11 @@ static void lora_rx_task(void *arg)
                             xSemaphoreGive(s_stats_mutex);
                         }
                     }
-                } else if (pkt.payload_len >= 14 && (pkt.payload[0] & 0xF0) == 0x90) {
+                } else if (s_pkt.payload_len >= 14 && (s_pkt.payload[0] & 0xF0) == 0x90) {
                     /* Discover Response received */
                     meshcore_neighbor_t nb;
                     uint32_t tag = 0;
-                    if (meshcore_parse_discover_resp(pkt.payload, pkt.payload_len, &nb, &tag)) {
+                    if (meshcore_parse_discover_resp(s_pkt.payload, s_pkt.payload_len, &nb, &tag)) {
                         nb.rssi_dbm = rssi;
                         nb.rx_time_s = (uint32_t)time(NULL);
                         if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -634,7 +742,7 @@ static void lora_rx_task(void *arg)
             } else if (ptype == MESHCORE_PAYLOAD_GRP_TXT) {
                 uint32_t ts = 0;
                 char text[160] = {0};
-                if (meshcore_parse_grp_txt_payload(pkt.payload, pkt.payload_len,
+                if (meshcore_parse_grp_txt_payload(s_pkt.payload, s_pkt.payload_len,
                                                    s_current_cfg.channel_psk,
                                                    &ts, text, sizeof(text))) {
                     meshcore_msg_t msg = {
@@ -661,6 +769,39 @@ static void lora_rx_task(void *arg)
                         }
                         xSemaphoreGive(s_stats_mutex);
                     }
+
+                    /* Enqueue message for companion app CMD_SYNC_NEXT_MESSAGE */
+                    if (s_msg_mutex == NULL) {
+                        s_msg_mutex = xSemaphoreCreateMutex();
+                    }
+                    if (s_msg_mutex && xSemaphoreTake(s_msg_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                        if (s_msg_count < COMPANION_MSG_QUEUE_SIZE) {
+                            companion_frame_t *mf = &s_msg_queue[s_msg_tail];
+                            size_t tlen = strlen(text);
+                            if (tlen > 120) tlen = 120;
+                            mf->data[0] = RESP_CODE_CHANNEL_MSG_RECV_V3;
+                            mf->data[1] = (uint8_t)snr_q4;
+                            mf->data[2] = 0;
+                            mf->data[3] = 0;
+                            mf->data[4] = 0; /* Public channel 0 */
+                            mf->data[5] = hops;
+                            mf->data[6] = 0; /* txt_type */
+                            mf->data[7] = (uint8_t)(ts & 0xFF);
+                            mf->data[8] = (uint8_t)((ts >> 8) & 0xFF);
+                            mf->data[9] = (uint8_t)((ts >> 16) & 0xFF);
+                            mf->data[10] = (uint8_t)((ts >> 24) & 0xFF);
+                            memcpy(&mf->data[11], text, tlen);
+                            mf->len = (uint8_t)(11 + tlen);
+                            s_msg_tail = (s_msg_tail + 1) % COMPANION_MSG_QUEUE_SIZE;
+                            s_msg_count++;
+                        }
+                        xSemaphoreGive(s_msg_mutex);
+                    }
+
+                    /* Tickle companion app via BLE */
+                    uint8_t tickle = PUSH_CODE_MSG_WAITING;
+                    push_companion_event(&tickle, 1);
+
                     ESP_LOGI(TAG, "Channel Message: '%s'", text);
                 }
             }
@@ -672,10 +813,10 @@ static void lora_rx_task(void *arg)
                     /* Increment hop count (bits 0..5 in path_len_byte) */
                     size_t path_byte_offset = (route == MESHCORE_ROUTE_TRANSPORT_FLOOD || route == MESHCORE_ROUTE_TRANSPORT_DIRECT) ? 5 : 1;
                     if (path_byte_offset < payload_len) {
-                        rx_bytes[path_byte_offset]++;
+                        s_rx_bytes[path_byte_offset]++;
                         /* Forward with small randomized delay */
                         vTaskDelay(pdMS_TO_TICKS(20 + (esp_random() % 50)));
-                        sx1262_transmit(rx_bytes, payload_len);
+                        sx1262_transmit(s_rx_bytes, payload_len);
                         if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                             s_stats.sent_flood++;
                             xSemaphoreGive(s_stats_mutex);
@@ -696,6 +837,169 @@ static void lora_rx_task(void *arg)
     }
 }
 
+static uint32_t companion_get_time(void)
+{
+    return (uint32_t)time(NULL);
+}
+
+static void companion_set_time(uint32_t epoch)
+{
+    struct timeval tv = { .tv_sec = (time_t)epoch, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+}
+
+static bool companion_send_advert(bool flood)
+{
+    return (lora_widget_send_advert(flood) == ESP_OK);
+}
+
+static bool companion_send_channel_txt(uint8_t channel_idx, const char *text)
+{
+    (void)channel_idx;
+    return (lora_widget_send_channel_msg(text) == ESP_OK);
+}
+
+static void companion_exec_cli(const char *cmd, char *reply, size_t reply_sz)
+{
+    lora_widget_exec_cli(cmd, &s_current_cfg, NULL, reply, reply_sz);
+}
+
+static void companion_send_frame_cb(const uint8_t *frame, size_t len, void *user_data)
+{
+    (void)user_data;
+    meshcore_ble_send(frame, len);
+}
+
+static void on_ble_rx(const uint8_t *data, size_t len)
+{
+    if (!data || len == 0 || len > sizeof(s_ble_cmd_queue[0].data)) return;
+    if (s_ble_cmd_mutex == NULL) {
+        s_ble_cmd_mutex = xSemaphoreCreateMutex();
+    }
+    if (s_ble_cmd_mutex && xSemaphoreTake(s_ble_cmd_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        if (s_ble_cmd_count < BLE_CMD_QUEUE_SIZE) {
+            s_ble_cmd_queue[s_ble_cmd_tail].len = (uint16_t)len;
+            memcpy(s_ble_cmd_queue[s_ble_cmd_tail].data, data, len);
+            s_ble_cmd_tail = (s_ble_cmd_tail + 1) % BLE_CMD_QUEUE_SIZE;
+            s_ble_cmd_count++;
+        }
+        xSemaphoreGive(s_ble_cmd_mutex);
+    }
+    if (s_task) {
+        xTaskNotifyGive(s_task);
+    }
+}
+
+static void push_companion_event(const uint8_t *data, size_t len)
+{
+    if (!data || len == 0 || len > COMPANION_MAX_FRAME_SIZE) return;
+    if (s_push_mutex == NULL) {
+        s_push_mutex = xSemaphoreCreateMutex();
+    }
+    if (s_push_mutex && xSemaphoreTake(s_push_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        if (s_push_count < COMPANION_PUSH_QUEUE_SIZE) {
+            s_push_queue[s_push_tail].len = (uint8_t)len;
+            memcpy(s_push_queue[s_push_tail].data, data, len);
+            s_push_tail = (s_push_tail + 1) % COMPANION_PUSH_QUEUE_SIZE;
+            s_push_count++;
+        }
+        xSemaphoreGive(s_push_mutex);
+    }
+    meshcore_ble_send(data, len);
+}
+
+static bool companion_pop_msg(uint8_t *msg_out, size_t max, size_t *out_len)
+{
+    if (!msg_out || max == 0 || !out_len) return false;
+    bool popped = false;
+    if (s_msg_mutex == NULL) {
+        s_msg_mutex = xSemaphoreCreateMutex();
+    }
+    if (s_msg_mutex && xSemaphoreTake(s_msg_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        if (s_msg_count > 0) {
+            size_t len = s_msg_queue[s_msg_head].len;
+            if (len > max) len = max;
+            memcpy(msg_out, s_msg_queue[s_msg_head].data, len);
+            *out_len = len;
+            s_msg_head = (s_msg_head + 1) % COMPANION_MSG_QUEUE_SIZE;
+            s_msg_count--;
+            popped = true;
+        }
+        xSemaphoreGive(s_msg_mutex);
+    }
+    return popped;
+}
+
+size_t lora_widget_handle_companion_cmd(const uint8_t *cmd, size_t cmd_len,
+                                        lora_config_t *cfg_inout, bool *cfg_changed,
+                                        uint8_t *resp_out, size_t resp_max)
+{
+    if (!cmd || cmd_len == 0 || !resp_out || resp_max == 0) {
+        return 0;
+    }
+    if (!s_companion_initialized) {
+        meshcore_companion_init(&s_companion_ctx);
+        s_companion_initialized = true;
+    }
+
+    companion_env_t env = {
+        .lat_e6 = s_lat_e6,
+        .lon_e6 = s_lon_e6,
+        .batt_mv = 4000,
+        .storage_used_kb = 128,
+        .storage_total_kb = 4096,
+        .get_time_s = companion_get_time,
+        .set_time_s = companion_set_time,
+        .stats = &s_stats,
+        .send_advert = companion_send_advert,
+        .send_channel_txt = companion_send_channel_txt,
+        .exec_cli = companion_exec_cli,
+        .pop_msg = companion_pop_msg,
+        .send_frame_cb = companion_send_frame_cb,
+    };
+    memcpy(env.pub_key, s_pub_key, 32);
+
+    return meshcore_companion_handle_cmd(&s_companion_ctx, &env,
+                                         cfg_inout ? cfg_inout : &s_current_cfg,
+                                         cfg_changed,
+                                         cmd, cmd_len, resp_out, resp_max);
+}
+
+bool lora_widget_pop_companion_push(uint8_t *push_out, size_t push_max, size_t *push_len)
+{
+    if (!push_out || push_max == 0 || !push_len) return false;
+    bool popped = false;
+    if (s_push_mutex == NULL) {
+        s_push_mutex = xSemaphoreCreateMutex();
+    }
+    if (s_push_mutex && xSemaphoreTake(s_push_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        if (s_push_count > 0) {
+            size_t len = s_push_queue[s_push_head].len;
+            if (len > push_max) len = push_max;
+            memcpy(push_out, s_push_queue[s_push_head].data, len);
+            *push_len = len;
+            s_push_head = (s_push_head + 1) % COMPANION_PUSH_QUEUE_SIZE;
+            s_push_count--;
+            popped = true;
+        }
+        xSemaphoreGive(s_push_mutex);
+    }
+    return popped;
+}
+
+static bool is_rf_config_changed(const lora_config_t *a, const lora_config_t *b)
+{
+    return (a->enabled != b->enabled ||
+            a->freq_khz != b->freq_khz ||
+            a->bw_hz != b->bw_hz ||
+            a->bw_khz != b->bw_khz ||
+            a->sf != b->sf ||
+            a->cr != b->cr ||
+            a->tx_power_dbm != b->tx_power_dbm ||
+            a->sync_word != b->sync_word ||
+            a->rx_boosted != b->rx_boosted);
+}
+
 esp_err_t lora_widget_apply(const lora_config_t *cfg)
 {
     if (s_stats_mutex == NULL) {
@@ -704,7 +1008,35 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
 
     init_node_keys();
 
-    if (cfg != NULL) {
+    uint32_t active_pin = (cfg && cfg->ble_pin >= 100000 && cfg->ble_pin <= 999999) ? cfg->ble_pin : get_default_ble_pin();
+    s_stats.ble_pin = active_pin;
+
+    if (cfg == NULL || !cfg->enabled) {
+        meshcore_ble_stop();
+        gpio_intr_disable(BOARD_PIN_LORA_DIO1);
+        if (s_task != NULL) {
+            ulTaskNotifyTake(pdTRUE, 0); /* drain stale notifications */
+        }
+        if (s_stats.initialized && s_lora_spi != NULL) {
+            uint8_t sleep_cfg = 0x00; /* cold start (0x84) */
+            lora_write_cmd(0x84, &sleep_cfg, 1);
+        }
+        gpio_set_level(BOARD_PIN_LORA_NSS, 0);
+        gpio_set_level(BOARD_PIN_LORA_RST, 0);
+        gpio_set_level(BOARD_PIN_LORA_EN, 0);
+
+        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            s_stats.enabled = false;
+            s_stats.initialized = false;
+            s_stats.ble_pin = active_pin;
+            xSemaphoreGive(s_stats_mutex);
+        }
+        ESP_LOGI(TAG, "LoRa radio disabled");
+        return ESP_OK;
+    }
+
+    /* Fast path: if radio is already initialized and RF parameters didn't change, skip SX1262 HW reset */
+    if (s_stats.initialized && !is_rf_config_changed(&s_current_cfg, cfg)) {
         s_current_cfg = *cfg;
         if (s_current_cfg.node_name[0] == '\0') {
             strncpy(s_current_cfg.node_name, "NM-EPD-420", sizeof(s_current_cfg.node_name) - 1);
@@ -717,30 +1049,39 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         if (meshcore_channel_key_from_psk(s_current_cfg.channel_psk, secret32, &ch_hash)) {
             s_stats.channel_hash = ch_hash;
         }
+        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            s_stats.cad_enabled = cfg->cad_enabled;
+            s_stats.client_repeat = cfg->client_repeat;
+            s_stats.path_hash_mode = cfg->path_hash_mode;
+            s_stats.airtime_factor_x10 = cfg->airtime_factor_x10;
+            s_stats.wake_on_rx = cfg->wake_on_rx;
+            s_stats.share_loc = cfg->share_loc;
+            s_stats.ble_pin = active_pin;
+            strncpy(s_stats.node_name, s_current_cfg.node_name, sizeof(s_stats.node_name) - 1);
+            strncpy(s_stats.channel_name, s_current_cfg.channel_name, sizeof(s_stats.channel_name) - 1);
+            xSemaphoreGive(s_stats_mutex);
+        }
+        meshcore_ble_init(s_current_cfg.node_name, s_stats.ble_pin, on_ble_rx);
+        return ESP_OK;
+    }
+
+    s_current_cfg = *cfg;
+    if (s_current_cfg.node_name[0] == '\0') {
+        strncpy(s_current_cfg.node_name, "NM-EPD-420", sizeof(s_current_cfg.node_name) - 1);
+    }
+    if (s_current_cfg.channel_psk[0] == '\0') {
+        strncpy(s_current_cfg.channel_psk, LORA_DEFAULT_PUBLIC_PSK, sizeof(s_current_cfg.channel_psk) - 1);
+    }
+    uint8_t secret32[32];
+    uint8_t ch_hash = 0;
+    if (meshcore_channel_key_from_psk(s_current_cfg.channel_psk, secret32, &ch_hash)) {
+        s_stats.channel_hash = ch_hash;
     }
 
     /* Pause RX and disable interrupts during reconfiguration */
     gpio_intr_disable(BOARD_PIN_LORA_DIO1);
     if (s_task != NULL) {
         ulTaskNotifyTake(pdTRUE, 0); /* drain stale notifications */
-    }
-
-    if (cfg == NULL || !cfg->enabled) {
-        if (s_stats.initialized && s_lora_spi != NULL) {
-            uint8_t sleep_cfg = 0x00; /* cold start (0x84) */
-            lora_write_cmd(0x84, &sleep_cfg, 1);
-        }
-        gpio_set_level(BOARD_PIN_LORA_NSS, 0);
-        gpio_set_level(BOARD_PIN_LORA_RST, 0);
-        gpio_set_level(BOARD_PIN_LORA_EN, 0);
-
-        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            s_stats.enabled = false;
-            s_stats.initialized = false;
-            xSemaphoreGive(s_stats_mutex);
-        }
-        ESP_LOGI(TAG, "LoRa radio disabled");
-        return ESP_OK;
     }
 
     /* Mark uninitialized while reconfiguring */
@@ -962,7 +1303,7 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
 
     /* Launch background receiver task if not created */
     if (s_task == NULL) {
-        xTaskCreate(lora_rx_task, "lora_rx", 4096, NULL, 5, &s_task);
+        xTaskCreate(lora_rx_task, "lora_rx", 16384, NULL, 5, &s_task);
     }
 
     /* Configure and hook DIO1 interrupt */
@@ -995,10 +1336,13 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         s_stats.airtime_factor_x10 = cfg->airtime_factor_x10;
         s_stats.wake_on_rx = cfg->wake_on_rx;
         s_stats.share_loc = cfg->share_loc;
+        s_stats.ble_pin = active_pin;
         strncpy(s_stats.node_name, s_current_cfg.node_name, sizeof(s_stats.node_name) - 1);
         strncpy(s_stats.channel_name, s_current_cfg.channel_name, sizeof(s_stats.channel_name) - 1);
         xSemaphoreGive(s_stats_mutex);
     }
+
+    meshcore_ble_init(s_current_cfg.node_name, s_stats.ble_pin, on_ble_rx);
 
     ESP_LOGI(TAG, "SX1262 MeshCore configured: %lu kHz, SF%u, BW %lu Hz, CR 4/%u, Pwr %d dBm, Sync 0x%04X, LDRO %u",
              (unsigned long)cfg->freq_khz, (unsigned)sf, (unsigned long)bw_hz,
@@ -1024,15 +1368,21 @@ esp_err_t lora_widget_init(void)
         .airtime_factor_x10 = 10,
         .wake_on_rx = false,
         .share_loc = false,
+        .ble_pin = 0,
         .node_name = "NM-EPD-420",
         .channel_name = "Public",
         .channel_psk = LORA_DEFAULT_PUBLIC_PSK,
     };
-    return lora_widget_apply(&def);
+    esp_err_t err = lora_widget_apply(&def);
+    if (err == ESP_OK) {
+        meshcore_ble_init(def.node_name, s_stats.ble_pin, on_ble_rx);
+    }
+    return err;
 }
 
 void lora_widget_sleep(void)
 {
+    meshcore_ble_stop();
     if (s_stats.enabled && s_stats.wake_on_rx) {
         return;
     }
@@ -1089,6 +1439,7 @@ lora_stats_t lora_widget_get_stats(void)
 {
     lora_stats_t copy = {0};
     if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        s_stats.ble_connected = meshcore_ble_is_connected();
         copy = s_stats;
         xSemaphoreGive(s_stats_mutex);
     }
@@ -1370,6 +1721,10 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
             snprintf(reply, reply_sz, "%s\n", s_stats.pub_key_hex);
             return;
         }
+        if (strcasecmp(p, "pin") == 0) {
+            snprintf(reply, reply_sz, "%06lu\n", (unsigned long)s_stats.ble_pin);
+            return;
+        }
         snprintf(reply, reply_sz, "Unknown parameter 'get %s'\n", p);
         return;
     }
@@ -1396,8 +1751,17 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
                     cfg_inout->bw_khz = (uint16_t)(hz / 1000);
                     cfg_inout->sf = (uint8_t)sf_val;
                     cfg_inout->cr = (uint8_t)cr_val;
+                    s_current_cfg.freq_khz = cfg_inout->freq_khz;
+                    s_current_cfg.bw_hz = cfg_inout->bw_hz;
+                    s_current_cfg.bw_khz = cfg_inout->bw_khz;
+                    s_current_cfg.sf = cfg_inout->sf;
+                    s_current_cfg.cr = cfg_inout->cr;
+                    s_stats.freq_khz = cfg_inout->freq_khz;
+                    s_stats.bw_hz = cfg_inout->bw_hz;
+                    s_stats.bw_khz = cfg_inout->bw_khz;
+                    s_stats.sf = cfg_inout->sf;
+                    s_stats.cr = cfg_inout->cr;
                     if (cfg_changed) *cfg_changed = true;
-                    lora_widget_apply(cfg_inout);
                 }
                 snprintf(reply, reply_sz, "Radio set: %lu kHz, %lu Hz, SF%u, CR4/%u\n",
                          (unsigned long)s_current_cfg.freq_khz,
@@ -1411,8 +1775,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
         if (strcasecmp(sparam, "tx") == 0) {
             if (sval[0] != '\0' && cfg_inout) {
                 cfg_inout->tx_power_dbm = (int8_t)atoi(sval);
+                s_current_cfg.tx_power_dbm = cfg_inout->tx_power_dbm;
+                s_stats.tx_power_dbm = cfg_inout->tx_power_dbm;
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%d\n", s_current_cfg.tx_power_dbm);
             return;
@@ -1421,8 +1786,10 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
             if (sval[0] != '\0' && cfg_inout) {
                 strncpy(cfg_inout->node_name, sval, sizeof(cfg_inout->node_name) - 1);
                 cfg_inout->node_name[sizeof(cfg_inout->node_name) - 1] = '\0';
+                strncpy(s_current_cfg.node_name, cfg_inout->node_name, sizeof(s_current_cfg.node_name) - 1);
+                strncpy(s_stats.node_name, cfg_inout->node_name, sizeof(s_stats.node_name) - 1);
+                meshcore_ble_update_name(cfg_inout->node_name);
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%s\n", s_current_cfg.node_name);
             return;
@@ -1430,8 +1797,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
         if (strcasecmp(sparam, "radio.rxgain") == 0) {
             if (sval[0] != '\0' && cfg_inout) {
                 cfg_inout->rx_boosted = parse_on_off(sval, cfg_inout->rx_boosted);
+                s_current_cfg.rx_boosted = cfg_inout->rx_boosted;
+                s_stats.rx_boosted = cfg_inout->rx_boosted;
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%s\n", s_current_cfg.rx_boosted ? "on" : "off");
             return;
@@ -1439,8 +1807,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
         if (strcasecmp(sparam, "cad") == 0) {
             if (sval[0] != '\0' && cfg_inout) {
                 cfg_inout->cad_enabled = parse_on_off(sval, cfg_inout->cad_enabled);
+                s_current_cfg.cad_enabled = cfg_inout->cad_enabled;
+                s_stats.cad_enabled = cfg_inout->cad_enabled;
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%s\n", s_current_cfg.cad_enabled ? "on" : "off");
             return;
@@ -1448,8 +1817,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
         if (strcasecmp(sparam, "repeat") == 0) {
             if (sval[0] != '\0' && cfg_inout) {
                 cfg_inout->client_repeat = parse_on_off(sval, cfg_inout->client_repeat);
+                s_current_cfg.client_repeat = cfg_inout->client_repeat;
+                s_stats.client_repeat = cfg_inout->client_repeat;
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%s\n", s_current_cfg.client_repeat ? "on" : "off");
             return;
@@ -1458,8 +1828,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
             if (sval[0] != '\0' && cfg_inout) {
                 float af = (float)atof(sval);
                 cfg_inout->airtime_factor_x10 = (uint8_t)(af * 10.0f + 0.5f);
+                s_current_cfg.airtime_factor_x10 = cfg_inout->airtime_factor_x10;
+                s_stats.airtime_factor_x10 = cfg_inout->airtime_factor_x10;
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%.1f\n", (double)s_current_cfg.airtime_factor_x10 / 10.0);
             return;
@@ -1470,8 +1841,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
                 if (pct < 1) pct = 1;
                 if (pct > 100) pct = 100;
                 cfg_inout->airtime_factor_x10 = (uint8_t)((100 - pct) * 10 / pct);
+                s_current_cfg.airtime_factor_x10 = cfg_inout->airtime_factor_x10;
+                s_stats.airtime_factor_x10 = cfg_inout->airtime_factor_x10;
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             unsigned int pct = (unsigned int)(1000 / (10 + s_current_cfg.airtime_factor_x10));
             snprintf(reply, reply_sz, "%u%%\n", pct);
@@ -1482,8 +1854,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
                 int m = atoi(sval);
                 if (m >= 0 && m <= 2) {
                     cfg_inout->path_hash_mode = (uint8_t)m;
+                    s_current_cfg.path_hash_mode = cfg_inout->path_hash_mode;
+                    s_stats.path_hash_mode = cfg_inout->path_hash_mode;
                     if (cfg_changed) *cfg_changed = true;
-                    lora_widget_apply(cfg_inout);
                 }
             }
             snprintf(reply, reply_sz, "%u\n", s_current_cfg.path_hash_mode);
@@ -1493,8 +1866,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
             if (sval[0] != '\0' && cfg_inout) {
                 float f = (float)atof(sval);
                 cfg_inout->freq_khz = (f < 3000.0f) ? (uint32_t)(f * 1000.0f + 0.5f) : (uint32_t)f;
+                s_current_cfg.freq_khz = cfg_inout->freq_khz;
+                s_stats.freq_khz = cfg_inout->freq_khz;
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%lu\n", (unsigned long)s_current_cfg.freq_khz);
             return;
@@ -1505,8 +1879,11 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
                 uint32_t hz = (bw < 1000.0f) ? (uint32_t)(bw * 1000.0f + 0.5f) : (uint32_t)bw;
                 cfg_inout->bw_hz = hz;
                 cfg_inout->bw_khz = (uint16_t)(hz / 1000);
+                s_current_cfg.bw_hz = hz;
+                s_current_cfg.bw_khz = cfg_inout->bw_khz;
+                s_stats.bw_hz = hz;
+                s_stats.bw_khz = cfg_inout->bw_khz;
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%lu\n", (unsigned long)s_current_cfg.bw_hz);
             return;
@@ -1514,8 +1891,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
         if (strcasecmp(sparam, "sf") == 0) {
             if (sval[0] != '\0' && cfg_inout) {
                 cfg_inout->sf = (uint8_t)atoi(sval);
+                s_current_cfg.sf = cfg_inout->sf;
+                s_stats.sf = cfg_inout->sf;
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%u\n", s_current_cfg.sf);
             return;
@@ -1523,8 +1901,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
         if (strcasecmp(sparam, "cr") == 0) {
             if (sval[0] != '\0' && cfg_inout) {
                 cfg_inout->cr = (uint8_t)atoi(sval);
+                s_current_cfg.cr = cfg_inout->cr;
+                s_stats.cr = cfg_inout->cr;
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%u\n", s_current_cfg.cr);
             return;
@@ -1533,8 +1912,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
             if (sval[0] != '\0' && cfg_inout) {
                 strncpy(cfg_inout->channel_name, sval, sizeof(cfg_inout->channel_name) - 1);
                 cfg_inout->channel_name[sizeof(cfg_inout->channel_name) - 1] = '\0';
+                strncpy(s_current_cfg.channel_name, cfg_inout->channel_name, sizeof(s_current_cfg.channel_name) - 1);
+                strncpy(s_stats.channel_name, cfg_inout->channel_name, sizeof(s_stats.channel_name) - 1);
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%s\n", s_current_cfg.channel_name);
             return;
@@ -1543,8 +1923,13 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
             if (sval[0] != '\0' && cfg_inout) {
                 strncpy(cfg_inout->channel_psk, sval, sizeof(cfg_inout->channel_psk) - 1);
                 cfg_inout->channel_psk[sizeof(cfg_inout->channel_psk) - 1] = '\0';
+                strncpy(s_current_cfg.channel_psk, cfg_inout->channel_psk, sizeof(s_current_cfg.channel_psk) - 1);
+                uint8_t secret32[32];
+                uint8_t ch_hash = 0;
+                if (meshcore_channel_key_from_psk(s_current_cfg.channel_psk, secret32, &ch_hash)) {
+                    s_stats.channel_hash = ch_hash;
+                }
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%s\n", s_current_cfg.channel_psk);
             return;
@@ -1552,10 +1937,29 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
         if (strcasecmp(sparam, "loc") == 0) {
             if (sval[0] != '\0' && cfg_inout) {
                 cfg_inout->share_loc = parse_on_off(sval, cfg_inout->share_loc);
+                s_current_cfg.share_loc = cfg_inout->share_loc;
+                s_stats.share_loc = cfg_inout->share_loc;
                 if (cfg_changed) *cfg_changed = true;
-                lora_widget_apply(cfg_inout);
             }
             snprintf(reply, reply_sz, "%s\n", s_current_cfg.share_loc ? "on" : "off");
+            return;
+        }
+        if (strcasecmp(sparam, "pin") == 0) {
+            if (sval[0] != '\0' && cfg_inout) {
+                uint32_t pin = (uint32_t)strtoul(sval, NULL, 10);
+                if (pin >= 100000 && pin <= 999999) {
+                    cfg_inout->ble_pin = pin;
+                    s_current_cfg.ble_pin = pin;
+                    s_stats.ble_pin = pin;
+                    meshcore_ble_update_pin(pin);
+                    if (cfg_changed) *cfg_changed = true;
+                    snprintf(reply, reply_sz, "%06lu\n", (unsigned long)pin);
+                } else {
+                    snprintf(reply, reply_sz, "Error: PIN must be 100000..999999\n");
+                }
+            } else {
+                snprintf(reply, reply_sz, "Usage: set pin <100000..999999>\n");
+            }
             return;
         }
         snprintf(reply, reply_sz, "Unknown parameter 'set %s'\n", sparam);
@@ -1585,6 +1989,7 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
                  "  get/set af           - Get or set airtime factor\n"
                  "  get/set dutycycle    - Get or set duty cycle limit (%%)\n"
                  "  get/set path.hash.mode - Get or set path hash mode (0|1|2)\n"
+                 "  get/set pin          - Get or set BLE companion 6-digit PIN\n"
                  "  stats-core           - Core node metrics\n"
                  "  stats-radio          - Radio layer metrics\n"
                  "  stats-packets        - Packet counters\n"
@@ -1613,8 +2018,10 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
         if (arg[0] != '\0' && cfg_inout) {
             strncpy(cfg_inout->node_name, arg, sizeof(cfg_inout->node_name) - 1);
             cfg_inout->node_name[sizeof(cfg_inout->node_name) - 1] = '\0';
+            strncpy(s_current_cfg.node_name, cfg_inout->node_name, sizeof(s_current_cfg.node_name) - 1);
+            strncpy(s_stats.node_name, cfg_inout->node_name, sizeof(s_stats.node_name) - 1);
+            meshcore_ble_update_name(cfg_inout->node_name);
             if (cfg_changed) *cfg_changed = true;
-            lora_widget_apply(cfg_inout);
         }
         snprintf(reply, reply_sz, "Node name: %s\nPubKey: %.16s...\n",
                  s_current_cfg.node_name, s_stats.pub_key_hex);
@@ -1622,8 +2029,9 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
         if (arg[0] != '\0' && cfg_inout) {
             strncpy(cfg_inout->channel_name, arg, sizeof(cfg_inout->channel_name) - 1);
             cfg_inout->channel_name[sizeof(cfg_inout->channel_name) - 1] = '\0';
+            strncpy(s_current_cfg.channel_name, cfg_inout->channel_name, sizeof(s_current_cfg.channel_name) - 1);
+            strncpy(s_stats.channel_name, cfg_inout->channel_name, sizeof(s_stats.channel_name) - 1);
             if (cfg_changed) *cfg_changed = true;
-            lora_widget_apply(cfg_inout);
         }
         snprintf(reply, reply_sz, "Channel: %s (hash 0x%02X)\n",
                  s_current_cfg.channel_name, s_stats.channel_hash);
@@ -1631,59 +2039,71 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
         if (arg[0] != '\0' && cfg_inout) {
             strncpy(cfg_inout->channel_psk, arg, sizeof(cfg_inout->channel_psk) - 1);
             cfg_inout->channel_psk[sizeof(cfg_inout->channel_psk) - 1] = '\0';
+            strncpy(s_current_cfg.channel_psk, cfg_inout->channel_psk, sizeof(s_current_cfg.channel_psk) - 1);
+            uint8_t secret32[32];
+            uint8_t ch_hash = 0;
+            if (meshcore_channel_key_from_psk(s_current_cfg.channel_psk, secret32, &ch_hash)) {
+                s_stats.channel_hash = ch_hash;
+            }
             if (cfg_changed) *cfg_changed = true;
-            lora_widget_apply(cfg_inout);
         }
         snprintf(reply, reply_sz, "Channel PSK: %s (hash 0x%02X)\n",
                  s_current_cfg.channel_psk, s_stats.channel_hash);
     } else if (strcasecmp(op, "repeat") == 0) {
         if (arg[0] != '\0' && cfg_inout) {
             cfg_inout->client_repeat = parse_on_off(arg, cfg_inout->client_repeat);
+            s_current_cfg.client_repeat = cfg_inout->client_repeat;
+            s_stats.client_repeat = cfg_inout->client_repeat;
             if (cfg_changed) *cfg_changed = true;
-            lora_widget_apply(cfg_inout);
         }
         snprintf(reply, reply_sz, "Client repeat: %s\n", s_current_cfg.client_repeat ? "ON" : "OFF");
     } else if (strcasecmp(op, "loc") == 0) {
         if (arg[0] != '\0' && cfg_inout) {
             cfg_inout->share_loc = parse_on_off(arg, cfg_inout->share_loc);
+            s_current_cfg.share_loc = cfg_inout->share_loc;
+            s_stats.share_loc = cfg_inout->share_loc;
             if (cfg_changed) *cfg_changed = true;
-            lora_widget_apply(cfg_inout);
         }
         snprintf(reply, reply_sz, "Share location: %s\n", s_current_cfg.share_loc ? "ON" : "OFF");
     } else if (strcasecmp(op, "boost") == 0) {
         if (arg[0] != '\0' && cfg_inout) {
             cfg_inout->rx_boosted = parse_on_off(arg, cfg_inout->rx_boosted);
+            s_current_cfg.rx_boosted = cfg_inout->rx_boosted;
+            s_stats.rx_boosted = cfg_inout->rx_boosted;
             if (cfg_changed) *cfg_changed = true;
-            lora_widget_apply(cfg_inout);
         }
         snprintf(reply, reply_sz, "RX Boosted: %s\n", s_current_cfg.rx_boosted ? "ON" : "OFF");
     } else if (strcasecmp(op, "power") == 0) {
         if (arg[0] != '\0' && cfg_inout) {
             cfg_inout->tx_power_dbm = (int8_t)atoi(arg);
+            s_current_cfg.tx_power_dbm = cfg_inout->tx_power_dbm;
+            s_stats.tx_power_dbm = cfg_inout->tx_power_dbm;
             if (cfg_changed) *cfg_changed = true;
-            lora_widget_apply(cfg_inout);
         }
         snprintf(reply, reply_sz, "TX Power: %d dBm\n", s_current_cfg.tx_power_dbm);
     } else if (strcasecmp(op, "sf") == 0) {
         if (arg[0] != '\0' && cfg_inout) {
             cfg_inout->sf = (uint8_t)atoi(arg);
+            s_current_cfg.sf = cfg_inout->sf;
+            s_stats.sf = cfg_inout->sf;
             if (cfg_changed) *cfg_changed = true;
-            lora_widget_apply(cfg_inout);
         }
         snprintf(reply, reply_sz, "SF: %u\n", s_current_cfg.sf);
     } else if (strcasecmp(op, "cr") == 0) {
         if (arg[0] != '\0' && cfg_inout) {
             cfg_inout->cr = (uint8_t)atoi(arg);
+            s_current_cfg.cr = cfg_inout->cr;
+            s_stats.cr = cfg_inout->cr;
             if (cfg_changed) *cfg_changed = true;
-            lora_widget_apply(cfg_inout);
         }
         snprintf(reply, reply_sz, "CR: 4/%u\n", s_current_cfg.cr);
     } else if (strcasecmp(op, "freq") == 0) {
         if (arg[0] != '\0' && cfg_inout) {
             float f = (float)atof(arg);
             cfg_inout->freq_khz = (f < 3000.0f) ? (uint32_t)(f * 1000.0f + 0.5f) : (uint32_t)f;
+            s_current_cfg.freq_khz = cfg_inout->freq_khz;
+            s_stats.freq_khz = cfg_inout->freq_khz;
             if (cfg_changed) *cfg_changed = true;
-            lora_widget_apply(cfg_inout);
         }
         snprintf(reply, reply_sz, "Frequency: %lu kHz\n", (unsigned long)s_current_cfg.freq_khz);
     } else if (strcasecmp(op, "bw") == 0) {
@@ -1692,8 +2112,11 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
             uint32_t hz = (bw < 1000.0f) ? (uint32_t)(bw * 1000.0f + 0.5f) : (uint32_t)bw;
             cfg_inout->bw_hz = hz;
             cfg_inout->bw_khz = (uint16_t)(hz / 1000);
+            s_current_cfg.bw_hz = hz;
+            s_current_cfg.bw_khz = cfg_inout->bw_khz;
+            s_stats.bw_hz = hz;
+            s_stats.bw_khz = cfg_inout->bw_khz;
             if (cfg_changed) *cfg_changed = true;
-            lora_widget_apply(cfg_inout);
         }
         snprintf(reply, reply_sz, "Bandwidth: %lu Hz (%u kHz)\n",
                  (unsigned long)s_current_cfg.bw_hz, s_current_cfg.bw_khz);

@@ -218,6 +218,7 @@ target_link_libraries(ui PUBLIC gfx locale datastore util map radar_logic adsb_l
 add_library(meshcore_logic STATIC
             ${REPO_ROOT}/components/lora_widget/meshcore_proto.c
             ${REPO_ROOT}/components/lora_widget/meshcore_crypto.c
+            ${REPO_ROOT}/components/lora_widget/meshcore_companion.c
             ${REPO_ROOT}/components/lora_widget/ed25519/fe.c
             ${REPO_ROOT}/components/lora_widget/ed25519/ge.c
             ${REPO_ROOT}/components/lora_widget/ed25519/sc.c

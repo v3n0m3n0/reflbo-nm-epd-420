@@ -53,6 +53,7 @@ static const struct {
 } k_offered[] = {
     { UI_OFFERED_RAIN, "rain", "Rain radar", UI_LAYOUT_RADAR, true, false },
     { UI_OFFERED_FLIGHTS, "flights", "Flights", UI_LAYOUT_FLIGHTS, true, false },
+    { UI_OFFERED_LORA, "lora", "LoRa", UI_LAYOUT_LORA, true, false },
     { UI_OFFERED_SOLAR, "solar", "Solar", UI_LAYOUT_SOLAR, false, true },
     { UI_OFFERED_ENERGY, "energy", "Energy", UI_LAYOUT_ENERGY, false, false },
     { UI_OFFERED_PC, "pc", "PC", UI_LAYOUT_PC, false, false }, /* M7: filled from the first catalogue */
@@ -100,22 +101,34 @@ int ui_presets_find(const ui_presets_t *p, const char *id)
     return -1;
 }
 
-int ui_presets_next(const ui_presets_t *p, bool always)
-{
-    return ui_presets_cycle_next(p, always, 0, 0, 0);
-}
-
-int ui_presets_cycle_next(const ui_presets_t *p, bool always, time_t now, int32_t lat_e4, int32_t lon_e4)
+int ui_presets_cycle_next_with_lora(const ui_presets_t *p, bool always, bool lora_on,
+                                    time_t now, int32_t lat_e4, int32_t lon_e4)
 {
     for (int step = 1; step < p->count; step++) {
         int i = (p->active + step) % p->count;
         const ui_preset_t *q = &p->presets[i];
         if (q->in_cycle && (always || q->layout != UI_LAYOUT_FLIGHTS) &&
+            (lora_on || q->layout != UI_LAYOUT_LORA) &&
             (now == 0 || ui_window_open(&q->window, now, lat_e4, lon_e4, NULL))) {
             return i;
         }
     }
     return p->active;
+}
+
+int ui_presets_next_with_lora(const ui_presets_t *p, bool always, bool lora_on)
+{
+    return ui_presets_cycle_next_with_lora(p, always, lora_on, 0, 0, 0);
+}
+
+int ui_presets_next(const ui_presets_t *p, bool always)
+{
+    return ui_presets_next_with_lora(p, always, false);
+}
+
+int ui_presets_cycle_next(const ui_presets_t *p, bool always, time_t now, int32_t lat_e4, int32_t lon_e4)
+{
+    return ui_presets_cycle_next_with_lora(p, always, false, now, lat_e4, lon_e4);
 }
 
 /* ---- the presets' own titles (spec §5.4, D42) ---- */

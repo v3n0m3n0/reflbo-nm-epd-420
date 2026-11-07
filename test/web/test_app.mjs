@@ -1527,6 +1527,7 @@ const LORA_SETTINGS = {
     airtime_factor_x10: 10,
     wake_on_rx: false,
     share_loc: false,
+    ble_pin: 0,
     node_name: 'NM-EPD-420',
     channel_name: 'Public',
     channel_psk: 'izOH6cXN6mrJ5e26oRXNcg==',
@@ -1543,6 +1544,8 @@ const LORA_STATUS = {
   lora: {
     enabled: true,
     initialized: true,
+    ble_pin: 482915,
+    ble_connected: false,
     node_name: 'NM-EPD-420',
     pub_key: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
     freq_khz: 868000,
@@ -1801,6 +1804,7 @@ test('changing LoRa settings saves via PATCH /api/settings', async () => {
   assert.deepEqual(patches.at(-1), {
     lora: {
       enabled: false,
+      ble_pin: 0,
       freq_khz: 915000,
       sf: 10,
       bw_khz: 125,
@@ -1977,6 +1981,7 @@ test('applying MeshCore EU/UK Narrow preset saves all MeshCore fields', async ()
   assert.equal(p.path_hash_mode, 0);
   assert.equal(p.airtime_factor, 1.0);
   assert.equal(p.share_loc, false);
+  assert.equal(p.ble_pin, 0);
 });
 
 test('action buttons trigger advert, discover, and reset endpoints', async () => {
@@ -2046,6 +2051,88 @@ test('executing a MeshCore CLI command calls POST /api/lora/cli and displays out
   await buttonNamed(main, 'stats-radio').click();
   await settle();
   assert.deepEqual(actionsCalled.cli, { cmd: 'stats-radio' });
+});
+
+test('navigating to #lora displays companion BLE status with PIN and state in #lora-live-status', async () => {
+  const { ctx, main } = await load(loraDevice([]));
+  await ctx.loraPage();
+
+  const liveStatus = below(main).find((e) => e.attrs?.id === 'lora-live-status' || e.id === 'lora-live-status');
+  assert.ok(liveStatus, '#lora-live-status element exists');
+  const txt = text(liveStatus);
+  assert.match(txt, /Companion BLE/);
+  assert.match(txt, /Advertising/);
+  assert.match(txt, /MeshCore-NM-EPD-420/);
+  assert.match(txt, /482915/);
+
+  /* Now test with connected state */
+  const connectedDevice = loraDevice([], {}, { lora: { ble_connected: true, node_name: 'CustomNode', ble_pin: 123456 } });
+  const connPage = await load(connectedDevice);
+  await connPage.ctx.loraPage();
+  const connLive = below(connPage.main).find((e) => e.attrs?.id === 'lora-live-status' || e.id === 'lora-live-status');
+  const connTxt = text(connLive);
+  assert.match(connTxt, /Connected/);
+  assert.match(connTxt, /MeshCore-CustomNode/);
+  assert.match(connTxt, /123456/);
+});
+
+test('LoRa settings form contains #f-lora-ble-pin and #btn-lora-gen-pin and saves custom PIN', async () => {
+  const patches = [];
+  const { ctx, main } = await load(loraDevice(patches));
+  await ctx.loraPage();
+
+  const pinInput = below(main).find((e) => e.attrs?.id === 'f-lora-ble-pin' || e.id === 'f-lora-ble-pin');
+  const genBtn = below(main).find((e) => e.attrs?.id === 'btn-lora-gen-pin' || e.id === 'btn-lora-gen-pin');
+  assert.ok(pinInput, '#f-lora-ble-pin exists');
+  assert.ok(genBtn, '#btn-lora-gen-pin exists');
+
+  await type(pinInput, '654321');
+  await buttonNamed(main, 'Save').click();
+  await settle();
+
+  assert.match(text(main), /Saved\./);
+  assert.equal(patches.at(-1).lora.ble_pin, 654321);
+});
+
+test('clicking #btn-lora-gen-pin generates a valid 6-digit random PIN', async () => {
+  const { ctx, main } = await load(loraDevice([]));
+  await ctx.loraPage();
+
+  const pinInput = below(main).find((e) => e.attrs?.id === 'f-lora-ble-pin' || e.id === 'f-lora-ble-pin');
+  const genBtn = below(main).find((e) => e.attrs?.id === 'btn-lora-gen-pin' || e.id === 'btn-lora-gen-pin');
+  await genBtn.click();
+
+  const generated = pinInput.value;
+  assert.match(generated, /^[1-9]\d{5}$/, 'generated PIN is 6 digits');
+});
+
+test('LoRa settings form validates BLE PIN out-of-range', async () => {
+  const patches = [];
+  const { ctx, main } = await load(loraDevice(patches));
+  await ctx.loraPage();
+
+  const pinInput = below(main).find((e) => e.attrs?.id === 'f-lora-ble-pin' || e.id === 'f-lora-ble-pin');
+  await type(pinInput, '12345'); /* only 5 digits */
+  await buttonNamed(main, 'Save').click();
+  await settle();
+
+  assert.equal(patches.length, 0);
+  assert.match(text(main), /BLE PIN must be 0/);
+});
+
+test('a preset on the LoRa layout has no slots to fill', async () => {
+  const catalogue = { ...CATALOGUE, layouts: [...CATALOGUE.layouts, { id: 'lora', slots: [] }] };
+  const doc = { schema: 1, active: 'lora', presets: [{ id: 'lora', name: 'LoRa Node', layout: 'lora', in_cycle: false,
+                                                          slots: {}, options: {} }],
+                cycle: { enabled: false, interval_s: 60 }, schedule: { enabled: false, entries: [] } };
+  const { ctx, main } = await load({
+    'GET /api/layouts': () => reply(200, catalogue), 'GET /api/presets': () => reply(200, doc),
+    'GET /api/fields': () => reply(200, FIELDS), 'POST /api/preview.bmp': () => reply(200, 'BM', 'image/bmp'),
+    'GET /api/settings': () => reply(200, STEP_SETTINGS),
+  });
+  await ctx.presetsPage();
+  assert.match(text(main), /LoRa MeshCore dashboard/);
+  assert.match(text(main), /LoRa Node/);
 });
 
 
