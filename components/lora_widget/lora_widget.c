@@ -37,6 +37,68 @@ static int32_t s_lat_e6 = 0;
 static int32_t s_lon_e6 = 0;
 static bool s_has_loc = false;
 
+static uint16_t s_batt_mv = 4190;
+static uint8_t s_batt_pct = 99;
+
+#define SEEN_PKT_CACHE_SIZE 64
+#define SEEN_PKT_TTL_MS     120000U /* 2 minutes */
+typedef struct {
+    uint8_t hash[8];
+    uint32_t seen_ms;
+    bool valid;
+} seen_pkt_entry_t;
+static seen_pkt_entry_t s_seen_pkts[SEEN_PKT_CACHE_SIZE];
+static size_t s_seen_pkt_next = 0;
+
+static void mark_packet_seen(const meshcore_packet_t *pkt, uint32_t now_ms)
+{
+    if (!pkt) return;
+    uint8_t h[8];
+    meshcore_packet_hash(pkt, h);
+    for (size_t i = 0; i < SEEN_PKT_CACHE_SIZE; i++) {
+        if (s_seen_pkts[i].valid && memcmp(s_seen_pkts[i].hash, h, 8) == 0) {
+            s_seen_pkts[i].seen_ms = now_ms;
+            return;
+        }
+    }
+    s_seen_pkts[s_seen_pkt_next].valid = true;
+    s_seen_pkts[s_seen_pkt_next].seen_ms = now_ms;
+    memcpy(s_seen_pkts[s_seen_pkt_next].hash, h, 8);
+    s_seen_pkt_next = (s_seen_pkt_next + 1) % SEEN_PKT_CACHE_SIZE;
+}
+
+static bool is_packet_seen_and_mark(const meshcore_packet_t *pkt, uint32_t now_ms)
+{
+    if (!pkt) return false;
+    uint8_t h[8];
+    meshcore_packet_hash(pkt, h);
+    for (size_t i = 0; i < SEEN_PKT_CACHE_SIZE; i++) {
+        if (s_seen_pkts[i].valid && memcmp(s_seen_pkts[i].hash, h, 8) == 0) {
+            if ((now_ms - s_seen_pkts[i].seen_ms) < SEEN_PKT_TTL_MS) {
+                return true;
+            }
+            s_seen_pkts[i].seen_ms = now_ms;
+            return false;
+        }
+    }
+    s_seen_pkts[s_seen_pkt_next].valid = true;
+    s_seen_pkts[s_seen_pkt_next].seen_ms = now_ms;
+    memcpy(s_seen_pkts[s_seen_pkt_next].hash, h, 8);
+    s_seen_pkt_next = (s_seen_pkt_next + 1) % SEEN_PKT_CACHE_SIZE;
+    return false;
+}
+
+typedef struct {
+    bool pending_channel_txt;
+    uint32_t msg_ts;
+    char text[128];
+    bool pending_advert;
+    bool advert_flood;
+    bool pending_ack_confirm;
+    uint8_t ack_tag[4];
+} pending_ble_tx_t;
+static pending_ble_tx_t s_pending_ble_tx;
+
 static uint8_t s_pub_key[32];
 static uint8_t s_prv_key[64];
 static bool s_keys_initialized = false;
@@ -534,6 +596,23 @@ static void lora_rx_task(void *arg)
             if (resp_len > 0) {
                 meshcore_ble_send(resp, resp_len);
             }
+            if (s_pending_ble_tx.pending_ack_confirm) {
+                uint8_t ack_push[9];
+                ack_push[0] = PUSH_CODE_SEND_CONFIRMED;
+                memcpy(&ack_push[1], s_pending_ble_tx.ack_tag, 4);
+                uint32_t rtt_ms = 250;
+                memcpy(&ack_push[5], &rtt_ms, 4);
+                push_companion_event(ack_push, sizeof(ack_push));
+                s_pending_ble_tx.pending_ack_confirm = false;
+            }
+            if (s_pending_ble_tx.pending_channel_txt) {
+                s_pending_ble_tx.pending_channel_txt = false;
+                lora_widget_send_channel_msg_ts(s_pending_ble_tx.msg_ts, s_pending_ble_tx.text);
+            }
+            if (s_pending_ble_tx.pending_advert) {
+                s_pending_ble_tx.pending_advert = false;
+                lora_widget_send_advert(s_pending_ble_tx.advert_flood);
+            }
             if (cfg_changed) {
                 lora_widget_apply(&s_current_cfg);
             }
@@ -640,6 +719,16 @@ static void lora_rx_task(void *arg)
             uint8_t route = meshcore_packet_get_route_type(&s_pkt);
             uint8_t ptype = meshcore_packet_get_payload_type(&s_pkt);
             uint8_t hops = meshcore_packet_get_hop_count(&s_pkt);
+
+#ifdef ESP_PLATFORM
+            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+#else
+            uint32_t now_ms = (uint32_t)(time(NULL) * 1000ULL);
+#endif
+            if (is_packet_seen_and_mark(&s_pkt, now_ms)) {
+                ESP_LOGD(TAG, "Dropping duplicate flood packet (hops=%u)", (unsigned)hops);
+                continue;
+            }
 
             if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 if (route == MESHCORE_ROUTE_FLOOD || route == MESHCORE_ROUTE_TRANSPORT_FLOOD) {
@@ -755,19 +844,34 @@ static void lora_rx_task(void *arg)
                     };
                     strncpy(msg.text, text, sizeof(msg.text) - 1);
 
+                    bool is_dup_msg = false;
                     if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                        append_message_history(&msg);
-                        /* Extract sender name before colon */
-                        char *colon = strstr(text, ": ");
-                        if (colon) {
-                            size_t name_len = colon - text;
-                            if (name_len >= sizeof(s_stats.last_sender)) {
-                                name_len = sizeof(s_stats.last_sender) - 1;
+                        for (int i = 0; i < s_stats.msg_count && i < MESHCORE_MAX_MESSAGES; i++) {
+                            if ((s_messages[i].timestamp == ts || s_messages[i].timestamp == 0 || ts == 0) &&
+                                strcmp(s_messages[i].text, text) == 0) {
+                                is_dup_msg = true;
+                                break;
                             }
-                            memcpy(s_stats.last_sender, text, name_len);
-                            s_stats.last_sender[name_len] = '\0';
+                        }
+                        if (!is_dup_msg) {
+                            append_message_history(&msg);
+                            /* Extract sender name before colon */
+                            char *colon = strstr(text, ": ");
+                            if (colon) {
+                                size_t name_len = colon - text;
+                                if (name_len >= sizeof(s_stats.last_sender)) {
+                                    name_len = sizeof(s_stats.last_sender) - 1;
+                                }
+                                memcpy(s_stats.last_sender, text, name_len);
+                                s_stats.last_sender[name_len] = '\0';
+                            }
                         }
                         xSemaphoreGive(s_stats_mutex);
+                    }
+
+                    if (is_dup_msg) {
+                        ESP_LOGD(TAG, "Dropping duplicate message payload: '%s'", text);
+                        continue;
                     }
 
                     /* Enqueue message for companion app CMD_SYNC_NEXT_MESSAGE */
@@ -850,13 +954,23 @@ static void companion_set_time(uint32_t epoch)
 
 static bool companion_send_advert(bool flood)
 {
-    return (lora_widget_send_advert(flood) == ESP_OK);
+    s_pending_ble_tx.pending_advert = true;
+    s_pending_ble_tx.advert_flood = flood;
+    return true;
 }
 
 static bool companion_send_channel_txt(uint8_t channel_idx, const char *text)
 {
     (void)channel_idx;
-    return (lora_widget_send_channel_msg(text) == ESP_OK);
+    s_pending_ble_tx.pending_channel_txt = true;
+    s_pending_ble_tx.msg_ts = s_companion_ctx.last_tx_msg_ts;
+    if (text) {
+        strncpy(s_pending_ble_tx.text, text, sizeof(s_pending_ble_tx.text) - 1);
+        s_pending_ble_tx.text[sizeof(s_pending_ble_tx.text) - 1] = '\0';
+    } else {
+        s_pending_ble_tx.text[0] = '\0';
+    }
+    return true;
 }
 
 static void companion_exec_cli(const char *cmd, char *reply, size_t reply_sz)
@@ -945,7 +1059,7 @@ size_t lora_widget_handle_companion_cmd(const uint8_t *cmd, size_t cmd_len,
     companion_env_t env = {
         .lat_e6 = s_lat_e6,
         .lon_e6 = s_lon_e6,
-        .batt_mv = 4000,
+        .batt_mv = s_batt_mv,
         .storage_used_kb = 128,
         .storage_total_kb = 4096,
         .get_time_s = companion_get_time,
@@ -958,6 +1072,11 @@ size_t lora_widget_handle_companion_cmd(const uint8_t *cmd, size_t cmd_len,
         .send_frame_cb = companion_send_frame_cb,
     };
     memcpy(env.pub_key, s_pub_key, 32);
+
+    if (cmd[0] == CMD_SEND_TXT_MSG && cmd_len >= 7) {
+        s_pending_ble_tx.pending_ack_confirm = true;
+        memcpy(s_pending_ble_tx.ack_tag, &cmd[3], 4);
+    }
 
     return meshcore_companion_handle_cmd(&s_companion_ctx, &env,
                                          cfg_inout ? cfg_inout : &s_current_cfg,
@@ -1431,6 +1550,8 @@ void lora_widget_reset_stats(void)
         memset(s_adverts, 0, sizeof(s_adverts));
         memset(s_neighbors, 0, sizeof(s_neighbors));
         memset(s_messages, 0, sizeof(s_messages));
+        memset(s_seen_pkts, 0, sizeof(s_seen_pkts));
+        s_seen_pkt_next = 0;
         xSemaphoreGive(s_stats_mutex);
     }
 }
@@ -1453,6 +1574,16 @@ void lora_widget_set_location(int32_t lat_e4, int32_t lon_e4)
     s_has_loc = (lat_e4 != 0 || lon_e4 != 0);
 }
 
+void lora_widget_set_battery(uint16_t batt_mv, uint8_t level_pct)
+{
+    s_batt_pct = (level_pct > 100) ? 100 : level_pct;
+    if (batt_mv >= 2500 && batt_mv <= 4500) {
+        s_batt_mv = batt_mv;
+    } else {
+        s_batt_mv = (uint16_t)(3000 + (uint16_t)s_batt_pct * 12);
+    }
+}
+
 esp_err_t lora_widget_send_advert(bool flood)
 {
     init_node_keys();
@@ -1471,6 +1602,16 @@ esp_err_t lora_widget_send_advert(bool flood)
 
     if (raw_sz == 0) {
         return ESP_ERR_NO_MEM;
+    }
+
+    meshcore_packet_t tx_pkt;
+    if (meshcore_packet_decode(&tx_pkt, raw, raw_sz)) {
+#ifdef ESP_PLATFORM
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+#else
+        uint32_t now_ms = (uint32_t)(time(NULL) * 1000ULL);
+#endif
+        mark_packet_seen(&tx_pkt, now_ms);
     }
 
     esp_err_t err = sx1262_transmit(raw, raw_sz);
@@ -1506,18 +1647,18 @@ esp_err_t lora_widget_send_discover(void)
     return err;
 }
 
-esp_err_t lora_widget_send_channel_msg(const char *text)
+esp_err_t lora_widget_send_channel_msg_ts(uint32_t ts, const char *text)
 {
     if (!text || text[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
 
     uint8_t raw[256];
-    uint32_t ts = (uint32_t)time(NULL);
+    uint32_t msg_time = (ts != 0) ? ts : (uint32_t)time(NULL);
     size_t raw_sz = meshcore_build_grp_txt(
         raw, sizeof(raw),
         s_current_cfg.channel_psk,
-        ts,
+        msg_time,
         s_current_cfg.node_name,
         text
     );
@@ -1526,11 +1667,21 @@ esp_err_t lora_widget_send_channel_msg(const char *text)
         return ESP_ERR_NO_MEM;
     }
 
+    meshcore_packet_t tx_pkt;
+    if (meshcore_packet_decode(&tx_pkt, raw, raw_sz)) {
+#ifdef ESP_PLATFORM
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+#else
+        uint32_t now_ms = (uint32_t)(time(NULL) * 1000ULL);
+#endif
+        mark_packet_seen(&tx_pkt, now_ms);
+    }
+
     esp_err_t err = sx1262_transmit(raw, raw_sz);
     if (err == ESP_OK) {
         meshcore_msg_t msg = {
-            .timestamp = ts,
-            .rx_time_s = ts,
+            .timestamp = msg_time,
+            .rx_time_s = (uint32_t)time(NULL),
             .rssi_dbm = 0,
             .snr_q4 = 0,
             .hops = 0,
@@ -1540,11 +1691,19 @@ esp_err_t lora_widget_send_channel_msg(const char *text)
 
         if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             s_stats.sent_flood++;
+            s_stats.last_packet_time_s = (uint32_t)time(NULL);
+            strncpy(s_stats.last_sender, s_current_cfg.node_name, sizeof(s_stats.last_sender) - 1);
+            s_stats.last_sender[sizeof(s_stats.last_sender) - 1] = '\0';
             append_message_history(&msg);
             xSemaphoreGive(s_stats_mutex);
         }
     }
     return err;
+}
+
+esp_err_t lora_widget_send_channel_msg(const char *text)
+{
+    return lora_widget_send_channel_msg_ts(0, text);
 }
 
 static bool parse_on_off(const char *s, bool default_val)

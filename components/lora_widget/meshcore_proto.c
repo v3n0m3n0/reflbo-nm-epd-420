@@ -124,6 +124,34 @@ size_t meshcore_packet_encode(const meshcore_packet_t *pkt, uint8_t *raw, size_t
     return i;
 }
 
+void meshcore_packet_hash(const meshcore_packet_t *pkt, uint8_t hash_out[8])
+{
+    if (pkt == NULL || hash_out == NULL) {
+        if (hash_out != NULL) {
+            memset(hash_out, 0, 8);
+        }
+        return;
+    }
+
+    util_sha256_t sha;
+    util_sha256_init(&sha);
+
+    uint8_t ptype = meshcore_packet_get_payload_type(pkt);
+    util_sha256_update(&sha, &ptype, 1);
+
+    if (ptype == MESHCORE_PAYLOAD_TRACE) {
+        util_sha256_update(&sha, &pkt->path_len, sizeof(pkt->path_len));
+    }
+
+    if (pkt->payload_len > 0) {
+        util_sha256_update(&sha, pkt->payload, pkt->payload_len);
+    }
+
+    uint8_t full_hash[UTIL_SHA256_LEN];
+    util_sha256_final(&sha, full_hash);
+    memcpy(hash_out, full_hash, 8);
+}
+
 /* ========================================================================= */
 /* Advertisement Encoding & Parsing                                          */
 /* ========================================================================= */

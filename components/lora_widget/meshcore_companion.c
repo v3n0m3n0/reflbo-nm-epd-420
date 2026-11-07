@@ -376,14 +376,31 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
 
     case CMD_SEND_TXT_MSG: {
         if (cmd_len < 14) return write_err(resp_out, resp_max, COMPANION_ERR_ILLEGAL_ARG);
+        uint8_t attempt = cmd[2];
+        uint32_t msg_ts = rd_le32(&cmd[3]);
         char text[128];
         size_t tlen = cmd_len - 13;
         if (tlen >= sizeof(text)) tlen = sizeof(text) - 1;
         memcpy(text, &cmd[13], tlen);
         text[tlen] = '\0';
-        if (env->send_channel_txt) {
-            env->send_channel_txt(0, text);
+
+        uint32_t now_s = env->get_time_s ? env->get_time_s() : 0;
+        bool is_dup = (attempt > 0) ||
+                      (ctx->last_tx_msg_ts != 0 &&
+                       ctx->last_tx_msg_ts == msg_ts &&
+                       strcmp(ctx->last_tx_msg_text, text) == 0 &&
+                       (now_s == 0 || ctx->last_tx_seen_s == 0 || (now_s - ctx->last_tx_seen_s) <= 15));
+
+        if (!is_dup) {
+            ctx->last_tx_msg_ts = msg_ts;
+            strncpy(ctx->last_tx_msg_text, text, sizeof(ctx->last_tx_msg_text) - 1);
+            ctx->last_tx_msg_text[sizeof(ctx->last_tx_msg_text) - 1] = '\0';
+            ctx->last_tx_seen_s = now_s;
+            if (env->send_channel_txt) {
+                env->send_channel_txt(0, text);
+            }
         }
+
         if (resp_max < 10) return 0;
         resp_out[0] = RESP_CODE_SENT;
         resp_out[1] = 1; /* flood */
@@ -395,13 +412,27 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
     case CMD_SEND_CHANNEL_TXT_MSG: {
         if (cmd_len <= 7) return write_err(resp_out, resp_max, COMPANION_ERR_ILLEGAL_ARG);
         uint8_t ch_idx = cmd[2];
+        uint32_t msg_ts = rd_le32(&cmd[3]);
         char text[128];
         size_t tlen = cmd_len - 7;
         if (tlen >= sizeof(text)) tlen = sizeof(text) - 1;
         memcpy(text, &cmd[7], tlen);
         text[tlen] = '\0';
-        if (env->send_channel_txt) {
-            env->send_channel_txt(ch_idx, text);
+
+        uint32_t now_s = env->get_time_s ? env->get_time_s() : 0;
+        bool is_dup = (ctx->last_tx_msg_ts != 0 &&
+                       ctx->last_tx_msg_ts == msg_ts &&
+                       strcmp(ctx->last_tx_msg_text, text) == 0 &&
+                       (now_s == 0 || ctx->last_tx_seen_s == 0 || (now_s - ctx->last_tx_seen_s) <= 15));
+
+        if (!is_dup) {
+            ctx->last_tx_msg_ts = msg_ts;
+            strncpy(ctx->last_tx_msg_text, text, sizeof(ctx->last_tx_msg_text) - 1);
+            ctx->last_tx_msg_text[sizeof(ctx->last_tx_msg_text) - 1] = '\0';
+            ctx->last_tx_seen_s = now_s;
+            if (env->send_channel_txt) {
+                env->send_channel_txt(ch_idx, text);
+            }
         }
         return write_ok(resp_out, resp_max);
     }

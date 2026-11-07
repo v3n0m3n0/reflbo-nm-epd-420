@@ -871,6 +871,58 @@ void test_companion_v10_startup_commands(void)
     TEST_ASSERT_EQUAL_UINT32(918000, f6);
 }
 
+void test_packet_hash_ignores_hops_and_path(void)
+{
+    meshcore_packet_t pkt1;
+    memset(&pkt1, 0, sizeof(pkt1));
+    pkt1.header = (uint8_t)((MESHCORE_ROUTE_FLOOD & 0x03) | ((MESHCORE_PAYLOAD_GRP_TXT & 0x0F) << 2));
+    pkt1.path_len = 0; /* hops = 0 */
+    pkt1.payload_len = 16;
+    memcpy(pkt1.payload, "12345678abcdefgh", 16);
+
+    meshcore_packet_t pkt2;
+    memset(&pkt2, 0, sizeof(pkt2));
+    pkt2.header = (uint8_t)((MESHCORE_ROUTE_FLOOD & 0x03) | ((MESHCORE_PAYLOAD_GRP_TXT & 0x0F) << 2));
+    pkt2.path_len = 2; /* hops = 2 */
+    pkt2.path[0] = 0xAA;
+    pkt2.path[1] = 0xBB;
+    pkt2.payload_len = 16;
+    memcpy(pkt2.payload, "12345678abcdefgh", 16);
+
+    uint8_t hash1[8] = {0};
+    uint8_t hash2[8] = {0};
+    meshcore_packet_hash(&pkt1, hash1);
+    meshcore_packet_hash(&pkt2, hash2);
+
+    /* Verify non-zero and identical */
+    uint8_t zero8[8] = {0};
+    TEST_ASSERT_FALSE(memcmp(hash1, zero8, 8) == 0);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(hash1, hash2, 8);
+
+    /* Verify modifying payload changes the hash */
+    meshcore_packet_t pkt3 = pkt1;
+    pkt3.payload[0] ^= 0x55;
+    uint8_t hash3[8] = {0};
+    meshcore_packet_hash(&pkt3, hash3);
+    TEST_ASSERT_FALSE(memcmp(hash1, hash3, 8) == 0);
+
+    /* Verify for TRACE packets, path_len is part of the hash */
+    meshcore_packet_t tr1;
+    memset(&tr1, 0, sizeof(tr1));
+    tr1.header = (uint8_t)((MESHCORE_ROUTE_FLOOD & 0x03) | ((MESHCORE_PAYLOAD_TRACE & 0x0F) << 2));
+    tr1.path_len = 1;
+    tr1.payload_len = 8;
+    memcpy(tr1.payload, "TRACEPAY", 8);
+
+    meshcore_packet_t tr2 = tr1;
+    tr2.path_len = 2;
+
+    uint8_t h_tr1[8] = {0}, h_tr2[8] = {0};
+    meshcore_packet_hash(&tr1, h_tr1);
+    meshcore_packet_hash(&tr2, h_tr2);
+    TEST_ASSERT_FALSE(memcmp(h_tr1, h_tr2, 8) == 0);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -878,6 +930,7 @@ int main(void)
     RUN_TEST(test_aes128_ecb_standard_vectors);
     RUN_TEST(test_encrypt_then_mac_roundtrip_and_tamper);
     RUN_TEST(test_meshcore_packet_encode_decode);
+    RUN_TEST(test_packet_hash_ignores_hops_and_path);
     RUN_TEST(test_advert_build_and_parse_verified);
     RUN_TEST(test_discover_req_resp_roundtrip);
     RUN_TEST(test_group_text_public_channel_polish_utf8);

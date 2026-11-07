@@ -162,6 +162,13 @@ bool meshcore_packet_decode(meshcore_packet_t *pkt, const uint8_t *raw, size_t l
 
 size_t meshcore_packet_encode(const meshcore_packet_t *pkt, uint8_t *raw, size_t cap);
 
+/**
+ * Calculate the 8-byte MeshCore packet deduplication hash:
+ * SHA-256 over [payload_type (1B)] + [path_len if TRACE] + [payload (payload_len B)].
+ * Independent of hop count and path bytes, matching MeshCore Packet::calculatePacketHash().
+ */
+void meshcore_packet_hash(const meshcore_packet_t *pkt, uint8_t hash_out[8]);
+
 uint8_t meshcore_packet_get_route_type(const meshcore_packet_t *pkt);
 
 uint8_t meshcore_packet_get_payload_type(const meshcore_packet_t *pkt);

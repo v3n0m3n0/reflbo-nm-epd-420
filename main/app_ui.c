@@ -215,6 +215,10 @@ void app_ui_apply_settings(void)
         }
     }
     lora_widget_set_location(s.settings.lat_e4, s.settings.lon_e4);
+    sensors_battery_t bat = sensors_battery(time(NULL));
+    if (bat.smoothed_mv > 0) {
+        lora_widget_set_battery((uint16_t)bat.smoothed_mv, (uint8_t)(bat.level >= 0 ? bat.level : 0));
+    }
     lora_widget_apply(&s.settings.lora);
     if (!s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
         app_ui_select(ui_presets_next_with_lora(&s_presets, s.settings.sync_mode == SETTINGS_SYNC_ALWAYS, false), false);
@@ -533,6 +537,7 @@ void app_ui_sample(time_t now)
     err = sensors_sample_battery(now);
     if (err == ESP_OK) {
         sensors_battery_t bat = sensors_battery(now);
+        lora_widget_set_battery((uint16_t)(bat.smoothed_mv > 0 ? bat.smoothed_mv : 0), (uint8_t)(bat.level >= 0 ? bat.level : 0));
         ds_set_battery(&s.ds, bat.level, bat.smoothed_mv, ds_battery_state(bat.state), now);
         int days10 = sensors_battery_days_left10(now);
         if (days10 >= 0) {

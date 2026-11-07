@@ -175,6 +175,11 @@ typedef struct {
     uint8_t  telemetry_mode;
     uint8_t  advert_loc_policy;
     uint8_t  multi_acks;
+
+    /* Outgoing message deduplication state */
+    uint32_t last_tx_msg_ts;
+    char     last_tx_msg_text[128];
+    uint32_t last_tx_seen_s;
 } companion_context_t;
 
 typedef struct {

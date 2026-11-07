@@ -113,6 +113,9 @@ lora_stats_t lora_widget_get_stats(void);
 /* Sets current device coordinates from main settings for adverts */
 void lora_widget_set_location(int32_t lat_e4, int32_t lon_e4);
 
+/* Sets current battery voltage (mV) and percentage (0..100) for Companion App */
+void lora_widget_set_battery(uint16_t batt_mv, uint8_t level_pct);
+
 /* Sends a signed MeshCore Node Advert packet (flood or direct) */
 esp_err_t lora_widget_send_advert(bool flood);
 
@@ -121,6 +124,9 @@ esp_err_t lora_widget_send_discover(void);
 
 /* Sends an encrypted group text message on the configured channel */
 esp_err_t lora_widget_send_channel_msg(const char *text);
+
+/* Sends an encrypted group text message with explicit timestamp (or 0 for current time) */
+esp_err_t lora_widget_send_channel_msg_ts(uint32_t ts, const char *text);
 
 /* Getters for MeshCore history tables (one item at a time to prevent stack overflow) */
 bool lora_widget_get_advert(size_t index, meshcore_advert_t *out);
