@@ -250,6 +250,44 @@ void test_group_text_public_channel_polish_utf8(void)
                                                     &out_ts, out_text, sizeof(out_text)));
 }
 
+void test_group_text_custom_channel_secret_roundtrip(void)
+{
+    const uint8_t secret[16] = {
+        0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+        0x0f, 0xed, 0xcb, 0xa9, 0x87, 0x65, 0x43, 0x21
+    };
+    const char *sender = "SecondaryNode";
+    const char *msg = "Custom channel secret payload test";
+    uint32_t ts = 1705001234;
+
+    uint8_t raw[256];
+    size_t raw_len = meshcore_build_grp_txt_secret(raw, sizeof(raw), secret, ts, sender, msg);
+    TEST_ASSERT_TRUE(raw_len > 0);
+
+    meshcore_packet_t pkt;
+    TEST_ASSERT_TRUE(meshcore_packet_decode(&pkt, raw, raw_len));
+    TEST_ASSERT_EQUAL_UINT8(MESHCORE_ROUTE_FLOOD, meshcore_packet_get_route_type(&pkt));
+    TEST_ASSERT_EQUAL_UINT8(MESHCORE_PAYLOAD_GRP_TXT, meshcore_packet_get_payload_type(&pkt));
+
+    uint32_t out_ts = 0;
+    char out_text[160] = {0};
+    TEST_ASSERT_TRUE(meshcore_parse_grp_txt_payload_secret(pkt.payload, pkt.payload_len,
+                                                           secret, &out_ts, out_text, sizeof(out_text)));
+    TEST_ASSERT_EQUAL_UINT32(ts, out_ts);
+
+    char expected[160];
+    snprintf(expected, sizeof(expected), "%s: %s", sender, msg);
+    TEST_ASSERT_EQUAL_STRING(expected, out_text);
+
+    /* Verify wrong secret fails parsing */
+    uint8_t wrong_secret[16];
+    memcpy(wrong_secret, secret, 16);
+    wrong_secret[0] ^= 0x01;
+    char fail_text[160] = {0};
+    TEST_ASSERT_FALSE(meshcore_parse_grp_txt_payload_secret(pkt.payload, pkt.payload_len,
+                                                            wrong_secret, &out_ts, fail_text, sizeof(fail_text)));
+}
+
 void test_lora_airtime_calculation(void)
 {
     /* Semtech SX1262 LoRa airtime test */
@@ -934,6 +972,7 @@ int main(void)
     RUN_TEST(test_advert_build_and_parse_verified);
     RUN_TEST(test_discover_req_resp_roundtrip);
     RUN_TEST(test_group_text_public_channel_polish_utf8);
+    RUN_TEST(test_group_text_custom_channel_secret_roundtrip);
     RUN_TEST(test_lora_airtime_calculation);
     RUN_TEST(test_companion_app_start);
     RUN_TEST(test_companion_device_query);

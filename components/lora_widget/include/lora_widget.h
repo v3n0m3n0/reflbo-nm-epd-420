@@ -86,6 +86,7 @@ typedef struct {
     uint8_t advert_count;
     uint8_t neighbor_count;
     uint8_t msg_count;
+    uint32_t msg_seq;
 
     /* BLE companion state */
     uint32_t ble_pin;
@@ -127,6 +128,12 @@ esp_err_t lora_widget_send_channel_msg(const char *text);
 
 /* Sends an encrypted group text message with explicit timestamp (or 0 for current time) */
 esp_err_t lora_widget_send_channel_msg_ts(uint32_t ts, const char *text);
+
+/* Sends an encrypted group text message on a specific channel index */
+esp_err_t lora_widget_send_channel_msg_ex(uint8_t channel_idx, uint32_t ts, const char *text);
+
+/* Sets a callback to be invoked when a new message is received/added or BLE connection changes */
+void lora_widget_set_rx_notify_cb(void (*cb)(void));
 
 /* Getters for MeshCore history tables (one item at a time to prevent stack overflow) */
 bool lora_widget_get_advert(size_t index, meshcore_advert_t *out);

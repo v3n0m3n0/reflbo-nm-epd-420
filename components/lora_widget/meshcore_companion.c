@@ -214,7 +214,7 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
     case CMD_GET_CHANNEL: {
         if (cmd_len < 2) return write_err(resp_out, resp_max, COMPANION_ERR_ILLEGAL_ARG);
         uint8_t idx = cmd[1];
-        if (idx >= COMPANION_MAX_CHANNELS || !ctx->channels[idx].valid) {
+        if (idx >= COMPANION_MAX_CHANNELS) {
             return write_err(resp_out, resp_max, COMPANION_ERR_NOT_FOUND);
         }
         if (resp_max < 50) return 0;
@@ -222,9 +222,14 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
         resp_out[i++] = RESP_CODE_CHANNEL_INFO;
         resp_out[i++] = idx;
         memset(&resp_out[i], 0, 32);
-        strncpy((char *)&resp_out[i], ctx->channels[idx].name, 31);
+        if (ctx->channels[idx].valid) {
+            strncpy((char *)&resp_out[i], ctx->channels[idx].name, 31);
+        }
         i += 32;
-        memcpy(&resp_out[i], ctx->channels[idx].secret, 16);
+        memset(&resp_out[i], 0, 16);
+        if (ctx->channels[idx].valid) {
+            memcpy(&resp_out[i], ctx->channels[idx].secret, 16);
+        }
         i += 16;
         return i;
     }
@@ -237,7 +242,24 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
         memcpy(ctx->channels[idx].name, &cmd[2], 32);
         ctx->channels[idx].name[31] = '\0';
         memcpy(ctx->channels[idx].secret, &cmd[34], 16);
-        ctx->channels[idx].valid = true;
+
+        /* A channel with empty name and all-zero secret is deleted/invalid */
+        bool all_zero_secret = true;
+        for (int s = 0; s < 16; s++) {
+            if (ctx->channels[idx].secret[s] != 0) {
+                all_zero_secret = false;
+                break;
+            }
+        }
+        if (ctx->channels[idx].name[0] == '\0' && all_zero_secret) {
+            ctx->channels[idx].valid = false;
+        } else {
+            ctx->channels[idx].valid = true;
+        }
+
+        if (env && env->on_channels_changed) {
+            env->on_channels_changed(ctx, env->user_data);
+        }
         return write_ok(resp_out, resp_max);
     }
 

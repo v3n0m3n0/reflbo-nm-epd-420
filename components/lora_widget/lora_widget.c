@@ -90,6 +90,7 @@ static bool is_packet_seen_and_mark(const meshcore_packet_t *pkt, uint32_t now_m
 
 typedef struct {
     bool pending_channel_txt;
+    uint8_t channel_idx;
     uint32_t msg_ts;
     char text[128];
     bool pending_advert;
@@ -123,6 +124,64 @@ static size_t s_msg_head = 0;
 static size_t s_msg_tail = 0;
 static size_t s_msg_count = 0;
 static SemaphoreHandle_t s_msg_mutex = NULL;
+
+#define LORA_CHANNELS_PATH "/fs/state/lora_channels.bin"
+#define LORA_CHANNELS_MAGIC 0x4C524348 /* "LRCH" */
+#define LORA_CHANNELS_VERSION 1
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    companion_channel_t channels[COMPANION_MAX_CHANNELS];
+} lora_channels_file_t;
+
+static void (*s_rx_notify_cb)(void) = NULL;
+
+void lora_widget_set_rx_notify_cb(void (*cb)(void))
+{
+    s_rx_notify_cb = cb;
+}
+
+static void save_channels_to_storage(const companion_context_t *ctx)
+{
+    if (!ctx) return;
+    FILE *f = fopen(LORA_CHANNELS_PATH, "wb");
+    if (!f) {
+        ESP_LOGW(TAG, "Cannot open %s for write", LORA_CHANNELS_PATH);
+        return;
+    }
+    lora_channels_file_t file_data = {
+        .magic = LORA_CHANNELS_MAGIC,
+        .version = LORA_CHANNELS_VERSION,
+    };
+    memcpy(file_data.channels, ctx->channels, sizeof(file_data.channels));
+    fwrite(&file_data, sizeof(file_data), 1, f);
+    fclose(f);
+    ESP_LOGI(TAG, "LoRa channels saved to storage");
+}
+
+static bool load_channels_from_storage(companion_context_t *ctx)
+{
+    if (!ctx) return false;
+    FILE *f = fopen(LORA_CHANNELS_PATH, "rb");
+    if (!f) return false;
+    lora_channels_file_t file_data;
+    size_t n = fread(&file_data, sizeof(file_data), 1, f);
+    fclose(f);
+    if (n != 1 || file_data.magic != LORA_CHANNELS_MAGIC || file_data.version != LORA_CHANNELS_VERSION) {
+        ESP_LOGW(TAG, "Invalid channels file format in %s", LORA_CHANNELS_PATH);
+        return false;
+    }
+    memcpy(ctx->channels, file_data.channels, sizeof(ctx->channels));
+    ESP_LOGI(TAG, "LoRa channels loaded from storage");
+    return true;
+}
+
+static void on_companion_channels_changed(companion_context_t *ctx, void *user_data)
+{
+    (void)user_data;
+    save_channels_to_storage(ctx);
+}
 
 #define BLE_CMD_QUEUE_SIZE 8
 typedef struct {
@@ -512,16 +571,19 @@ static void update_neighbor_table(const meshcore_neighbor_t *nb)
 
 static void append_message_history(const meshcore_msg_t *msg)
 {
+    s_stats.msg_seq++;
     if (s_stats.msg_count < MESHCORE_MAX_MESSAGES) {
         s_messages[s_stats.msg_count++] = *msg;
-        return;
+    } else {
+        /* Shift ring buffer left and insert at end */
+        for (int i = 0; i < MESHCORE_MAX_MESSAGES - 1; i++) {
+            s_messages[i] = s_messages[i + 1];
+        }
+        s_messages[MESHCORE_MAX_MESSAGES - 1] = *msg;
     }
-
-    /* Shift ring buffer left and insert at end */
-    for (int i = 0; i < MESHCORE_MAX_MESSAGES - 1; i++) {
-        s_messages[i] = s_messages[i + 1];
+    if (s_rx_notify_cb) {
+        s_rx_notify_cb();
     }
-    s_messages[MESHCORE_MAX_MESSAGES - 1] = *msg;
 }
 
 bool lora_widget_get_advert(size_t index, meshcore_advert_t *out)
@@ -579,7 +641,7 @@ static void drain_pending_ble_tx(void)
     }
     if (s_pending_ble_tx.pending_channel_txt) {
         s_pending_ble_tx.pending_channel_txt = false;
-        lora_widget_send_channel_msg_ts(s_pending_ble_tx.msg_ts, s_pending_ble_tx.text);
+        lora_widget_send_channel_msg_ex(s_pending_ble_tx.channel_idx, s_pending_ble_tx.msg_ts, s_pending_ble_tx.text);
     }
     if (s_pending_ble_tx.pending_advert) {
         s_pending_ble_tx.pending_advert = false;
@@ -837,9 +899,30 @@ static void lora_rx_task(void *arg)
             } else if (ptype == MESHCORE_PAYLOAD_GRP_TXT) {
                 uint32_t ts = 0;
                 char text[160] = {0};
-                if (meshcore_parse_grp_txt_payload(s_pkt.payload, s_pkt.payload_len,
-                                                   s_current_cfg.channel_psk,
-                                                   &ts, text, sizeof(text))) {
+                int matched_ch = -1;
+
+                /* Try all active companion channels 0..7 */
+                for (int ch = 0; ch < COMPANION_MAX_CHANNELS; ch++) {
+                    if (s_companion_ctx.channels[ch].valid) {
+                        if (meshcore_parse_grp_txt_payload_secret(s_pkt.payload, s_pkt.payload_len,
+                                                                 s_companion_ctx.channels[ch].secret,
+                                                                 &ts, text, sizeof(text))) {
+                            matched_ch = ch;
+                            break;
+                        }
+                    }
+                }
+
+                /* Fallback to s_current_cfg.channel_psk if not matched above */
+                if (matched_ch < 0 && s_current_cfg.channel_psk[0] != '\0') {
+                    if (meshcore_parse_grp_txt_payload(s_pkt.payload, s_pkt.payload_len,
+                                                       s_current_cfg.channel_psk,
+                                                       &ts, text, sizeof(text))) {
+                        matched_ch = 0;
+                    }
+                }
+
+                if (matched_ch >= 0) {
                     meshcore_msg_t msg = {
                         .timestamp = ts,
                         .rx_time_s = (uint32_t)time(NULL),
@@ -848,13 +931,22 @@ static void lora_rx_task(void *arg)
                         .hops = hops,
                         .outgoing = false,
                     };
-                    strncpy(msg.text, text, sizeof(msg.text) - 1);
+                    if (matched_ch > 0 && s_companion_ctx.channels[matched_ch].name[0] != '\0') {
+                        int n = snprintf(msg.text, sizeof(msg.text), "[#%s] ",
+                                         s_companion_ctx.channels[matched_ch].name);
+                        if (n > 0 && (size_t)n < sizeof(msg.text)) {
+                            strncat(msg.text, text, sizeof(msg.text) - 1 - (size_t)n);
+                        }
+                    } else {
+                        strncpy(msg.text, text, sizeof(msg.text) - 1);
+                        msg.text[sizeof(msg.text) - 1] = '\0';
+                    }
 
                     bool is_dup_msg = false;
                     if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                         for (int i = 0; i < s_stats.msg_count && i < MESHCORE_MAX_MESSAGES; i++) {
                             if ((s_messages[i].timestamp == ts || s_messages[i].timestamp == 0 || ts == 0) &&
-                                strcmp(s_messages[i].text, text) == 0) {
+                                strcmp(s_messages[i].text, msg.text) == 0) {
                                 is_dup_msg = true;
                                 break;
                             }
@@ -893,7 +985,7 @@ static void lora_rx_task(void *arg)
                             mf->data[1] = (uint8_t)snr_q4;
                             mf->data[2] = 0;
                             mf->data[3] = 0;
-                            mf->data[4] = 0; /* Public channel 0 */
+                            mf->data[4] = (uint8_t)matched_ch; /* Active channel index */
                             mf->data[5] = hops;
                             mf->data[6] = 0; /* txt_type */
                             mf->data[7] = (uint8_t)(ts & 0xFF);
@@ -912,7 +1004,7 @@ static void lora_rx_task(void *arg)
                     uint8_t tickle = PUSH_CODE_MSG_WAITING;
                     push_companion_event(&tickle, 1);
 
-                    ESP_LOGI(TAG, "Channel Message: '%s'", text);
+                    ESP_LOGI(TAG, "Channel Message (ch %d): '%s'", matched_ch, text);
                 }
             }
 
@@ -970,8 +1062,8 @@ static bool companion_send_advert(bool flood)
 
 static bool companion_send_channel_txt(uint8_t channel_idx, const char *text)
 {
-    (void)channel_idx;
     s_pending_ble_tx.pending_channel_txt = true;
+    s_pending_ble_tx.channel_idx = channel_idx;
     s_pending_ble_tx.msg_ts = s_companion_ctx.last_tx_msg_ts;
     if (text) {
         strncpy(s_pending_ble_tx.text, text, sizeof(s_pending_ble_tx.text) - 1);
@@ -1065,6 +1157,7 @@ size_t lora_widget_handle_companion_cmd(const uint8_t *cmd, size_t cmd_len,
     }
     if (!s_companion_initialized) {
         meshcore_companion_init(&s_companion_ctx);
+        load_channels_from_storage(&s_companion_ctx);
         s_companion_initialized = true;
     }
 
@@ -1081,6 +1174,7 @@ size_t lora_widget_handle_companion_cmd(const uint8_t *cmd, size_t cmd_len,
         .send_channel_txt = companion_send_channel_txt,
         .exec_cli = companion_exec_cli,
         .pop_msg = companion_pop_msg,
+        .on_channels_changed = on_companion_channels_changed,
         .send_frame_cb = companion_send_frame_cb,
     };
     memcpy(env.pub_key, s_pub_key, 32);
@@ -1483,6 +1577,11 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
 
 esp_err_t lora_widget_init(void)
 {
+    if (!s_companion_initialized) {
+        meshcore_companion_init(&s_companion_ctx);
+        load_channels_from_storage(&s_companion_ctx);
+        s_companion_initialized = true;
+    }
     lora_config_t def = {
         .enabled = true,
         .freq_khz = 868000,
@@ -1659,21 +1758,43 @@ esp_err_t lora_widget_send_discover(void)
     return err;
 }
 
-esp_err_t lora_widget_send_channel_msg_ts(uint32_t ts, const char *text)
+esp_err_t lora_widget_send_channel_msg_ex(uint8_t channel_idx, uint32_t ts, const char *text)
 {
     if (!text || text[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
 
+    uint8_t secret[16];
+    bool have_secret = false;
+    char ch_name[COMPANION_NAME_SIZE] = {0};
+
+    if (channel_idx < COMPANION_MAX_CHANNELS && s_companion_ctx.channels[channel_idx].valid) {
+        memcpy(secret, s_companion_ctx.channels[channel_idx].secret, 16);
+        strncpy(ch_name, s_companion_ctx.channels[channel_idx].name, sizeof(ch_name) - 1);
+        have_secret = true;
+    }
+
     uint8_t raw[256];
     uint32_t msg_time = (ts != 0) ? ts : (uint32_t)time(NULL);
-    size_t raw_sz = meshcore_build_grp_txt(
-        raw, sizeof(raw),
-        s_current_cfg.channel_psk,
-        msg_time,
-        s_current_cfg.node_name,
-        text
-    );
+    size_t raw_sz = 0;
+
+    if (have_secret) {
+        raw_sz = meshcore_build_grp_txt_secret(
+            raw, sizeof(raw),
+            secret,
+            msg_time,
+            s_current_cfg.node_name,
+            text
+        );
+    } else {
+        raw_sz = meshcore_build_grp_txt(
+            raw, sizeof(raw),
+            s_current_cfg.channel_psk,
+            msg_time,
+            s_current_cfg.node_name,
+            text
+        );
+    }
 
     if (raw_sz == 0) {
         return ESP_ERR_NO_MEM;
@@ -1699,7 +1820,17 @@ esp_err_t lora_widget_send_channel_msg_ts(uint32_t ts, const char *text)
             .hops = 0,
             .outgoing = true,
         };
-        snprintf(msg.text, sizeof(msg.text), "%s: %s", s_current_cfg.node_name, text);
+        if (channel_idx > 0 && ch_name[0] != '\0') {
+            int n = snprintf(msg.text, sizeof(msg.text), "[#%s] %s: ", ch_name, s_current_cfg.node_name);
+            if (n > 0 && (size_t)n < sizeof(msg.text)) {
+                strncat(msg.text, text, sizeof(msg.text) - 1 - (size_t)n);
+            }
+        } else {
+            int n = snprintf(msg.text, sizeof(msg.text), "%s: ", s_current_cfg.node_name);
+            if (n > 0 && (size_t)n < sizeof(msg.text)) {
+                strncat(msg.text, text, sizeof(msg.text) - 1 - (size_t)n);
+            }
+        }
 
         if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             s_stats.sent_flood++;
@@ -1711,6 +1842,11 @@ esp_err_t lora_widget_send_channel_msg_ts(uint32_t ts, const char *text)
         }
     }
     return err;
+}
+
+esp_err_t lora_widget_send_channel_msg_ts(uint32_t ts, const char *text)
+{
+    return lora_widget_send_channel_msg_ex(0, ts, text);
 }
 
 esp_err_t lora_widget_send_channel_msg(const char *text)

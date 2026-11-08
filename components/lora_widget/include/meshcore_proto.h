@@ -211,6 +211,10 @@ bool meshcore_channel_key_from_psk(const char *psk_b64,
                                    uint8_t secret32[32],
                                    uint8_t *channel_hash);
 
+bool meshcore_channel_key_from_secret(const uint8_t secret[16],
+                                      uint8_t secret32[32],
+                                      uint8_t *channel_hash);
+
 size_t meshcore_build_grp_txt(uint8_t *out_raw,
                               size_t cap,
                               const char *psk_b64,
@@ -218,12 +222,26 @@ size_t meshcore_build_grp_txt(uint8_t *out_raw,
                               const char *sender_name,
                               const char *message);
 
+size_t meshcore_build_grp_txt_secret(uint8_t *out_raw,
+                                     size_t cap,
+                                     const uint8_t secret[16],
+                                     uint32_t timestamp,
+                                     const char *sender_name,
+                                     const char *message);
+
 bool meshcore_parse_grp_txt_payload(const uint8_t *payload,
                                     size_t len,
                                     const char *psk_b64,
                                     uint32_t *out_timestamp,
                                     char *out_text,
                                     size_t text_cap);
+
+bool meshcore_parse_grp_txt_payload_secret(const uint8_t *payload,
+                                           size_t len,
+                                           const uint8_t secret[16],
+                                           uint32_t *out_timestamp,
+                                           char *out_text,
+                                           size_t text_cap);
 
 uint32_t meshcore_calc_airtime_ms(uint32_t bw_hz,
                                   uint8_t sf,

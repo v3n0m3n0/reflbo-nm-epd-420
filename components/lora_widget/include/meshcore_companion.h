@@ -199,6 +199,7 @@ typedef struct {
     bool (*send_channel_txt)(uint8_t channel_idx, const char *text);
     void (*exec_cli)(const char *cmd, char *reply, size_t reply_sz);
     bool (*pop_msg)(uint8_t *msg_out, size_t max, size_t *out_len);
+    void (*on_channels_changed)(companion_context_t *ctx, void *user_data);
 
     void (*send_frame_cb)(const uint8_t *frame, size_t len, void *user_data);
     void *user_data;

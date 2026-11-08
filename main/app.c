@@ -160,6 +160,17 @@ esp_err_t app_post(void (*fn)(void *arg), void *arg)
     return xQueueSend(s_queue, &ev, pdMS_TO_TICKS(100)) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
+static void on_lora_update_post(void *arg)
+{
+    (void)arg;
+    app_ui_tick(false);
+}
+
+static void on_lora_notify(void)
+{
+    app_post(on_lora_update_post, NULL);
+}
+
 /* A restart the web UI asked for (an update, Restart) comes back in config mode, so the page finds
  * the device again (spec §10.2). The flag is in NVS, not RTC RAM: another image lays RTC RAM out
  * differently, and an update or a rollback is just such a restart. */
@@ -450,6 +461,9 @@ static void handle_wake(power_wake_t wake)
         power_hold_awake_ms(GRACE_MS);
         break;
     default:
+        if ((s_next_alarm != 0 && time(NULL) >= s_next_alarm) || (s_wake_at != 0 && time(NULL) >= s_wake_at)) {
+            on_tick(false, s_next_alarm != 0 && time(NULL) >= s_next_alarm);
+        }
         break;
     }
     ignore_held_buttons();
@@ -674,6 +688,7 @@ static esp_err_t boot(void)
     app_ui_apply_settings(); /* offsets, freshness and the panel rate, now that the panel is up */
     ESP_RETURN_ON_ERROR(board_buttons_start(on_button, k_app_dashboard_buttons), TAG, "buttons");
     ESP_RETURN_ON_ERROR(start_rtc_int(), TAG, "RTC INT");
+    lora_widget_set_rx_notify_cb(on_lora_notify);
     ignore_held_buttons();
 
     if (!warm) {
@@ -738,7 +753,8 @@ static void app_task(void *arg)
         bool pending = uxQueueMessagesWaiting(s_queue) > 0 || board_buttons_busy() || app_config_active() ||
                        app_radar_loop_deadline_ms() != 0 ||
                        s_ota_pending || app_sync_active() || app_sync_holds_wifi() || /* neither sleep keeps Wi-Fi */
-                       app_sync_wifi_pending();
+                       app_sync_wifi_pending() ||
+                       (app_state() && app_state()->settings.lora.enabled);
         if (err == ESP_OK) {
             check_clock_jump();
             check_ota();
@@ -764,7 +780,10 @@ static void app_task(void *arg)
         switch (power_plan(pending)) {
         case POWER_PLAN_LIGHT:
             handle_wake(power_sleep_light(sleep_until()));
-            continue;
+            if ((s_wake_at != 0 && time(NULL) < s_wake_at) && uxQueueMessagesWaiting(s_queue) == 0) {
+                continue;
+            }
+            break;
         case POWER_PLAN_DEEP:
             enter_deep_sleep(sleep_until()); /* returns only if it had to sleep light instead */
             continue;

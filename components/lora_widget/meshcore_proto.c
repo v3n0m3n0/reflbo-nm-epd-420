@@ -361,6 +361,22 @@ size_t meshcore_build_discover_resp(uint8_t *out_raw,
 /* Group Channel Message Encoding & Parsing                                  */
 /* ========================================================================= */
 
+bool meshcore_channel_key_from_secret(const uint8_t secret[16],
+                                      uint8_t secret32[32],
+                                      uint8_t *channel_hash)
+{
+    if (secret == NULL || secret32 == NULL || channel_hash == NULL) {
+        return false;
+    }
+    memset(secret32, 0, 32);
+    memcpy(secret32, secret, 16);
+
+    uint8_t hash[32];
+    util_sha256(secret, 16, hash);
+    *channel_hash = hash[0];
+    return true;
+}
+
 bool meshcore_channel_key_from_psk(const char *psk_b64,
                                    uint8_t secret32[32],
                                    uint8_t *channel_hash)
@@ -380,20 +396,20 @@ bool meshcore_channel_key_from_psk(const char *psk_b64,
     return true;
 }
 
-size_t meshcore_build_grp_txt(uint8_t *out_raw,
-                              size_t cap,
-                              const char *psk_b64,
-                              uint32_t timestamp,
-                              const char *sender_name,
-                              const char *message)
+size_t meshcore_build_grp_txt_secret(uint8_t *out_raw,
+                                     size_t cap,
+                                     const uint8_t secret[16],
+                                     uint32_t timestamp,
+                                     const char *sender_name,
+                                     const char *message)
 {
-    if (out_raw == NULL || psk_b64 == NULL || message == NULL) {
+    if (out_raw == NULL || secret == NULL || message == NULL) {
         return 0;
     }
 
     uint8_t secret32[32] = {0};
     uint8_t channel_hash = 0;
-    if (!meshcore_channel_key_from_psk(psk_b64, secret32, &channel_hash)) {
+    if (!meshcore_channel_key_from_secret(secret, secret32, &channel_hash)) {
         return 0;
     }
 
@@ -437,20 +453,40 @@ size_t meshcore_build_grp_txt(uint8_t *out_raw,
     return total_len;
 }
 
-bool meshcore_parse_grp_txt_payload(const uint8_t *payload,
-                                    size_t len,
-                                    const char *psk_b64,
-                                    uint32_t *out_timestamp,
-                                    char *out_text,
-                                    size_t text_cap)
+size_t meshcore_build_grp_txt(uint8_t *out_raw,
+                              size_t cap,
+                              const char *psk_b64,
+                              uint32_t timestamp,
+                              const char *sender_name,
+                              const char *message)
 {
-    if (payload == NULL || len < 4 || psk_b64 == NULL || out_text == NULL || text_cap == 0) {
-        return false;
+    if (out_raw == NULL || psk_b64 == NULL || message == NULL) {
+        return 0;
     }
 
     uint8_t secret32[32] = {0};
     uint8_t channel_hash = 0;
     if (!meshcore_channel_key_from_psk(psk_b64, secret32, &channel_hash)) {
+        return 0;
+    }
+
+    return meshcore_build_grp_txt_secret(out_raw, cap, secret32, timestamp, sender_name, message);
+}
+
+bool meshcore_parse_grp_txt_payload_secret(const uint8_t *payload,
+                                           size_t len,
+                                           const uint8_t secret[16],
+                                           uint32_t *out_timestamp,
+                                           char *out_text,
+                                           size_t text_cap)
+{
+    if (payload == NULL || len < 4 || secret == NULL || out_text == NULL || text_cap == 0) {
+        return false;
+    }
+
+    uint8_t secret32[32] = {0};
+    uint8_t channel_hash = 0;
+    if (!meshcore_channel_key_from_secret(secret, secret32, &channel_hash)) {
         return false;
     }
 
@@ -483,6 +519,26 @@ bool meshcore_parse_grp_txt_payload(const uint8_t *payload,
     out_text[actual_len] = '\0';
 
     return true;
+}
+
+bool meshcore_parse_grp_txt_payload(const uint8_t *payload,
+                                    size_t len,
+                                    const char *psk_b64,
+                                    uint32_t *out_timestamp,
+                                    char *out_text,
+                                    size_t text_cap)
+{
+    if (payload == NULL || len < 4 || psk_b64 == NULL || out_text == NULL || text_cap == 0) {
+        return false;
+    }
+
+    uint8_t secret32[32] = {0};
+    uint8_t channel_hash = 0;
+    if (!meshcore_channel_key_from_psk(psk_b64, secret32, &channel_hash)) {
+        return false;
+    }
+
+    return meshcore_parse_grp_txt_payload_secret(payload, len, secret32, out_timestamp, out_text, text_cap);
 }
 
 /* ========================================================================= */

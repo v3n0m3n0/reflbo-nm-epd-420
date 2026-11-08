@@ -38,6 +38,7 @@ static ui_lora_t s_lora_ui;
 static uint32_t s_last_lora_pkt_count;
 static uint32_t s_last_lora_sent_count;
 static uint32_t s_last_lora_msg_count;
+static uint32_t s_last_lora_msg_seq;
 static bool s_last_lora_ble;
 
 #define LEARN_PATH "/fs/state/battery_learn.txt" /* the battery learning session in base64 (D21) */
@@ -773,10 +774,12 @@ void app_ui_tick(bool force)
     }
     if (s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
         lora_stats_t st = lora_widget_get_stats();
-        if (st.packet_count != s_last_lora_pkt_count ||
+        if (st.msg_seq != s_last_lora_msg_seq ||
+            st.packet_count != s_last_lora_pkt_count ||
             st.packets_sent != s_last_lora_sent_count ||
             st.msg_count != s_last_lora_msg_count ||
             st.ble_connected != s_last_lora_ble) {
+            s_last_lora_msg_seq = st.msg_seq;
             s_last_lora_pkt_count = st.packet_count;
             s_last_lora_sent_count = st.packets_sent;
             s_last_lora_msg_count = st.msg_count;
