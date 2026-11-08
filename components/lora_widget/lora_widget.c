@@ -3,6 +3,8 @@
 #include "meshcore_companion.h"
 #include "meshcore_ble.h"
 #include "util_sha256.h"
+#include "timekeeping.h"
+#include "ed_25519.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +12,7 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include "esp_attr.h"
 #include "board_pins.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -110,7 +113,7 @@ typedef struct {
     uint8_t data[COMPANION_MAX_FRAME_SIZE];
 } companion_frame_t;
 
-static companion_context_t s_companion_ctx;
+static EXT_RAM_BSS_ATTR companion_context_t s_companion_ctx;
 static bool s_companion_initialized = false;
 static companion_frame_t s_push_queue[COMPANION_PUSH_QUEUE_SIZE];
 static size_t s_push_head = 0;
@@ -118,7 +121,7 @@ static size_t s_push_tail = 0;
 static size_t s_push_count = 0;
 static SemaphoreHandle_t s_push_mutex = NULL;
 
-#define COMPANION_MSG_QUEUE_SIZE 8
+#define COMPANION_MSG_QUEUE_SIZE 32
 static companion_frame_t s_msg_queue[COMPANION_MSG_QUEUE_SIZE];
 static size_t s_msg_head = 0;
 static size_t s_msg_tail = 0;
@@ -134,6 +137,18 @@ typedef struct {
     uint32_t version;
     companion_channel_t channels[COMPANION_MAX_CHANNELS];
 } lora_channels_file_t;
+
+#define LORA_CONTACTS_PATH "/fs/state/lora_contacts.bin"
+#define LORA_CONTACTS_MAGIC 0x4C524354 /* "LRCT" */
+#define LORA_CONTACTS_VERSION 1
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint16_t contact_count;
+    uint16_t reserved;
+    companion_contact_t contacts[COMPANION_MAX_CONTACTS];
+} lora_contacts_file_t;
 
 static void (*s_rx_notify_cb)(void) = NULL;
 
@@ -181,6 +196,76 @@ static void on_companion_channels_changed(companion_context_t *ctx, void *user_d
 {
     (void)user_data;
     save_channels_to_storage(ctx);
+}
+
+static void save_contacts_to_storage(const companion_context_t *ctx)
+{
+    if (!ctx) return;
+    FILE *f = fopen(LORA_CONTACTS_PATH, "wb");
+    if (!f) {
+        ESP_LOGW(TAG, "Cannot open %s for write", LORA_CONTACTS_PATH);
+        return;
+    }
+    lora_contacts_file_t file_data = {
+        .magic = LORA_CONTACTS_MAGIC,
+        .version = LORA_CONTACTS_VERSION,
+        .contact_count = (uint16_t)ctx->contact_count,
+        .reserved = 0,
+    };
+    memcpy(file_data.contacts, ctx->contacts, sizeof(file_data.contacts));
+    fwrite(&file_data, sizeof(file_data), 1, f);
+    fclose(f);
+    ESP_LOGI(TAG, "LoRa contacts saved to storage (%u contacts)", (unsigned)ctx->contact_count);
+}
+
+static bool load_contacts_from_storage(companion_context_t *ctx)
+{
+    if (!ctx) return false;
+    FILE *f = fopen(LORA_CONTACTS_PATH, "rb");
+    if (!f) return false;
+    lora_contacts_file_t file_data;
+    size_t n = fread(&file_data, sizeof(file_data), 1, f);
+    fclose(f);
+    if (n != 1 || file_data.magic != LORA_CONTACTS_MAGIC || file_data.version != LORA_CONTACTS_VERSION) {
+        ESP_LOGW(TAG, "Invalid contacts file format in %s", LORA_CONTACTS_PATH);
+        return false;
+    }
+    size_t cnt = file_data.contact_count;
+    if (cnt > COMPANION_MAX_CONTACTS) cnt = COMPANION_MAX_CONTACTS;
+    ctx->contact_count = cnt;
+    memcpy(ctx->contacts, file_data.contacts, sizeof(file_data.contacts));
+    ESP_LOGI(TAG, "LoRa contacts loaded from storage (%u contacts)", (unsigned)cnt);
+    return true;
+}
+
+static void on_companion_contacts_changed(companion_context_t *ctx, void *user_data)
+{
+    (void)user_data;
+    save_contacts_to_storage(ctx);
+}
+
+static void remove_advert_by_pubkey(const uint8_t *pub_key)
+{
+    if (!pub_key) return;
+    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        for (int i = 0; i < s_stats.advert_count; i++) {
+            if (memcmp(s_adverts[i].pub_key, pub_key, 32) == 0) {
+                for (int j = i; j < s_stats.advert_count - 1; j++) {
+                    s_adverts[j] = s_adverts[j + 1];
+                }
+                s_stats.advert_count--;
+                memset(&s_adverts[s_stats.advert_count], 0, sizeof(meshcore_advert_t));
+                break;
+            }
+        }
+        xSemaphoreGive(s_stats_mutex);
+    }
+}
+
+static void on_companion_contact_removed(const uint8_t *pub_key, void *user_data)
+{
+    (void)user_data;
+    remove_advert_by_pubkey(pub_key);
 }
 
 #define BLE_CMD_QUEUE_SIZE 8
@@ -508,10 +593,17 @@ static esp_err_t sx1262_transmit(const uint8_t *data, size_t len)
     lora_write_cmd(0x08, rx_dio_irq, 8);
     lora_write_cmd(0x02, clr, 2);
 
+    /* Enable DIO1 interrupt before SetRx to avoid missing edges */
+    gpio_intr_enable(BOARD_PIN_LORA_DIO1);
+
     uint8_t rx_timeout[3] = { 0xFF, 0xFF, 0xFF };
     lora_write_cmd(0x82, rx_timeout, 3);
 
-    gpio_intr_enable(BOARD_PIN_LORA_DIO1);
+    /* If DIO1 latched HIGH immediately, wake the RX task */
+    if (gpio_get_level(BOARD_PIN_LORA_DIO1) == 1 && s_task) {
+        xTaskNotifyGive(s_task);
+    }
+
     xSemaphoreGive(s_stats_mutex);
     return tx_ok ? ESP_OK : ESP_FAIL;
 }
@@ -649,14 +741,35 @@ static void drain_pending_ble_tx(void)
     }
 }
 
+static void fill_companion_env(companion_env_t *env);
+static bool companion_send_advert(bool flood);
+static bool companion_send_channel_txt(uint8_t channel_idx, const char *text);
+static void companion_exec_cli(const char *cmd, char *reply, size_t reply_sz);
+static void companion_send_frame_cb(const uint8_t *frame, size_t len, void *user_data);
+
 static void lora_rx_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "LoRa SX1262 MeshCore monitor task started (interrupt-driven)");
 
     for (;;) {
-        /* Wait up to 200 ms for packet interrupt or BLE companion command */
-        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
+        /* Dynamic wait: portMAX_DELAY if radio off, 25ms during active iterator, 2000ms idle */
+        TickType_t wait_ticks;
+        if (!s_stats.enabled || !s_stats.initialized) {
+            wait_ticks = portMAX_DELAY;
+        } else if (s_companion_ctx.contact_iter_active) {
+            wait_ticks = pdMS_TO_TICKS(25);
+        } else {
+            wait_ticks = pdMS_TO_TICKS(2000);
+        }
+        uint32_t notified = ulTaskNotifyTake(pdTRUE, wait_ticks);
+
+        /* Step contact iterator if active */
+        if (s_companion_ctx.contact_iter_active) {
+            companion_env_t env;
+            fill_companion_env(&env);
+            meshcore_companion_step_iter(&s_companion_ctx, &env);
+        }
 
         /* Drain pending BLE companion commands */
         for (;;) {
@@ -690,21 +803,23 @@ static void lora_rx_task(void *arg)
             continue;
         }
 
-        if (notified == 0) {
-            static uint8_t s_nf_tick = 0;
-            if (++s_nf_tick >= 5) {
-                s_nf_tick = 0;
-                /* Background timeout: sample instantaneous noise floor */
-                uint8_t rssi_raw = 0;
-                if (lora_read_cmd(0x15, &rssi_raw, 1) == ESP_OK) {
-                    int16_t inst = -(int16_t)(rssi_raw / 2);
-                    if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-                        if (s_stats.noise_floor_dbm == 0) {
-                            s_stats.noise_floor_dbm = inst;
-                        } else {
-                            s_stats.noise_floor_dbm = (int16_t)((s_stats.noise_floor_dbm * 7 + inst) / 8);
+        if (notified == 0 && gpio_get_level(BOARD_PIN_LORA_DIO1) == 0) {
+            if (meshcore_ble_is_connected()) {
+                static uint8_t s_nf_tick = 0;
+                if (++s_nf_tick >= 2) {
+                    s_nf_tick = 0;
+                    /* Background timeout: sample instantaneous noise floor */
+                    uint8_t rssi_raw = 0;
+                    if (lora_read_cmd(0x15, &rssi_raw, 1) == ESP_OK) {
+                        int16_t inst = -(int16_t)(rssi_raw / 2);
+                        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                            if (s_stats.noise_floor_dbm == 0) {
+                                s_stats.noise_floor_dbm = inst;
+                            } else {
+                                s_stats.noise_floor_dbm = (int16_t)((s_stats.noise_floor_dbm * 7 + inst) / 8);
+                            }
+                            xSemaphoreGive(s_stats_mutex);
                         }
-                        xSemaphoreGive(s_stats_mutex);
                     }
                 }
             }
@@ -826,31 +941,64 @@ static void lora_rx_task(void *arg)
                     /* Add/update contact in companion table */
                     if (!s_companion_initialized) {
                         meshcore_companion_init(&s_companion_ctx);
+                        load_channels_from_storage(&s_companion_ctx);
+                        load_contacts_from_storage(&s_companion_ctx);
                         s_companion_initialized = true;
                     }
-                    companion_contact_t c;
-                    memset(&c, 0, sizeof(c));
-                    memcpy(c.pub_key, s_adv.pub_key, COMPANION_PUB_KEY_SIZE);
-                    c.type = s_adv.node_type;
-                    c.flags = 0;
-                    c.out_path_len = (int8_t)hops;
-                    if (hops > 0 && s_pkt.path_len > 0) {
-                        size_t c_path_len = s_pkt.path_len;
-                        if (c_path_len > COMPANION_MAX_PATH_SIZE) c_path_len = COMPANION_MAX_PATH_SIZE;
-                        memcpy(c.out_path, s_pkt.path, c_path_len);
-                    }
-                    strncpy(c.name, s_adv.name, sizeof(c.name) - 1);
-                    c.last_advert_ts = s_adv.timestamp;
-                    c.lat_e6 = s_adv.has_loc ? s_adv.lat_e6 : 0;
-                    c.lon_e6 = s_adv.has_loc ? s_adv.lon_e6 : 0;
-                    c.lastmod = (uint32_t)time(NULL);
-                    meshcore_companion_add_update_contact(&s_companion_ctx, &c);
 
-                    /* Push advert notification to BLE Companion */
-                    uint8_t adv_push[1 + COMPANION_PUB_KEY_SIZE];
-                    adv_push[0] = PUSH_CODE_ADVERT;
-                    memcpy(&adv_push[1], s_adv.pub_key, COMPANION_PUB_KEY_SIZE);
-                    push_companion_event(adv_push, sizeof(adv_push));
+                    companion_contact_t *existing = meshcore_companion_get_contact_mut(&s_companion_ctx, s_adv.pub_key);
+                    bool auto_add = ((s_companion_ctx.manual_add_contacts & 1) == 0);
+
+                    if (existing) {
+                        existing->type = s_adv.node_type;
+                        existing->out_path_len = (int8_t)hops;
+                        if (hops > 0 && s_pkt.path_len > 0) {
+                            size_t c_path_len = s_pkt.path_len;
+                            if (c_path_len > COMPANION_MAX_PATH_SIZE) c_path_len = COMPANION_MAX_PATH_SIZE;
+                            memcpy(existing->out_path, s_pkt.path, c_path_len);
+                        }
+                        strncpy(existing->name, s_adv.name, sizeof(existing->name) - 1);
+                        existing->last_advert_ts = s_adv.timestamp;
+                        existing->lat_e6 = s_adv.has_loc ? s_adv.lat_e6 : 0;
+                        existing->lon_e6 = s_adv.has_loc ? s_adv.lon_e6 : 0;
+                        existing->lastmod = (uint32_t)time(NULL);
+                        save_contacts_to_storage(&s_companion_ctx);
+
+                        uint8_t adv_push[1 + COMPANION_PUB_KEY_SIZE];
+                        adv_push[0] = PUSH_CODE_ADVERT;
+                        memcpy(&adv_push[1], s_adv.pub_key, COMPANION_PUB_KEY_SIZE);
+                        push_companion_event(adv_push, sizeof(adv_push));
+                    } else if (auto_add) {
+                        companion_contact_t c;
+                        memset(&c, 0, sizeof(c));
+                        memcpy(c.pub_key, s_adv.pub_key, COMPANION_PUB_KEY_SIZE);
+                        c.type = s_adv.node_type;
+                        c.flags = 0;
+                        c.out_path_len = (int8_t)hops;
+                        if (hops > 0 && s_pkt.path_len > 0) {
+                            size_t c_path_len = s_pkt.path_len;
+                            if (c_path_len > COMPANION_MAX_PATH_SIZE) c_path_len = COMPANION_MAX_PATH_SIZE;
+                            memcpy(c.out_path, s_pkt.path, c_path_len);
+                        }
+                        strncpy(c.name, s_adv.name, sizeof(c.name) - 1);
+                        c.last_advert_ts = s_adv.timestamp;
+                        c.lat_e6 = s_adv.has_loc ? s_adv.lat_e6 : 0;
+                        c.lon_e6 = s_adv.has_loc ? s_adv.lon_e6 : 0;
+                        c.lastmod = (uint32_t)time(NULL);
+                        meshcore_companion_add_update_contact(&s_companion_ctx, &c);
+                        save_contacts_to_storage(&s_companion_ctx);
+
+                        uint8_t adv_push[1 + COMPANION_PUB_KEY_SIZE];
+                        adv_push[0] = PUSH_CODE_ADVERT;
+                        memcpy(&adv_push[1], s_adv.pub_key, COMPANION_PUB_KEY_SIZE);
+                        push_companion_event(adv_push, sizeof(adv_push));
+                    } else {
+                        /* Manual add enabled: do not auto-add to contacts, push PUSH_CODE_NEW_ADVERT */
+                        uint8_t adv_push[1 + COMPANION_PUB_KEY_SIZE];
+                        adv_push[0] = PUSH_CODE_NEW_ADVERT;
+                        memcpy(&adv_push[1], s_adv.pub_key, COMPANION_PUB_KEY_SIZE);
+                        push_companion_event(adv_push, sizeof(adv_push));
+                    }
 
                     ESP_LOGI(TAG, "Discovered Node Advert: '%s' (type %u, hops %u, RSSI %d dBm)",
                              s_adv.name, s_adv.node_type, s_adv.hops, rssi);
@@ -986,7 +1134,7 @@ static void lora_rx_task(void *arg)
                             mf->data[2] = 0;
                             mf->data[3] = 0;
                             mf->data[4] = (uint8_t)matched_ch; /* Active channel index */
-                            mf->data[5] = hops;
+                            mf->data[5] = (route == MESHCORE_ROUTE_FLOOD || route == MESHCORE_ROUTE_TRANSPORT_FLOOD) ? hops : 0xFF;
                             mf->data[6] = 0; /* txt_type */
                             mf->data[7] = (uint8_t)(ts & 0xFF);
                             mf->data[8] = (uint8_t)((ts >> 8) & 0xFF);
@@ -1005,6 +1153,131 @@ static void lora_rx_task(void *arg)
                     push_companion_event(&tickle, 1);
 
                     ESP_LOGI(TAG, "Channel Message (ch %d): '%s'", matched_ch, text);
+                }
+            } else if (ptype == MESHCORE_PAYLOAD_TXT_MSG) {
+                if (s_pkt.payload_len >= 2 + 4 + 1 && s_pkt.payload[0] == s_pub_key[0]) {
+                    uint8_t src_hash = s_pkt.payload[1];
+                    companion_contact_t *matched_contact = NULL;
+                    uint8_t plain[256] = {0};
+                    int dec_len = -1;
+
+                    for (size_t ci = 0; ci < s_companion_ctx.contact_count; ci++) {
+                        companion_contact_t *c = &s_companion_ctx.contacts[ci];
+                        if (c->pub_key[0] == src_hash) {
+                            uint8_t shared_secret[32];
+                            ed25519_key_exchange(shared_secret, c->pub_key, s_prv_key);
+                            dec_len = meshcore_mac_then_decrypt(shared_secret, plain, sizeof(plain),
+                                                                &s_pkt.payload[2], s_pkt.payload_len - 2);
+                            if (dec_len > 5) {
+                                matched_contact = c;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (matched_contact && dec_len > 5) {
+                        uint32_t sender_ts = 0;
+                        memcpy(&sender_ts, plain, 4);
+                        uint8_t txt_type = plain[4] >> 2;
+
+                        size_t str_len = (size_t)dec_len - 5;
+                        size_t actual_len = 0;
+                        while (actual_len < str_len && plain[5 + actual_len] != '\0') {
+                            actual_len++;
+                        }
+                        char text[160] = {0};
+                        if (actual_len >= sizeof(text)) actual_len = sizeof(text) - 1;
+                        memcpy(text, &plain[5], actual_len);
+                        text[actual_len] = '\0';
+
+                        matched_contact->lastmod = (uint32_t)time(NULL);
+
+                        meshcore_msg_t msg = {
+                            .timestamp = sender_ts,
+                            .rx_time_s = (uint32_t)time(NULL),
+                            .rssi_dbm = rssi,
+                            .snr_q4 = snr_q4,
+                            .hops = hops,
+                            .outgoing = false,
+                        };
+                        int n = snprintf(msg.text, sizeof(msg.text), "[%s] %s",
+                                         matched_contact->name[0] ? matched_contact->name : "Direct", text);
+                        if (n <= 0) {
+                            strncpy(msg.text, text, sizeof(msg.text) - 1);
+                        }
+
+                        bool is_dup_msg = false;
+                        if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                            for (int i = 0; i < s_stats.msg_count && i < MESHCORE_MAX_MESSAGES; i++) {
+                                if ((s_messages[i].timestamp == sender_ts || s_messages[i].timestamp == 0 || sender_ts == 0) &&
+                                    strcmp(s_messages[i].text, msg.text) == 0) {
+                                    is_dup_msg = true;
+                                    break;
+                                }
+                            }
+                            if (!is_dup_msg) {
+                                append_message_history(&msg);
+                                strncpy(s_stats.last_sender, matched_contact->name, sizeof(s_stats.last_sender) - 1);
+                                s_stats.last_sender[sizeof(s_stats.last_sender) - 1] = '\0';
+                            }
+                            xSemaphoreGive(s_stats_mutex);
+                        }
+
+                        if (!is_dup_msg) {
+                            if (s_msg_mutex == NULL) {
+                                s_msg_mutex = xSemaphoreCreateMutex();
+                            }
+                            if (s_msg_mutex && xSemaphoreTake(s_msg_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                                if (s_msg_count < COMPANION_MSG_QUEUE_SIZE) {
+                                    companion_frame_t *mf = &s_msg_queue[s_msg_tail];
+                                    mf->data[0] = RESP_CODE_CONTACT_MSG_RECV_V3;
+                                    mf->data[1] = (uint8_t)snr_q4;
+                                    mf->data[2] = 0;
+                                    mf->data[3] = 0;
+                                    memcpy(&mf->data[4], matched_contact->pub_key, 6);
+                                    mf->data[10] = (route == MESHCORE_ROUTE_FLOOD || route == MESHCORE_ROUTE_TRANSPORT_FLOOD) ? hops : 0xFF;
+                                    mf->data[11] = txt_type;
+                                    memcpy(&mf->data[12], &sender_ts, 4);
+                                    memcpy(&mf->data[16], text, actual_len);
+                                    mf->len = (uint8_t)(16 + actual_len);
+                                    s_msg_tail = (s_msg_tail + 1) % COMPANION_MSG_QUEUE_SIZE;
+                                    s_msg_count++;
+                                }
+                                xSemaphoreGive(s_msg_mutex);
+                            }
+
+                            uint8_t tickle = PUSH_CODE_MSG_WAITING;
+                            push_companion_event(&tickle, 1);
+                            ESP_LOGI(TAG, "Direct Message from %s: '%s'", matched_contact->name, text);
+                        }
+
+                        /* Send ACK frame */
+                        util_sha256_t sha;
+                        util_sha256_init(&sha);
+                        util_sha256_update(&sha, plain, 5 + actual_len);
+                        util_sha256_update(&sha, matched_contact->pub_key, 32);
+                        uint8_t full_hash[32];
+                        util_sha256_final(&sha, full_hash);
+
+                        meshcore_packet_t ack_pkt;
+                        memset(&ack_pkt, 0, sizeof(ack_pkt));
+                        if (matched_contact->out_path_len > 0 && matched_contact->out_path_len != -1) {
+                            ack_pkt.header = (uint8_t)((MESHCORE_ROUTE_DIRECT & 0x03) | ((MESHCORE_PAYLOAD_ACK & 0x0F) << 2));
+                            ack_pkt.path_len = (size_t)matched_contact->out_path_len;
+                            memcpy(ack_pkt.path, matched_contact->out_path, ack_pkt.path_len);
+                        } else {
+                            ack_pkt.header = (uint8_t)((MESHCORE_ROUTE_FLOOD & 0x03) | ((MESHCORE_PAYLOAD_ACK & 0x0F) << 2));
+                            ack_pkt.path_len = 0;
+                        }
+                        ack_pkt.payload_len = 4;
+                        memcpy(ack_pkt.payload, full_hash, 4);
+                        uint8_t raw_ack[64];
+                        size_t raw_ack_sz = meshcore_packet_encode(&ack_pkt, raw_ack, sizeof(raw_ack));
+                        if (raw_ack_sz > 0) {
+                            vTaskDelay(pdMS_TO_TICKS(20 + (esp_random() % 40)));
+                            sx1262_transmit(raw_ack, raw_ack_sz);
+                        }
+                    }
                 }
             }
 
@@ -1048,6 +1321,44 @@ static void companion_set_time(uint32_t epoch)
 {
     struct timeval tv = { .tv_sec = (time_t)epoch, .tv_usec = 0 };
     settimeofday(&tv, NULL);
+    timekeeping_set_utc((time_t)epoch);
+    ESP_LOGI(TAG, "Companion time set: %lu (RTC updated)", (unsigned long)epoch);
+}
+
+static void on_ble_subscribed(void)
+{
+    if (s_msg_mutex && xSemaphoreTake(s_msg_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        size_t count = s_msg_count;
+        xSemaphoreGive(s_msg_mutex);
+        if (count > 0) {
+            uint8_t tickle = PUSH_CODE_MSG_WAITING;
+            meshcore_ble_send(&tickle, 1);
+            ESP_LOGI(TAG, "BLE subscribed: re-sent PUSH_CODE_MSG_WAITING (%u pending)", (unsigned)count);
+        }
+    }
+}
+
+static void fill_companion_env(companion_env_t *env)
+{
+    if (!env) return;
+    memset(env, 0, sizeof(*env));
+    env->lat_e6 = s_lat_e6;
+    env->lon_e6 = s_lon_e6;
+    env->batt_mv = s_batt_mv;
+    env->storage_used_kb = 128;
+    env->storage_total_kb = 4096;
+    env->get_time_s = companion_get_time;
+    env->set_time_s = companion_set_time;
+    env->stats = &s_stats;
+    env->send_advert = companion_send_advert;
+    env->send_channel_txt = companion_send_channel_txt;
+    env->exec_cli = companion_exec_cli;
+    env->pop_msg = companion_pop_msg;
+    env->on_channels_changed = on_companion_channels_changed;
+    env->on_contacts_changed = on_companion_contacts_changed;
+    env->on_contact_removed = on_companion_contact_removed;
+    env->send_frame_cb = companion_send_frame_cb;
+    memcpy(env->pub_key, s_pub_key, 32);
 }
 
 static bool companion_send_advert(bool flood)
@@ -1158,26 +1469,12 @@ size_t lora_widget_handle_companion_cmd(const uint8_t *cmd, size_t cmd_len,
     if (!s_companion_initialized) {
         meshcore_companion_init(&s_companion_ctx);
         load_channels_from_storage(&s_companion_ctx);
+        load_contacts_from_storage(&s_companion_ctx);
         s_companion_initialized = true;
     }
 
-    companion_env_t env = {
-        .lat_e6 = s_lat_e6,
-        .lon_e6 = s_lon_e6,
-        .batt_mv = s_batt_mv,
-        .storage_used_kb = 128,
-        .storage_total_kb = 4096,
-        .get_time_s = companion_get_time,
-        .set_time_s = companion_set_time,
-        .stats = &s_stats,
-        .send_advert = companion_send_advert,
-        .send_channel_txt = companion_send_channel_txt,
-        .exec_cli = companion_exec_cli,
-        .pop_msg = companion_pop_msg,
-        .on_channels_changed = on_companion_channels_changed,
-        .send_frame_cb = companion_send_frame_cb,
-    };
-    memcpy(env.pub_key, s_pub_key, 32);
+    companion_env_t env;
+    fill_companion_env(&env);
 
     if (cmd[0] == CMD_SEND_TXT_MSG && cmd_len >= 7) {
         s_pending_ble_tx.pending_ack_confirm = true;
@@ -1287,6 +1584,10 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
             xSemaphoreGive(s_stats_mutex);
         }
         meshcore_ble_init(s_current_cfg.node_name, s_stats.ble_pin, on_ble_rx);
+        meshcore_ble_set_subscribe_cb(on_ble_subscribed);
+        if (s_task != NULL) {
+            xTaskNotifyGive(s_task);
+        }
         return ESP_OK;
     }
 
@@ -1568,6 +1869,7 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
     }
 
     meshcore_ble_init(s_current_cfg.node_name, s_stats.ble_pin, on_ble_rx);
+    meshcore_ble_set_subscribe_cb(on_ble_subscribed);
 
     ESP_LOGI(TAG, "SX1262 MeshCore configured: %lu kHz, SF%u, BW %lu Hz, CR 4/%u, Pwr %d dBm, Sync 0x%04X, LDRO %u",
              (unsigned long)cfg->freq_khz, (unsigned)sf, (unsigned long)bw_hz,
@@ -1580,6 +1882,7 @@ esp_err_t lora_widget_init(void)
     if (!s_companion_initialized) {
         meshcore_companion_init(&s_companion_ctx);
         load_channels_from_storage(&s_companion_ctx);
+        load_contacts_from_storage(&s_companion_ctx);
         s_companion_initialized = true;
     }
     lora_config_t def = {
@@ -1606,6 +1909,7 @@ esp_err_t lora_widget_init(void)
     esp_err_t err = lora_widget_apply(&def);
     if (err == ESP_OK) {
         meshcore_ble_init(def.node_name, s_stats.ble_pin, on_ble_rx);
+        meshcore_ble_set_subscribe_cb(on_ble_subscribed);
     }
     return err;
 }

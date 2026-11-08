@@ -39,6 +39,7 @@ static uint16_t s_mtu = 23;
 static uint32_t s_ble_pin;
 static char     s_node_name[32] = "NM-EPD-420";
 static meshcore_ble_rx_cb_t s_rx_cb;
+static meshcore_ble_subscribe_cb_t s_subscribe_cb;
 
 static int gap_event_cb(struct ble_gap_event *event, void *arg);
 static void start_advertising(void);
@@ -178,6 +179,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE:
         s_subscribed = event->subscribe.cur_notify;
         ESP_LOGI(TAG, "BLE subscribe notify=%d", s_subscribed);
+        if (s_subscribed && s_subscribe_cb) {
+            s_subscribe_cb();
+        }
         break;
 
     case BLE_GAP_EVENT_PASSKEY_ACTION: {
@@ -278,6 +282,7 @@ esp_err_t meshcore_ble_init(const char *node_name, uint32_t pin, meshcore_ble_rx
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
+    ble_att_set_preferred_mtu(185);
 
     rc = ble_gatts_count_cfg(s_gatt_svcs);
     if (rc != 0) {
@@ -340,13 +345,26 @@ bool meshcore_ble_send(const uint8_t *data, size_t len)
         size_t max_chunk = (s_mtu > 3) ? (s_mtu - 3) : 20;
         if (chunk > max_chunk) chunk = max_chunk;
 
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(&data[offset], chunk);
-        if (!om) {
-            ESP_LOGE(TAG, "ble_hs_mbuf_from_flat failed");
-            return false;
+        int rc = -1;
+        for (int retry = 0; retry < 3; retry++) {
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(&data[offset], chunk);
+            if (!om) {
+                vTaskDelay(pdMS_TO_TICKS(15));
+                continue;
+            }
+
+            rc = ble_gatts_notify_custom(s_conn_handle, s_tx_val_handle, om);
+            if (rc == 0) {
+                break;
+            }
+            if (rc == BLE_HS_ENOMEM || rc == BLE_HS_EBUSY) {
+                vTaskDelay(pdMS_TO_TICKS(15));
+                continue;
+            }
+            /* Other permanent failure */
+            break;
         }
 
-        int rc = ble_gatts_notify_custom(s_conn_handle, s_tx_val_handle, om);
         if (rc != 0) {
             ESP_LOGE(TAG, "ble_gatts_notify_custom failed: %d", rc);
             return false;
@@ -372,6 +390,11 @@ void meshcore_ble_update_name(const char *node_name)
     if (s_initialized && !s_connected) {
         setup_advertising_data();
     }
+}
+
+void meshcore_ble_set_subscribe_cb(meshcore_ble_subscribe_cb_t cb)
+{
+    s_subscribe_cb = cb;
 }
 
 #else /* !ESP_PLATFORM (Host Stubs) */
@@ -408,6 +431,11 @@ void meshcore_ble_update_pin(uint32_t pin)
 void meshcore_ble_update_name(const char *node_name)
 {
     (void)node_name;
+}
+
+void meshcore_ble_set_subscribe_cb(meshcore_ble_subscribe_cb_t cb)
+{
+    (void)cb;
 }
 
 #endif /* ESP_PLATFORM */

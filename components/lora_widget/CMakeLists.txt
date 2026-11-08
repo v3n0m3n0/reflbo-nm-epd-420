@@ -12,7 +12,8 @@ idf_component_register(
         "ed25519/keypair.c"
         "ed25519/sign.c"
         "ed25519/verify.c"
+        "ed25519/key_exchange.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "." "ed25519"
-    PRIV_REQUIRES board esp_driver_gpio esp_driver_spi freertos esp_timer esp_hw_support log util bt
+    PRIV_REQUIRES board esp_driver_gpio esp_driver_spi freertos esp_timer esp_hw_support log util bt timekeeping
 )

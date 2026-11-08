@@ -416,7 +416,7 @@ void test_companion_device_query(void)
     TEST_ASSERT_EQUAL_INT(82, (int)resp_len);
     TEST_ASSERT_EQUAL_UINT8(RESP_CODE_DEVICE_INFO, resp[0]);
     TEST_ASSERT_EQUAL_UINT8(10, resp[1]); /* COMPANION_FIRMWARE_VER_CODE */
-    TEST_ASSERT_EQUAL_UINT8(16, resp[2]); /* max_contacts / 2 */
+    TEST_ASSERT_EQUAL_UINT8(32, resp[2]); /* max_contacts / 2 = 64 / 2 */
     TEST_ASSERT_EQUAL_UINT8(8, resp[3]);  /* max_channels */
 
     uint32_t pin;
@@ -800,9 +800,9 @@ void test_companion_get_contacts_streaming_and_since(void)
     TEST_ASSERT_EQUAL_UINT8(RESP_CODE_CONTACTS_START, resp[0]);
     uint32_t match_count;
     memcpy(&match_count, &resp[1], 4);
-    TEST_ASSERT_EQUAL_UINT32(1, match_count); /* only NodeB has lastmod > 150 */
+    TEST_ASSERT_EQUAL_UINT32(2, match_count); /* total contacts count as per MyMesh.cpp:1274 */
 
-    /* 2. Test streaming mode (send_frame_cb != NULL) with since = 0 */
+    /* 2. Test streaming mode (send_frame_cb != NULL) with ContactsIterator */
     companion_env_t env_stream = {
         .send_frame_cb = mock_send_frame_cb
     };
@@ -810,7 +810,15 @@ void test_companion_get_contacts_streaming_and_since(void)
     uint8_t cmd_all[1] = { CMD_GET_CONTACTS };
     len = meshcore_companion_handle_cmd(&ctx, &env_stream, &cfg, &changed, cmd_all, sizeof(cmd_all), resp, sizeof(resp));
     TEST_ASSERT_EQUAL_INT(0, (int)len); /* Return 0 so caller doesn't send resp_out duplicate */
-    TEST_ASSERT_EQUAL_UINT32(4, (uint32_t)s_cb_frame_count);
+    TEST_ASSERT_EQUAL_UINT32(1, (uint32_t)s_cb_frame_count); /* Initial frame: START */
+    TEST_ASSERT_TRUE(ctx.contact_iter_active);
+
+    /* Step the iterator until complete */
+    while (meshcore_companion_step_iter(&ctx, &env_stream)) {
+        /* each step transmits 1 contact */
+    }
+    TEST_ASSERT_FALSE(ctx.contact_iter_active);
+    TEST_ASSERT_EQUAL_UINT32(4, (uint32_t)s_cb_frame_count); /* START + Contact1 + Contact2 + END */
 
     /* Frame 0: START (5 bytes) */
     TEST_ASSERT_EQUAL_INT(5, (int)s_cb_frame_lens[0]);
@@ -837,12 +845,19 @@ void test_companion_get_contacts_streaming_and_since(void)
     s_cb_frame_count = 0;
     len = meshcore_companion_handle_cmd(&ctx, &env_stream, &cfg, &changed, cmd_since, sizeof(cmd_since), resp, sizeof(resp));
     TEST_ASSERT_EQUAL_INT(0, (int)len);
-    TEST_ASSERT_EQUAL_UINT32(3, (uint32_t)s_cb_frame_count);
+    TEST_ASSERT_EQUAL_UINT32(1, (uint32_t)s_cb_frame_count); /* Start frame */
+    TEST_ASSERT_TRUE(ctx.contact_iter_active);
 
-    /* Frame 0: START with count = 1 */
+    while (meshcore_companion_step_iter(&ctx, &env_stream)) {
+        /* step transmits filtered contact */
+    }
+    TEST_ASSERT_FALSE(ctx.contact_iter_active);
+    TEST_ASSERT_EQUAL_UINT32(3, (uint32_t)s_cb_frame_count); /* START + NodeB + END */
+
+    /* Frame 0: START with total count = 2 */
     TEST_ASSERT_EQUAL_INT(5, (int)s_cb_frame_lens[0]);
     memcpy(&match_count, &s_cb_frames[0][1], 4);
-    TEST_ASSERT_EQUAL_UINT32(1, match_count);
+    TEST_ASSERT_EQUAL_UINT32(2, match_count);
 
     /* Frame 1: CONTACT NodeB */
     TEST_ASSERT_EQUAL_INT(COMPANION_CONTACT_FRAME_SIZE, (int)s_cb_frame_lens[1]);

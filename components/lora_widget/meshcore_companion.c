@@ -67,6 +67,8 @@ void meshcore_companion_init(companion_context_t *ctx)
 
     ctx->rx_delay_base_x1000 = 10000;
     ctx->tx_delay_factor_x1000 = 500;
+    ctx->autoadd_config = 0x1E;
+    ctx->autoadd_max_hops = 64;
 }
 
 bool meshcore_companion_add_update_contact(companion_context_t *ctx, const companion_contact_t *contact)
@@ -116,6 +118,18 @@ const companion_contact_t *meshcore_companion_get_contact(const companion_contex
     return NULL;
 }
 
+companion_contact_t *meshcore_companion_get_contact_mut(companion_context_t *ctx, const uint8_t *pub_key)
+{
+    if (!ctx || !pub_key) return NULL;
+
+    for (size_t i = 0; i < ctx->contact_count; i++) {
+        if (memcmp(ctx->contacts[i].pub_key, pub_key, COMPANION_PUB_KEY_SIZE) == 0) {
+            return &ctx->contacts[i];
+        }
+    }
+    return NULL;
+}
+
 static size_t format_contact_frame(const companion_contact_t *c, uint8_t *out, size_t max)
 {
     if (max < COMPANION_CONTACT_FRAME_SIZE) return 0;
@@ -142,6 +156,36 @@ static size_t format_contact_frame(const companion_contact_t *c, uint8_t *out, s
     return i;
 }
 
+bool meshcore_companion_step_iter(companion_context_t *ctx, const companion_env_t *env)
+{
+    if (!ctx || !ctx->contact_iter_active || !env || !env->send_frame_cb) {
+        return false;
+    }
+
+    while (ctx->contact_iter_idx < ctx->contact_count) {
+        size_t i = ctx->contact_iter_idx++;
+        if (ctx->contacts[i].lastmod > ctx->contact_iter_since) {
+            if (ctx->contacts[i].lastmod > ctx->contact_iter_lastmod) {
+                ctx->contact_iter_lastmod = ctx->contacts[i].lastmod;
+            }
+            uint8_t c_frame[COMPANION_CONTACT_FRAME_SIZE];
+            size_t c_len = format_contact_frame(&ctx->contacts[i], c_frame, sizeof(c_frame));
+            if (c_len > 0) {
+                env->send_frame_cb(c_frame, c_len, env->user_data);
+            }
+            return true; /* One contact sent; iterator remains active */
+        }
+    }
+
+    /* All matching contacts sent; send end frame */
+    uint8_t end_frame[5];
+    end_frame[0] = RESP_CODE_END_OF_CONTACTS;
+    wr_le32(&end_frame[1], ctx->contact_iter_lastmod);
+    env->send_frame_cb(end_frame, 5, env->user_data);
+    ctx->contact_iter_active = false;
+    return false; /* Iteration complete */
+}
+
 size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
                                      const companion_env_t *env,
                                      lora_config_t *cfg,
@@ -154,6 +198,9 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
     if (!ctx || !env || !cfg || !cmd || cmd_len == 0 || !resp_out || resp_max == 0) {
         return 0;
     }
+
+    /* Any incoming command interrupts an active contacts iterator (MyMesh.cpp:1063) */
+    ctx->contact_iter_active = false;
 
     uint8_t opcode = cmd[0];
 
@@ -357,42 +404,22 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
         if (cmd_len >= 5) {
             since = rd_le32(&cmd[1]);
         }
-        uint32_t count = 0;
-        uint32_t most_recent_lastmod = since;
-        for (size_t i = 0; i < ctx->contact_count; i++) {
-            if (ctx->contacts[i].lastmod > since) {
-                count++;
-                if (ctx->contacts[i].lastmod > most_recent_lastmod) {
-                    most_recent_lastmod = ctx->contacts[i].lastmod;
-                }
-            }
-        }
+        ctx->contact_iter_active = true;
+        ctx->contact_iter_since = since;
+        ctx->contact_iter_idx = 0;
+        ctx->contact_iter_lastmod = since;
 
         if (env->send_frame_cb) {
             uint8_t start_frame[5];
             start_frame[0] = RESP_CODE_CONTACTS_START;
-            wr_le32(&start_frame[1], count);
+            wr_le32(&start_frame[1], (uint32_t)ctx->contact_count);
             env->send_frame_cb(start_frame, 5, env->user_data);
-
-            uint8_t c_frame[COMPANION_CONTACT_FRAME_SIZE];
-            for (size_t i = 0; i < ctx->contact_count; i++) {
-                if (ctx->contacts[i].lastmod > since) {
-                    size_t c_len = format_contact_frame(&ctx->contacts[i], c_frame, sizeof(c_frame));
-                    if (c_len > 0) {
-                        env->send_frame_cb(c_frame, c_len, env->user_data);
-                    }
-                }
-            }
-            uint8_t end_frame[5];
-            end_frame[0] = RESP_CODE_END_OF_CONTACTS;
-            wr_le32(&end_frame[1], most_recent_lastmod);
-            env->send_frame_cb(end_frame, 5, env->user_data);
             return 0;
         }
 
         if (resp_max < 5) return 0;
         resp_out[0] = RESP_CODE_CONTACTS_START;
-        wr_le32(&resp_out[1], count);
+        wr_le32(&resp_out[1], (uint32_t)ctx->contact_count);
         return 5;
     }
 
@@ -470,6 +497,9 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
     case CMD_SET_DEVICE_TIME: {
         if (cmd_len < 5) return write_err(resp_out, resp_max, COMPANION_ERR_ILLEGAL_ARG);
         uint32_t epoch = rd_le32(&cmd[1]);
+        if (epoch < 1700000000UL) {
+            return write_err(resp_out, resp_max, COMPANION_ERR_ILLEGAL_ARG);
+        }
         if (env->set_time_s) {
             env->set_time_s(epoch);
         }
@@ -539,6 +569,9 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
             c.lastmod = rd_le32(&cmd[idx]);
         }
         if (meshcore_companion_add_update_contact(ctx, &c)) {
+            if (env && env->on_contacts_changed) {
+                env->on_contacts_changed(ctx, env->user_data);
+            }
             return write_ok(resp_out, resp_max);
         }
         return write_err(resp_out, resp_max, COMPANION_ERR_TABLE_FULL);
@@ -546,10 +579,14 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
 
     case CMD_REMOVE_CONTACT: {
         if (cmd_len < 1 + COMPANION_PUB_KEY_SIZE) return write_err(resp_out, resp_max, COMPANION_ERR_ILLEGAL_ARG);
-        if (meshcore_companion_remove_contact(ctx, &cmd[1])) {
-            return write_ok(resp_out, resp_max);
+        meshcore_companion_remove_contact(ctx, &cmd[1]);
+        if (env && env->on_contact_removed) {
+            env->on_contact_removed(&cmd[1], env->user_data);
         }
-        return write_err(resp_out, resp_max, COMPANION_ERR_NOT_FOUND);
+        if (env && env->on_contacts_changed) {
+            env->on_contacts_changed(ctx, env->user_data);
+        }
+        return write_ok(resp_out, resp_max);
     }
 
     case CMD_GET_CONTACT_BY_KEY: {
@@ -575,6 +612,9 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
         if (cmd_len >= 3) ctx->telemetry_mode = cmd[2];
         if (cmd_len >= 4) ctx->advert_loc_policy = cmd[3];
         if (cmd_len >= 5) ctx->multi_acks = cmd[4];
+        if (env && env->on_contacts_changed) {
+            env->on_contacts_changed(ctx, env->user_data);
+        }
         return write_ok(resp_out, resp_max);
     }
 
@@ -636,13 +676,19 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
     case CMD_GET_AUTOADD_CONFIG: {
         if (resp_max < 3) return 0;
         resp_out[0] = RESP_CODE_AUTOADD_CONFIG;
-        resp_out[1] = 0x1E;
-        resp_out[2] = 64;
+        resp_out[1] = ctx->autoadd_config;
+        resp_out[2] = ctx->autoadd_max_hops;
         return 3;
     }
 
-    case CMD_SET_AUTOADD_CONFIG:
+    case CMD_SET_AUTOADD_CONFIG: {
+        if (cmd_len >= 2) ctx->autoadd_config = cmd[1];
+        if (cmd_len >= 3) ctx->autoadd_max_hops = (cmd[2] > 64) ? 64 : cmd[2];
+        if (env && env->on_contacts_changed) {
+            env->on_contacts_changed(ctx, env->user_data);
+        }
         return write_ok(resp_out, resp_max);
+    }
 
     case CMD_GET_DEFAULT_FLOOD_SCOPE: {
         if (resp_max < 1) return 0;
@@ -669,7 +715,20 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
     case CMD_IMPORT_PRIVATE_KEY:
         return write_disabled(resp_out, resp_max);
 
-    case CMD_RESET_PATH:
+    case CMD_RESET_PATH: {
+        if (cmd_len < 1 + COMPANION_PUB_KEY_SIZE) return write_err(resp_out, resp_max, COMPANION_ERR_ILLEGAL_ARG);
+        companion_contact_t *c = meshcore_companion_get_contact_mut(ctx, &cmd[1]);
+        if (c) {
+            c->out_path_len = -1;
+            memset(c->out_path, 0, COMPANION_MAX_PATH_SIZE);
+            if (env && env->on_contacts_changed) {
+                env->on_contacts_changed(ctx, env->user_data);
+            }
+            return write_ok(resp_out, resp_max);
+        }
+        return write_err(resp_out, resp_max, COMPANION_ERR_NOT_FOUND);
+    }
+
     case CMD_SHARE_CONTACT:
     case CMD_IMPORT_CONTACT:
     case CMD_REBOOT:

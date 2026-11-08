@@ -225,7 +225,8 @@ add_library(meshcore_logic STATIC
             ${REPO_ROOT}/components/lora_widget/ed25519/sha512.c
             ${REPO_ROOT}/components/lora_widget/ed25519/keypair.c
             ${REPO_ROOT}/components/lora_widget/ed25519/sign.c
-            ${REPO_ROOT}/components/lora_widget/ed25519/verify.c)
+            ${REPO_ROOT}/components/lora_widget/ed25519/verify.c
+            ${REPO_ROOT}/components/lora_widget/ed25519/key_exchange.c)
 target_include_directories(meshcore_logic PUBLIC
                            ${REPO_ROOT}/components/lora_widget/include
                            ${REPO_ROOT}/components/lora_widget

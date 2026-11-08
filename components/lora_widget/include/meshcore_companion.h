@@ -139,7 +139,7 @@ extern "C" {
 #define COMPANION_PUB_KEY_SIZE      32
 #define COMPANION_MAX_PATH_SIZE     64
 #define COMPANION_NAME_SIZE         32
-#define COMPANION_MAX_CONTACTS      32
+#define COMPANION_MAX_CONTACTS      64
 #define COMPANION_MAX_CHANNELS      8
 #define COMPANION_MAX_FRAME_SIZE    176
 #define COMPANION_CONTACT_FRAME_SIZE 148
@@ -168,6 +168,12 @@ typedef struct {
     companion_contact_t contacts[COMPANION_MAX_CONTACTS];
     size_t              contact_count;
 
+    /* Contact iterator state */
+    bool     contact_iter_active;
+    uint32_t contact_iter_since;
+    size_t   contact_iter_idx;
+    uint32_t contact_iter_lastmod;
+
     /* Preferences */
     uint32_t rx_delay_base_x1000;
     uint32_t tx_delay_factor_x1000;
@@ -175,6 +181,8 @@ typedef struct {
     uint8_t  telemetry_mode;
     uint8_t  advert_loc_policy;
     uint8_t  multi_acks;
+    uint8_t  autoadd_config;
+    uint8_t  autoadd_max_hops;
 
     /* Outgoing message deduplication state */
     uint32_t last_tx_msg_ts;
@@ -200,6 +208,8 @@ typedef struct {
     void (*exec_cli)(const char *cmd, char *reply, size_t reply_sz);
     bool (*pop_msg)(uint8_t *msg_out, size_t max, size_t *out_len);
     void (*on_channels_changed)(companion_context_t *ctx, void *user_data);
+    void (*on_contacts_changed)(companion_context_t *ctx, void *user_data);
+    void (*on_contact_removed)(const uint8_t *pub_key, void *user_data);
 
     void (*send_frame_cb)(const uint8_t *frame, size_t len, void *user_data);
     void *user_data;
@@ -209,6 +219,8 @@ void meshcore_companion_init(companion_context_t *ctx);
 bool meshcore_companion_add_update_contact(companion_context_t *ctx, const companion_contact_t *contact);
 bool meshcore_companion_remove_contact(companion_context_t *ctx, const uint8_t *pub_key);
 const companion_contact_t *meshcore_companion_get_contact(const companion_context_t *ctx, const uint8_t *pub_key);
+companion_contact_t *meshcore_companion_get_contact_mut(companion_context_t *ctx, const uint8_t *pub_key);
+bool meshcore_companion_step_iter(companion_context_t *ctx, const companion_env_t *env);
 
 size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
                                      const companion_env_t *env,
