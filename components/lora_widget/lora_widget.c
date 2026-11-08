@@ -673,9 +673,6 @@ static void append_message_history(const meshcore_msg_t *msg)
         }
         s_messages[MESHCORE_MAX_MESSAGES - 1] = *msg;
     }
-    if (s_rx_notify_cb) {
-        s_rx_notify_cb();
-    }
 }
 
 bool lora_widget_get_advert(size_t index, meshcore_advert_t *out)
@@ -933,9 +930,13 @@ static void lora_rx_task(void *arg)
 
                     if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                         update_advert_table(&s_adv);
+                        s_stats.advert_seq++;
                         strncpy(s_stats.last_sender, s_adv.name, sizeof(s_stats.last_sender) - 1);
                         s_stats.last_sender[sizeof(s_stats.last_sender) - 1] = '\0';
                         xSemaphoreGive(s_stats_mutex);
+                    }
+                    if (s_rx_notify_cb) {
+                        s_rx_notify_cb();
                     }
 
                     /* Add/update contact in companion table */
@@ -1038,7 +1039,11 @@ static void lora_rx_task(void *arg)
                         nb.rx_time_s = (uint32_t)time(NULL);
                         if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                             update_neighbor_table(&nb);
+                            s_stats.advert_seq++;
                             xSemaphoreGive(s_stats_mutex);
+                        }
+                        if (s_rx_notify_cb) {
+                            s_rx_notify_cb();
                         }
                         ESP_LOGI(TAG, "Discover Response from neighbor: prefix %02x%02x%02x%02x (RSSI %d dBm)",
                                  nb.pub_key_prefix[0], nb.pub_key_prefix[1], nb.pub_key_prefix[2], nb.pub_key_prefix[3], rssi);
@@ -1091,16 +1096,26 @@ static void lora_rx_task(void *arg)
                     }
 
                     bool is_dup_msg = false;
+                    bool notify_msg = false;
                     if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                         for (int i = 0; i < s_stats.msg_count && i < MESHCORE_MAX_MESSAGES; i++) {
-                            if ((s_messages[i].timestamp == ts || s_messages[i].timestamp == 0 || ts == 0) &&
-                                strcmp(s_messages[i].text, msg.text) == 0) {
-                                is_dup_msg = true;
-                                break;
+                            if (ts != 0 && s_messages[i].timestamp != 0) {
+                                if (s_messages[i].timestamp == ts && strcmp(s_messages[i].text, msg.text) == 0) {
+                                    is_dup_msg = true;
+                                    break;
+                                }
+                            } else {
+                                if (strcmp(s_messages[i].text, msg.text) == 0 &&
+                                    (msg.rx_time_s >= s_messages[i].rx_time_s) &&
+                                    (msg.rx_time_s - s_messages[i].rx_time_s <= 15)) {
+                                    is_dup_msg = true;
+                                    break;
+                                }
                             }
                         }
                         if (!is_dup_msg) {
                             append_message_history(&msg);
+                            notify_msg = true;
                             /* Extract sender name before colon */
                             char *colon = strstr(text, ": ");
                             if (colon) {
@@ -1113,6 +1128,9 @@ static void lora_rx_task(void *arg)
                             }
                         }
                         xSemaphoreGive(s_stats_mutex);
+                    }
+                    if (notify_msg && s_rx_notify_cb) {
+                        s_rx_notify_cb();
                     }
 
                     if (is_dup_msg) {
@@ -1207,20 +1225,33 @@ static void lora_rx_task(void *arg)
                         }
 
                         bool is_dup_msg = false;
+                        bool notify_msg = false;
                         if (s_stats_mutex && xSemaphoreTake(s_stats_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                             for (int i = 0; i < s_stats.msg_count && i < MESHCORE_MAX_MESSAGES; i++) {
-                                if ((s_messages[i].timestamp == sender_ts || s_messages[i].timestamp == 0 || sender_ts == 0) &&
-                                    strcmp(s_messages[i].text, msg.text) == 0) {
-                                    is_dup_msg = true;
-                                    break;
+                                if (sender_ts != 0 && s_messages[i].timestamp != 0) {
+                                    if (s_messages[i].timestamp == sender_ts && strcmp(s_messages[i].text, msg.text) == 0) {
+                                        is_dup_msg = true;
+                                        break;
+                                    }
+                                } else {
+                                    if (strcmp(s_messages[i].text, msg.text) == 0 &&
+                                        (msg.rx_time_s >= s_messages[i].rx_time_s) &&
+                                        (msg.rx_time_s - s_messages[i].rx_time_s <= 15)) {
+                                        is_dup_msg = true;
+                                        break;
+                                    }
                                 }
                             }
                             if (!is_dup_msg) {
                                 append_message_history(&msg);
+                                notify_msg = true;
                                 strncpy(s_stats.last_sender, matched_contact->name, sizeof(s_stats.last_sender) - 1);
                                 s_stats.last_sender[sizeof(s_stats.last_sender) - 1] = '\0';
                             }
                             xSemaphoreGive(s_stats_mutex);
+                        }
+                        if (notify_msg && s_rx_notify_cb) {
+                            s_rx_notify_cb();
                         }
 
                         if (!is_dup_msg) {
@@ -1335,6 +1366,14 @@ static void on_ble_subscribed(void)
             meshcore_ble_send(&tickle, 1);
             ESP_LOGI(TAG, "BLE subscribed: re-sent PUSH_CODE_MSG_WAITING (%u pending)", (unsigned)count);
         }
+    }
+}
+
+static void on_ble_conn_changed(bool connected)
+{
+    (void)connected;
+    if (s_rx_notify_cb) {
+        s_rx_notify_cb();
     }
 }
 
@@ -1585,6 +1624,8 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
         }
         meshcore_ble_init(s_current_cfg.node_name, s_stats.ble_pin, on_ble_rx);
         meshcore_ble_set_subscribe_cb(on_ble_subscribed);
+    meshcore_ble_set_conn_cb(on_ble_conn_changed);
+        meshcore_ble_set_conn_cb(on_ble_conn_changed);
         if (s_task != NULL) {
             xTaskNotifyGive(s_task);
         }
@@ -1870,6 +1911,7 @@ esp_err_t lora_widget_apply(const lora_config_t *cfg)
 
     meshcore_ble_init(s_current_cfg.node_name, s_stats.ble_pin, on_ble_rx);
     meshcore_ble_set_subscribe_cb(on_ble_subscribed);
+    meshcore_ble_set_conn_cb(on_ble_conn_changed);
 
     ESP_LOGI(TAG, "SX1262 MeshCore configured: %lu kHz, SF%u, BW %lu Hz, CR 4/%u, Pwr %d dBm, Sync 0x%04X, LDRO %u",
              (unsigned long)cfg->freq_khz, (unsigned)sf, (unsigned long)bw_hz,
@@ -1910,6 +1952,8 @@ esp_err_t lora_widget_init(void)
     if (err == ESP_OK) {
         meshcore_ble_init(def.node_name, s_stats.ble_pin, on_ble_rx);
         meshcore_ble_set_subscribe_cb(on_ble_subscribed);
+    meshcore_ble_set_conn_cb(on_ble_conn_changed);
+        meshcore_ble_set_conn_cb(on_ble_conn_changed);
     }
     return err;
 }
@@ -2143,6 +2187,9 @@ esp_err_t lora_widget_send_channel_msg_ex(uint8_t channel_idx, uint32_t ts, cons
             s_stats.last_sender[sizeof(s_stats.last_sender) - 1] = '\0';
             append_message_history(&msg);
             xSemaphoreGive(s_stats_mutex);
+        }
+        if (s_rx_notify_cb) {
+            s_rx_notify_cb();
         }
     }
     return err;

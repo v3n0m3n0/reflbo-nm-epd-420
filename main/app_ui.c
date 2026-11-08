@@ -39,6 +39,7 @@ static uint32_t s_last_lora_pkt_count;
 static uint32_t s_last_lora_sent_count;
 static uint32_t s_last_lora_msg_count;
 static uint32_t s_last_lora_msg_seq;
+static uint32_t s_last_lora_adv_seq;
 static bool s_last_lora_ble;
 
 #define LEARN_PATH "/fs/state/battery_learn.txt" /* the battery learning session in base64 (D21) */
@@ -284,8 +285,11 @@ void app_ui_context(ui_context_t *ctx)
     s_lora_ui.last_snr_q4 = st.last_snr_q4;
     s_lora_ui.noise_floor_dbm = st.noise_floor_dbm;
 
+    size_t total_msgs = st.msg_count;
+    size_t start_msg_idx = (total_msgs > UI_LORA_MAX_MSGS) ? (total_msgs - UI_LORA_MAX_MSGS) : 0;
+    s_lora_ui.total_msg_count = (int)total_msgs;
     s_lora_ui.msg_count = 0;
-    for (size_t i = 0; i < UI_LORA_MAX_MSGS; i++) {
+    for (size_t i = start_msg_idx; i < total_msgs && s_lora_ui.msg_count < UI_LORA_MAX_MSGS; i++) {
         meshcore_msg_t msg;
         if (!lora_widget_get_message(i, &msg)) {
             break;
@@ -301,37 +305,62 @@ void app_ui_context(ui_context_t *ctx)
         dst->sender[0] = '\0';
     }
 
-    s_lora_ui.node_count = 0;
-    for (size_t i = 0; i < UI_LORA_MAX_NODES; i++) {
-        meshcore_advert_t adv;
-        if (!lora_widget_get_advert(i, &adv)) {
-            break;
+    meshcore_advert_t all_advs[16];
+    size_t adv_count = 0;
+    for (size_t i = 0; i < 16; i++) {
+        if (lora_widget_get_advert(i, &all_advs[adv_count])) {
+            adv_count++;
         }
+    }
+    s_lora_ui.total_node_count = (int)adv_count;
+
+    /* Sort adverts descending by last_seen */
+    for (size_t i = 0; i < adv_count; i++) {
+        for (size_t j = i + 1; j < adv_count; j++) {
+            uint32_t time_i = all_advs[i].rx_time_s ? all_advs[i].rx_time_s : all_advs[i].timestamp;
+            uint32_t time_j = all_advs[j].rx_time_s ? all_advs[j].rx_time_s : all_advs[j].timestamp;
+            if (time_j > time_i) {
+                meshcore_advert_t tmp = all_advs[i];
+                all_advs[i] = all_advs[j];
+                all_advs[j] = tmp;
+            }
+        }
+    }
+
+    s_lora_ui.node_count = 0;
+    for (size_t i = 0; i < adv_count && s_lora_ui.node_count < UI_LORA_MAX_NODES; i++) {
+        const meshcore_advert_t *adv = &all_advs[i];
         ui_lora_node_t *dst = &s_lora_ui.nodes[s_lora_ui.node_count++];
         snprintf(dst->name, sizeof(dst->name), "%.*s",
-                 (int)(sizeof(dst->name) - 1), adv.name);
-        memcpy(dst->pub_key_prefix, adv.pub_key, 4);
-        dst->node_type = adv.node_type;
-        dst->last_rssi_dbm = adv.rssi_dbm;
-        dst->last_snr_q4 = adv.snr_q4;
-        dst->hops = adv.hops;
-        dst->last_seen = adv.rx_time_s ? adv.rx_time_s : adv.timestamp;
+                 (int)(sizeof(dst->name) - 1), adv->name);
+        memcpy(dst->pub_key_prefix, adv->pub_key, 4);
+        dst->node_type = adv->node_type;
+        dst->last_rssi_dbm = adv->rssi_dbm;
+        dst->last_snr_q4 = adv->snr_q4;
+        dst->hops = adv->hops;
+        dst->last_seen = adv->rx_time_s ? adv->rx_time_s : adv->timestamp;
     }
+
     if (s_lora_ui.node_count == 0) {
-        for (size_t i = 0; i < UI_LORA_MAX_NODES; i++) {
-            meshcore_neighbor_t nbr;
-            if (!lora_widget_get_neighbor(i, &nbr)) {
-                break;
+        meshcore_neighbor_t all_nbrs[16];
+        size_t nbr_count = 0;
+        for (size_t i = 0; i < 16; i++) {
+            if (lora_widget_get_neighbor(i, &all_nbrs[nbr_count])) {
+                nbr_count++;
             }
+        }
+        s_lora_ui.total_node_count = (int)nbr_count;
+        for (size_t i = 0; i < nbr_count && s_lora_ui.node_count < UI_LORA_MAX_NODES; i++) {
+            const meshcore_neighbor_t *nbr = &all_nbrs[i];
             ui_lora_node_t *dst = &s_lora_ui.nodes[s_lora_ui.node_count++];
             snprintf(dst->name, sizeof(dst->name), "%.*s",
-                     (int)(sizeof(dst->name) - 1), nbr.name);
-            memcpy(dst->pub_key_prefix, nbr.pub_key_prefix, 4);
-            dst->node_type = nbr.node_type;
-            dst->last_rssi_dbm = nbr.rssi_dbm;
-            dst->last_snr_q4 = nbr.snr_out_q4;
+                     (int)(sizeof(dst->name) - 1), nbr->name);
+            memcpy(dst->pub_key_prefix, nbr->pub_key_prefix, 4);
+            dst->node_type = nbr->node_type;
+            dst->last_rssi_dbm = nbr->rssi_dbm;
+            dst->last_snr_q4 = nbr->snr_out_q4;
             dst->hops = 0;
-            dst->last_seen = nbr.rx_time_s;
+            dst->last_seen = nbr->rx_time_s;
         }
     }
     ctx->lora = &s_lora_ui;
@@ -775,15 +804,15 @@ void app_ui_tick(bool force)
     if (s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
         lora_stats_t st = lora_widget_get_stats();
         if (st.msg_seq != s_last_lora_msg_seq ||
-            st.packet_count != s_last_lora_pkt_count ||
-            st.packets_sent != s_last_lora_sent_count ||
             st.msg_count != s_last_lora_msg_count ||
+            st.advert_seq != s_last_lora_adv_seq ||
             st.ble_connected != s_last_lora_ble) {
             s_last_lora_msg_seq = st.msg_seq;
+            s_last_lora_msg_count = st.msg_count;
+            s_last_lora_adv_seq = st.advert_seq;
+            s_last_lora_ble = st.ble_connected;
             s_last_lora_pkt_count = st.packet_count;
             s_last_lora_sent_count = st.packets_sent;
-            s_last_lora_msg_count = st.msg_count;
-            s_last_lora_ble = st.ble_connected;
             render = true;
         }
     }
@@ -801,8 +830,7 @@ sched_wake_t app_ui_next_wake(time_t now)
         .display_every_min = s.settings.display_every_min,
         .sensors_every_min = s.settings.sensors_every_min,
         .cycle_at = s_presets.cycle_enabled ? s.cycle_at : 0,
-        .every_second = s_presets.presets[s_presets.active].seconds ||
-                        (s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA),
+        .every_second = s_presets.presets[s_presets.active].seconds,
         .schedule_at = schedule_runs() ? ui_schedule_next(&s_presets.schedule, now, &index) : 0,
         .sync_at = s.critical || s.night_until != 0 ? 0 : app_sync_due(),
     };

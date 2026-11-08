@@ -239,9 +239,10 @@ void ui_draw_lora_view(gfx_fb_t *fb, gfx_rect_t below, const ui_context_t *ctx)
     /* --- 2. Middle Section — Received & Sent Messages (y = 59..208) --- */
     gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 8, 61, 250, 16 }, GFX_ALIGN_LEFT,
                      lang_str(ctx->lang, LS_LORA_MESSAGES), GFX_BLACK);
-    if (lora->msg_count > 0) {
+    int display_msg_count = lora->total_msg_count > 0 ? lora->total_msg_count : lora->msg_count;
+    if (display_msg_count > 0) {
         char count_str[16];
-        snprintf(count_str, sizeof(count_str), "(%d)", lora->msg_count);
+        snprintf(count_str, sizeof(count_str), "(%d)", display_msg_count);
         gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 258, 61, 134, 16 }, GFX_ALIGN_RIGHT, count_str, GFX_BLACK);
     }
 
@@ -295,9 +296,10 @@ void ui_draw_lora_view(gfx_fb_t *fb, gfx_rect_t below, const ui_context_t *ctx)
     /* --- 3. Bottom Section — Heard Nodes / Neighbors (y = 209..299) --- */
     gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 8, 211, 250, 16 }, GFX_ALIGN_LEFT,
                      lang_str(ctx->lang, LS_LORA_NODES), GFX_BLACK);
-    if (lora->node_count > 0) {
+    int display_node_count = lora->total_node_count > 0 ? lora->total_node_count : lora->node_count;
+    if (display_node_count > 0) {
         char count_str[16];
-        snprintf(count_str, sizeof(count_str), "(%d)", lora->node_count);
+        snprintf(count_str, sizeof(count_str), "(%d)", display_node_count);
         gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 258, 211, 134, 16 }, GFX_ALIGN_RIGHT, count_str, GFX_BLACK);
     }
 

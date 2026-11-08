@@ -87,6 +87,7 @@ typedef struct {
     uint8_t neighbor_count;
     uint8_t msg_count;
     uint32_t msg_seq;
+    uint32_t advert_seq;
 
     /* BLE companion state */
     uint32_t ble_pin;

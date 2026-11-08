@@ -40,6 +40,7 @@ static uint32_t s_ble_pin;
 static char     s_node_name[32] = "NM-EPD-420";
 static meshcore_ble_rx_cb_t s_rx_cb;
 static meshcore_ble_subscribe_cb_t s_subscribe_cb;
+static meshcore_ble_conn_cb_t s_conn_cb;
 
 static int gap_event_cb(struct ble_gap_event *event, void *arg);
 static void start_advertising(void);
@@ -159,11 +160,17 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             s_conn_handle = event->connect.conn_handle;
             s_connected = true;
             ESP_LOGI(TAG, "BLE connected, handle=%u", s_conn_handle);
+            if (s_conn_cb) {
+                s_conn_cb(true);
+            }
             /* Initiate security pairing */
             ble_gap_security_initiate(s_conn_handle);
         } else {
             s_connected = false;
             s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            if (s_conn_cb) {
+                s_conn_cb(false);
+            }
             start_advertising();
         }
         break;
@@ -173,6 +180,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         s_connected = false;
         s_subscribed = false;
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        if (s_conn_cb) {
+            s_conn_cb(false);
+        }
         start_advertising();
         break;
 
@@ -397,6 +407,11 @@ void meshcore_ble_set_subscribe_cb(meshcore_ble_subscribe_cb_t cb)
     s_subscribe_cb = cb;
 }
 
+void meshcore_ble_set_conn_cb(meshcore_ble_conn_cb_t cb)
+{
+    s_conn_cb = cb;
+}
+
 #else /* !ESP_PLATFORM (Host Stubs) */
 
 esp_err_t meshcore_ble_init(const char *node_name, uint32_t pin, meshcore_ble_rx_cb_t rx_cb)
@@ -434,6 +449,11 @@ void meshcore_ble_update_name(const char *node_name)
 }
 
 void meshcore_ble_set_subscribe_cb(meshcore_ble_subscribe_cb_t cb)
+{
+    (void)cb;
+}
+
+void meshcore_ble_set_conn_cb(meshcore_ble_conn_cb_t cb)
 {
     (void)cb;
 }

@@ -50,8 +50,10 @@ struct ui_lora {
     int8_t last_snr_q4;
     int16_t noise_floor_dbm;
     int msg_count;
+    int total_msg_count;
     ui_lora_msg_t msgs[UI_LORA_MAX_MSGS];
     int node_count;
+    int total_node_count;
     ui_lora_node_t nodes[UI_LORA_MAX_NODES];
 };
 
