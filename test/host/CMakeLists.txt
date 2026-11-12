@@ -108,8 +108,8 @@ add_library(board_logic STATIC ${REPO_ROOT}/components/board/gesture.c)
 target_include_directories(board_logic PUBLIC ${REPO_ROOT}/components/board/include)
 target_compile_options(board_logic PRIVATE ${REFLBO_WARNINGS})
 
-# sensors: only the SHTC3 codec and the battery model build on the host.
-add_library(sensors_logic STATIC ${REPO_ROOT}/components/sensors/shtc3_codec.c
+# sensors: only the AHT20 codec and the battery model build on the host.
+add_library(sensors_logic STATIC ${REPO_ROOT}/components/sensors/aht20_codec.c
                                  ${REPO_ROOT}/components/sensors/battery_model.c
                                  ${REPO_ROOT}/components/sensors/battery_learn.c)
 target_include_directories(sensors_logic PUBLIC ${REPO_ROOT}/components/sensors/include)
@@ -271,7 +271,7 @@ target_compile_definitions(test_radar PRIVATE FIXTURE_DIR="${CMAKE_CURRENT_SOURC
 reflbo_host_test(test_adsb adsb_logic)
 target_compile_definitions(test_adsb PRIVATE FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/adsb")
 reflbo_host_test(test_gesture board_logic)
-reflbo_host_test(test_shtc3_codec sensors_logic)
+reflbo_host_test(test_aht20_codec sensors_logic)
 reflbo_host_test(test_battery_model sensors_logic)
 reflbo_host_test(test_battery_learn sensors_logic)
 reflbo_host_test(test_pcf85063_regs rtc_logic)

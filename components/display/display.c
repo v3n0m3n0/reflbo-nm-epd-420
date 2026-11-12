@@ -114,3 +114,13 @@ esp_err_t display_set_variant(st7305_variant_t variant)
     ESP_RETURN_ON_ERROR(st7305_reinit(variant), TAG, "reinit");
     return display_commit(true);
 }
+
+uint32_t display_full_count(void)
+{
+    return st7305_full_count();
+}
+
+uint32_t display_busy_timeout_count(void)
+{
+    return st7305_busy_timeout_count();
+}

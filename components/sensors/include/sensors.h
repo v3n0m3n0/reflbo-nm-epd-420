@@ -9,7 +9,7 @@
 #include "esp_err.h"
 
 /*
- * SHTC3 climate sensor and battery gauge (spec §8). Keeps the latest readings, which the display
+ * AHT20 climate sensor and battery gauge (spec §8). Keeps the latest readings, which the display
  * and the console both show. Call from the app task only.
  */
 
@@ -39,7 +39,7 @@ typedef struct {
     bool learn_changed;    /* since the app last saved it */
 } sensors_state_t;
 
-/* `cold`: after power-on; checks the SHTC3's id and sends it to sleep. */
+/* `cold`: after power-on; checks the AHT20's calibration status and initializes it if needed. */
 esp_err_t sensors_init(i2c_master_bus_handle_t bus, bool cold);
 esp_err_t sensors_sample_env(time_t now);
 esp_err_t sensors_sample_battery(time_t now);

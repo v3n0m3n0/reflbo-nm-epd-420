@@ -42,7 +42,10 @@ static int screenshot_body(int argc, char **argv)
 
 static int print_status(void)
 {
-    printf("panel ssd1683 (GYE042A87), partials %u/20%s\n", (unsigned)st7305_partial_count(),
+    printf("panel ssd1683 (GYE042A87), partials %u/20, full %lu, timeouts %lu%s\n",
+           (unsigned)st7305_partial_count(),
+           (unsigned long)st7305_full_count(),
+           (unsigned long)st7305_busy_timeout_count(),
            st7305_asleep() ? ", asleep" : "");
     return 0;
 }

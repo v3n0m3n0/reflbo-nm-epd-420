@@ -32,6 +32,8 @@ esp_err_t st7305_push(const uint8_t *canonical);
 /* Seeds previous-panel buffer and partial counter after deep-sleep wake so the next push can use partial refresh. */
 esp_err_t st7305_seed_previous(const uint8_t *canonical, size_t len, uint8_t partial_count);
 uint8_t st7305_partial_count(void);
+uint32_t st7305_full_count(void);
+uint32_t st7305_busy_timeout_count(void);
 /* Sets ambient temperature in °C for SSD1683 LUT selection (default 25 °C; <15 °C uses measured temp). */
 void st7305_set_ambient_c(int16_t temp_c);
 /* Undoes st7305_prepare_deep_sleep() after it failed part-way, so the panel can be used again. */

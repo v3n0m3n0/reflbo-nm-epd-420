@@ -12,7 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
-#include "shtc3_codec.h"
+#include "aht20_codec.h"
 #include "util_ticks.h"
 
 /* AHT20 on RockBase NM-EPD-420 */
@@ -94,16 +94,10 @@ static esp_err_t aht20_read(int *temp_c100, int *hum_pct100)
     ESP_RETURN_ON_ERROR(i2c_master_receive(s_aht20, raw, sizeof(raw), I2C_TIMEOUT_MS),
                         TAG, "read measurement");
 
-    if (raw[0] & 0x80) {
+    if (!aht20_parse(raw, temp_c100, hum_pct100)) {
         ESP_LOGW(TAG, "AHT20 busy during measurement read");
         return ESP_ERR_INVALID_STATE;
     }
-
-    uint32_t raw_hum = ((uint32_t)raw[1] << 12) | ((uint32_t)raw[2] << 4) | ((uint32_t)raw[3] >> 4);
-    uint32_t raw_temp = (((uint32_t)raw[3] & 0x0F) << 16) | ((uint32_t)raw[4] << 8) | (uint32_t)raw[5];
-
-    *hum_pct100 = (int)((raw_hum * 10000ULL) >> 20);
-    *temp_c100 = (int)(((raw_temp * 20000ULL) >> 20) - 5000);
 
     return ESP_OK;
 }
@@ -169,7 +163,7 @@ esp_err_t sensors_sample_env(time_t now)
     s_state.env = (sensors_env_t){
         .valid = true,
         .temp_c100 = t + s_temp_offset_c100,
-        .hum_pct100 = shtc3_offset_humidity(h, s_hum_offset_pct100),
+        .hum_pct100 = aht20_offset_humidity(h, s_hum_offset_pct100),
         .time = now,
     };
     return ESP_OK;

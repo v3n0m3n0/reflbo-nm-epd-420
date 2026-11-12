@@ -41,3 +41,5 @@ esp_err_t display_seed_previous(uint8_t partial_count);
 void display_set_ambient_c(int16_t temp_c);
 /* Re-initialises the panel with another init sequence and pushes the current frame. */
 esp_err_t display_set_variant(st7305_variant_t variant);
+uint32_t display_full_count(void);
+uint32_t display_busy_timeout_count(void);

@@ -32,6 +32,8 @@ static st7305_variant_t s_variant = ST7305_VARIANT_FACTORY;
 static bool s_asleep;
 static bool s_power_on;
 static uint32_t s_partial_count;
+static RTC_DATA_ATTR uint32_t s_full_count;
+static RTC_DATA_ATTR uint32_t s_busy_timeout_count;
 static int16_t s_ambient_c = 25;
 static const uint32_t k_max_consecutive_partials = 20;
 
@@ -48,6 +50,7 @@ static esp_err_t read_busy(const char *step, int timeout_ms)
         vTaskDelay(pdMS_TO_TICKS(10));
         waited_ms += 10;
         if (waited_ms >= max_wait_ms) {
+            s_busy_timeout_count++;
             ESP_LOGE(TAG, "read_busy timeout (%d ms) at [%s]", max_wait_ms, step);
             return ESP_ERR_TIMEOUT;
         }
@@ -327,6 +330,7 @@ esp_err_t st7305_push(const uint8_t *canonical)
 
         memcpy(s_prev_panel, s_panel, ST7305_FRAME_BYTES);
         s_partial_count = 1;
+        s_full_count++;
     } else {
         /* Differential partial refresh */
         ESP_RETURN_ON_ERROR(power_on(), TAG, "power_on");
@@ -383,6 +387,16 @@ esp_err_t st7305_seed_previous(const uint8_t *canonical, size_t len, uint8_t par
 uint8_t st7305_partial_count(void)
 {
     return (uint8_t)s_partial_count;
+}
+
+uint32_t st7305_full_count(void)
+{
+    return s_full_count;
+}
+
+uint32_t st7305_busy_timeout_count(void)
+{
+    return s_busy_timeout_count;
 }
 
 void st7305_set_ambient_c(int16_t temp_c)
