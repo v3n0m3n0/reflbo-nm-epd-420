@@ -85,7 +85,7 @@ static void rate_label(const lang_t *l, int quarter_hz, char *out, size_t size)
     if (n > 0 && num[n - 1] == l->decimal_sep) {
         num[--n] = '\0';
     }
-    snprintf(out, size, "%s Hz", num);
+    snprintf(out, size, "%.8s Hz", num);
 }
 
 static int nearest_index(const uint16_t *values, int count, int value)
@@ -154,7 +154,7 @@ static bool apply_save(ui_menu_save_t save, const ui_menu_values_t *v)
     switch (save) {
     case UI_MENU_SAVE_LORA_ENABLED:
         st->settings.lora.enabled = v->lora_enabled;
-        lora_widget_apply(&st->settings.lora);
+        app_lora_apply();
         app_ui_toast(lang_str(l, v->lora_enabled ? LS_T_LORA_ON : LS_T_LORA_OFF));
         return true;
     default:
@@ -524,10 +524,6 @@ void app_menu_open(void)
     s_deadline_ms = app_uptime_ms() + MENU_TIMEOUT_MS;
     power_hold_awake_ms(MENU_TIMEOUT_MS);
     board_buttons_set_config(k_menu_buttons);
-    esp_err_t err = st7305_set_mode(ST7305_MODE_HPM); /* new frames appear at once (spec §4.2) */
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "HPM: %s", esp_err_to_name(err));
-    }
     ESP_LOGI(TAG, "menu open");
     app_menu_render();
 }
@@ -540,10 +536,6 @@ void app_menu_close(void)
     s_open = false;
     s_closed_ms = app_uptime_ms();
     board_buttons_set_config(k_app_dashboard_buttons);
-    esp_err_t err = st7305_set_mode(ST7305_MODE_LPM);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "LPM: %s", esp_err_to_name(err));
-    }
     ESP_LOGI(TAG, "menu closed");
     app_ui_render();
 }

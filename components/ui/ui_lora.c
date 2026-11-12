@@ -92,7 +92,7 @@ static int wrap_lora_msg_lines(const gfx_font_t *font, const char *text, int16_t
 
         if (line_idx == LORA_MSG_MAX_LINES - 1) {
             if (gfx_text_width(font, text) <= max_w) {
-                snprintf(lines[line_idx], LORA_MSG_LINE_BUF_SZ, "%s", text);
+                snprintf(lines[line_idx], LORA_MSG_LINE_BUF_SZ, "%.*s", LORA_MSG_LINE_BUF_SZ - 1, text);
             } else {
                 gfx_text_ellipsize(font, text, max_w, lines[line_idx], LORA_MSG_LINE_BUF_SZ);
             }
@@ -100,7 +100,7 @@ static int wrap_lora_msg_lines(const gfx_font_t *font, const char *text, int16_t
         }
 
         if (gfx_text_width(font, text) <= max_w) {
-            snprintf(lines[line_idx], LORA_MSG_LINE_BUF_SZ, "%s", text);
+            snprintf(lines[line_idx], LORA_MSG_LINE_BUF_SZ, "%.*s", LORA_MSG_LINE_BUF_SZ - 1, text);
             return line_idx + 1;
         }
 

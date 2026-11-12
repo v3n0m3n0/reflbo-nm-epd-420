@@ -14,9 +14,8 @@
 /* What must survive deep sleep to re-attach the panel without a reset (app RTC-RAM snapshot). */
 typedef struct {
     st7305_variant_t variant;
-    st7305_mode_t mode;
-    st7305_lpm_rate_t lpm_rate;
     uint32_t last_crc; /* CRC of the frame the panel shows */
+    uint8_t partial_count;
     bool pushed;
     bool asleep; /* sleep-in: night sleep (spec §9.1) */
 } display_state_t;
@@ -36,5 +35,9 @@ esp_err_t display_wake(void);
 bool display_asleep(void);
 /* Pushes the framebuffer if it changed since the last push (CRC32), or always when force is set. */
 esp_err_t display_commit(bool force);
+/* Seeds the panel's previous-frame buffer from the current framebuffer after deep-sleep wake. */
+esp_err_t display_seed_previous(uint8_t partial_count);
+/* Sets ambient temperature in °C for e-paper LUT selection. */
+void display_set_ambient_c(int16_t temp_c);
 /* Re-initialises the panel with another init sequence and pushes the current frame. */
 esp_err_t display_set_variant(st7305_variant_t variant);

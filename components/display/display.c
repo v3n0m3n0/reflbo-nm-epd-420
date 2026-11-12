@@ -24,8 +24,7 @@ static esp_err_t alloc_fb(void)
 esp_err_t display_init_warm(const display_state_t *state)
 {
     ESP_RETURN_ON_ERROR(alloc_fb(), TAG, "framebuffer");
-    ESP_RETURN_ON_ERROR(st7305_init_warm(state->variant, state->mode, state->lpm_rate, state->asleep), TAG,
-                        "panel attach");
+    ESP_RETURN_ON_ERROR(st7305_init_warm(state->variant, state->asleep), TAG, "panel attach");
     s_last_crc = state->last_crc;
     s_pushed = state->pushed;
     return ESP_OK;
@@ -35,9 +34,8 @@ void display_export(display_state_t *out)
 {
     *out = (display_state_t){
         .variant = st7305_variant(),
-        .mode = st7305_mode(),
-        .lpm_rate = st7305_lpm_rate(),
         .last_crc = s_last_crc,
+        .partial_count = st7305_partial_count(),
         .pushed = s_pushed,
         .asleep = st7305_asleep(),
     };
@@ -54,7 +52,6 @@ esp_err_t display_wake(void)
         return ESP_OK;
     }
     ESP_RETURN_ON_ERROR(st7305_sleep_out(), TAG, "sleep out");
-    ESP_RETURN_ON_ERROR(st7305_set_mode(ST7305_MODE_LPM), TAG, "LPM");
     return display_commit(true); /* the image faded while the panel slept */
 }
 
@@ -80,7 +77,7 @@ esp_err_t display_init(st7305_variant_t variant)
     int64_t start = esp_timer_get_time();
     ESP_RETURN_ON_ERROR(display_commit(true), TAG, "first frame");
     ESP_LOGI(TAG, "first frame pushed in %lld us", (long long)(esp_timer_get_time() - start));
-    return st7305_set_mode(ST7305_MODE_LPM);
+    return ESP_OK;
 }
 
 gfx_fb_t *display_fb(void)
@@ -101,9 +98,19 @@ esp_err_t display_commit(bool force)
     return ESP_OK;
 }
 
+esp_err_t display_seed_previous(uint8_t partial_count)
+{
+    ESP_RETURN_ON_FALSE(s_fb.buf != NULL, ESP_ERR_INVALID_STATE, TAG, "not initialised");
+    return st7305_seed_previous(s_fb.buf, ST7305_FRAME_BYTES, partial_count);
+}
+
+void display_set_ambient_c(int16_t temp_c)
+{
+    st7305_set_ambient_c(temp_c);
+}
+
 esp_err_t display_set_variant(st7305_variant_t variant)
 {
     ESP_RETURN_ON_ERROR(st7305_reinit(variant), TAG, "reinit");
-    ESP_RETURN_ON_ERROR(display_commit(true), TAG, "frame");
-    return st7305_set_mode(ST7305_MODE_LPM);
+    return display_commit(true);
 }

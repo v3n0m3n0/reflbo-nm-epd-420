@@ -114,10 +114,6 @@ void app_config_enter(void)
     s_setup_asked = false;
     s_started_ms = app_uptime_ms();
     board_buttons_set_config(k_config_buttons);
-    esp_err_t err = st7305_set_mode(ST7305_MODE_HPM); /* spec §9.1: the screen answers at once */
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "HPM: %s", esp_err_to_name(err));
-    }
     bool no_password = !webui_password_set();
     netmgr_start(no_password); /* D18: only a phone on the AP may choose the password */
     app_net_refresh();
@@ -138,10 +134,6 @@ void app_config_exit(void)
     }
     app_net_refresh();
     board_buttons_set_config(k_app_dashboard_buttons);
-    esp_err_t err = st7305_set_mode(ST7305_MODE_LPM);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "LPM: %s", esp_err_to_name(err));
-    }
     ESP_LOGI(TAG, "config mode off");
     app_ui_toast(lang_str(lang_get(app_settings()->language), LS_T_WIFI_OFF));
 }

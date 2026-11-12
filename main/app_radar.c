@@ -311,10 +311,6 @@ bool app_radar_loop_start(void)
     }
     s_loop_count = (uint8_t)s_store.count;
     s_loop_at = 0;
-    esp_err_t err = st7305_set_mode(ST7305_MODE_HPM); /* each frame shows at once */
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "loop: HPM: %s", esp_err_to_name(err));
-    }
     s_loop_next_ms = app_uptime_ms() + LOOP_STEP_MS;
     ESP_LOGI(TAG, "loop: %u frames", s_loop_count);
     app_ui_render();
@@ -340,10 +336,6 @@ void app_radar_loop_stop(void)
         return;
     }
     s_loop_count = 0;
-    esp_err_t err = st7305_set_mode(ST7305_MODE_LPM);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "loop: LPM: %s", esp_err_to_name(err));
-    }
     app_ui_render();
 }
 

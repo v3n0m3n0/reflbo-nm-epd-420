@@ -29,18 +29,17 @@ static bool s_bus_ready;
 static uint8_t *s_panel;       /* DMA capable internal / SPIRAM staging buffer */
 static uint8_t *s_prev_panel;  /* Previous panel buffer for differential partial refresh */
 static st7305_variant_t s_variant = ST7305_VARIANT_FACTORY;
-static st7305_mode_t s_mode = ST7305_MODE_LPM;
-static st7305_lpm_rate_t s_lpm_rate = ST7305_LPM_1HZ;
 static bool s_asleep;
 static bool s_power_on;
 static uint32_t s_partial_count;
+static int16_t s_ambient_c = 25;
 static const uint32_t k_max_consecutive_partials = 20;
 
 static void set_cs(int level) { gpio_set_level(PIN_CS, level); }
 static void set_dc(int level) { gpio_set_level(PIN_DC, level); }
 static void set_rst(int level) { gpio_set_level(PIN_RST, level); }
 
-static void read_busy(const char *step, int timeout_ms)
+static esp_err_t read_busy(const char *step, int timeout_ms)
 {
     const int max_wait_ms = (timeout_ms > 0) ? timeout_ms : 8000;
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -50,9 +49,10 @@ static void read_busy(const char *step, int timeout_ms)
         waited_ms += 10;
         if (waited_ms >= max_wait_ms) {
             ESP_LOGE(TAG, "read_busy timeout (%d ms) at [%s]", max_wait_ms, step);
-            return;
+            return ESP_ERR_TIMEOUT;
         }
     }
+    return ESP_OK;
 }
 
 static void send_command(uint8_t cmd)
@@ -130,29 +130,32 @@ static void set_ram_area(uint16_t x, uint16_t y, uint16_t w, uint16_t h)
     send_data(y / 256);
 }
 
-static void power_on(void)
+static esp_err_t power_on(void)
 {
     if (!s_power_on) {
         send_command(0x22);
         send_data(0xE0);
         send_command(0x20);
-        read_busy("power_on", 1000);
+        ESP_RETURN_ON_ERROR(read_busy("power_on", 1000), TAG, "power_on busy");
         s_power_on = true;
     }
+    return ESP_OK;
 }
 
-static void power_off(void)
+static esp_err_t power_off(void)
 {
     if (s_power_on) {
         send_command(0x22);
         send_data(0x83);
         send_command(0x20);
-        read_busy("power_off", 1000);
+        esp_err_t err = read_busy("power_off", 1000);
         s_power_on = false;
+        return err;
     }
+    return ESP_OK;
 }
 
-static void hw_reset(void)
+static esp_err_t hw_reset(void)
 {
     set_rst(1);
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -160,11 +163,11 @@ static void hw_reset(void)
     vTaskDelay(pdMS_TO_TICKS(20));
     set_rst(1);
     vTaskDelay(pdMS_TO_TICKS(20));
-    read_busy("hw_reset", 2000);
+    ESP_RETURN_ON_ERROR(read_busy("hw_reset", 2000), TAG, "hw_reset busy");
 
     send_command(0x12); /* SW reset */
     vTaskDelay(pdMS_TO_TICKS(10));
-    read_busy("sw_reset", 2000);
+    ESP_RETURN_ON_ERROR(read_busy("sw_reset", 2000), TAG, "sw_reset busy");
 
     /* Gate output: 300 lines */
     send_command(0x01);
@@ -181,10 +184,11 @@ static void hw_reset(void)
     send_data(0x80);
 
     set_ram_area(0, 0, ST7305_WIDTH, ST7305_HEIGHT);
-    read_busy("init_done", 1000);
+    ESP_RETURN_ON_ERROR(read_busy("init_done", 1000), TAG, "init_done busy");
 
     s_asleep = false;
     s_power_on = false;
+    return ESP_OK;
 }
 
 static esp_err_t bus_init(void)
@@ -266,26 +270,21 @@ esp_err_t st7305_init(st7305_variant_t variant)
 {
     ESP_RETURN_ON_ERROR(bus_init(), TAG, "SPI bus");
     s_variant = variant;
-    hw_reset();
-    return ESP_OK;
+    return hw_reset();
 }
 
-esp_err_t st7305_init_warm(st7305_variant_t variant, st7305_mode_t mode, st7305_lpm_rate_t rate, bool asleep)
+esp_err_t st7305_init_warm(st7305_variant_t variant, bool asleep)
 {
     ESP_RETURN_ON_ERROR(bus_init(), TAG, "SPI bus");
     s_variant = variant;
-    s_mode = mode;
-    s_lpm_rate = rate;
     s_asleep = asleep;
-    hw_reset(); /* Wake SSD1683 controller from Deep Sleep Mode 1 */
-    return ESP_OK;
+    return hw_reset(); /* Wake SSD1683 controller from Deep Sleep Mode 1 */
 }
 
 esp_err_t st7305_reinit(st7305_variant_t variant)
 {
     s_variant = variant;
-    hw_reset();
-    return ESP_OK;
+    return hw_reset();
 }
 
 esp_err_t st7305_push(const uint8_t *canonical)
@@ -311,20 +310,26 @@ esp_err_t st7305_push(const uint8_t *canonical)
         send_data(0x00);
 
         send_command(0x1A);
-        send_data(0x64);
+        send_data(s_ambient_c >= 15 ? 0x64 : (uint8_t)(s_ambient_c > 0 ? s_ambient_c : 0));
 
         send_command(0x22);
         send_data(0xD7);
 
         send_command(0x20);
-        read_busy("full_refresh", 8000);
+        esp_err_t err = read_busy("full_refresh", 8000);
         s_power_on = false;
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "full_refresh timeout, resetting panel");
+            (void)hw_reset();
+            s_partial_count = 0;
+            return err;
+        }
 
         memcpy(s_prev_panel, s_panel, ST7305_FRAME_BYTES);
         s_partial_count = 1;
     } else {
         /* Differential partial refresh */
-        power_on();
+        ESP_RETURN_ON_ERROR(power_on(), TAG, "power_on");
 
         set_ram_area(0, 0, ST7305_WIDTH, ST7305_HEIGHT);
         send_command(0x26);
@@ -343,15 +348,21 @@ esp_err_t st7305_push(const uint8_t *canonical)
         send_data(0xFC);
 
         send_command(0x20);
-        read_busy("part_refresh", 5000);
+        esp_err_t err = read_busy("part_refresh", 5000);
         s_power_on = true;
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "part_refresh timeout, resetting panel");
+            (void)hw_reset();
+            s_partial_count = 0;
+            return err;
+        }
 
         /* Keep controller RAM in sync */
         set_ram_area(0, 0, ST7305_WIDTH, ST7305_HEIGHT);
         send_command(0x26);
         write_bytes(s_panel, ST7305_FRAME_BYTES);
 
-        power_off();
+        ESP_RETURN_ON_ERROR(power_off(), TAG, "power_off");
 
         memcpy(s_prev_panel, s_panel, ST7305_FRAME_BYTES);
         s_partial_count++;
@@ -360,9 +371,30 @@ esp_err_t st7305_push(const uint8_t *canonical)
     return ESP_OK;
 }
 
+esp_err_t st7305_seed_previous(const uint8_t *canonical, size_t len, uint8_t partial_count)
+{
+    ESP_RETURN_ON_FALSE(s_bus_ready && s_prev_panel != NULL, ESP_ERR_INVALID_STATE, TAG, "not initialised");
+    ESP_RETURN_ON_FALSE(canonical != NULL && len == ST7305_FRAME_BYTES, ESP_ERR_INVALID_ARG, TAG, "bad frame");
+    st7305_frame_to_panel(canonical, s_prev_panel);
+    s_partial_count = (partial_count > 0) ? partial_count : 1;
+    return ESP_OK;
+}
+
+uint8_t st7305_partial_count(void)
+{
+    return (uint8_t)s_partial_count;
+}
+
+void st7305_set_ambient_c(int16_t temp_c)
+{
+    if (temp_c < -20) temp_c = -20;
+    if (temp_c > 60) temp_c = 60;
+    s_ambient_c = temp_c;
+}
+
 esp_err_t st7305_prepare_deep_sleep(void)
 {
-    power_off();
+    ESP_RETURN_ON_ERROR(power_off(), TAG, "power_off");
     send_command(0x10);
     send_data(0x01); /* Deep sleep mode 1 */
 
@@ -375,22 +407,10 @@ void st7305_cancel_deep_sleep(void)
     s_asleep = false;
 }
 
-esp_err_t st7305_set_mode(st7305_mode_t mode)
-{
-    s_mode = mode;
-    return ESP_OK;
-}
-
-esp_err_t st7305_set_lpm_rate(st7305_lpm_rate_t rate)
-{
-    s_lpm_rate = rate;
-    return ESP_OK;
-}
-
 esp_err_t st7305_sleep_in(void)
 {
     if (s_asleep) return ESP_OK;
-    power_off();
+    ESP_RETURN_ON_ERROR(power_off(), TAG, "power_off");
     send_command(0x10);
     send_data(0x01);
     s_asleep = true;
@@ -400,7 +420,7 @@ esp_err_t st7305_sleep_in(void)
 esp_err_t st7305_sleep_out(void)
 {
     if (!s_asleep) return ESP_OK;
-    hw_reset();
+    ESP_RETURN_ON_ERROR(hw_reset(), TAG, "hw_reset");
     s_asleep = false;
     return ESP_OK;
 }
@@ -413,27 +433,4 @@ bool st7305_asleep(void)
 st7305_variant_t st7305_variant(void)
 {
     return s_variant;
-}
-
-st7305_mode_t st7305_mode(void)
-{
-    return s_mode;
-}
-
-st7305_lpm_rate_t st7305_lpm_rate(void)
-{
-    return s_lpm_rate;
-}
-
-const char *st7305_lpm_rate_name(st7305_lpm_rate_t rate)
-{
-    (void)rate;
-    return "1";
-}
-
-esp_err_t st7305_count_frames(uint32_t window_ms, uint32_t *frames)
-{
-    (void)window_ms;
-    if (frames) *frames = 0;
-    return ESP_OK;
 }

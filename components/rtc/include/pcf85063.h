@@ -7,9 +7,9 @@
 #include "esp_err.h"
 
 /*
- * PCF85063A real-time clock on the shared I²C bus (spec §7). Stores UTC. Its alarm drives the
- * minute wakes: AF latches and holds INT (GPIO15) low until pcf85063_set_alarm() or pcf85063_clear_alarm().
- * Call from the app task only.
+ * Internal ESP32-S3 RTC adapter (NM-EPD-420 has no external PCF85063 chip; time is kept in
+ * system time across deep sleep). Stores UTC. Alarm and hardware-offset functions are no-ops;
+ * drift compensation is handled in software by timekeeping. Call from the app task only.
  */
 
 /* Configures the chip: 24 h, CLKOUT off, alarm interrupt on, timer off. Keeps the time. */
