@@ -289,7 +289,7 @@ async function statusPage() {
       });
     }))),
     card('Battery and sensors', facts([
-      ['Battery', b.percent !== undefined ? `${b.percent} % · ${(b.mv / 1000).toFixed(2)} V · ${b.state}` : 'no reading yet'],
+      ['Battery', b.percent !== undefined ? `${b.percent} % · ${(b.mv / 1000).toFixed(2)} V · ${(b.state === 'unknown' && b.usb) ? 'USB' : (b.usb ? `${b.state} (USB)` : b.state)}` : (b.usb ? 'no reading yet (USB)' : 'no reading yet')],
       b.days_left !== null ? ['Lasts', `about ${b.days_left.toFixed(1)} days`] : null,
       ['Temperature', env.temp_c !== null ? `${env.temp_c.toFixed(1)} °C` : '—'],
       ['Humidity', env.hum_pct !== null ? `${env.hum_pct.toFixed(0)} %` : '—'],
