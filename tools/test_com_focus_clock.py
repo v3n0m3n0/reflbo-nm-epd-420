@@ -52,23 +52,26 @@ class ReflboTester:
         if self.ser and self.ser.is_open:
             self.ser.close()
 
-    def send_cmd(self, cmd, wait_s=1.5):
+    def send_cmd(self, cmd, wait_s=2.0):
         if not self.ser or not self.ser.is_open:
             return ""
-        self.ser.reset_input_buffer()
-        self.ser.write((cmd + "\r\n").encode("utf-8"))
+        time.sleep(0.1)
+        self.ser.read_all()
+        self.ser.write((cmd.strip() + "\r\n").encode("utf-8"))
         start_t = time.time()
-        buf = []
+        buf = ""
+        seen_cmd = False
         while time.time() - start_t < wait_s:
-            chunk = self.ser.read(self.ser.in_waiting or 1)
-            if chunk:
-                text = chunk.decode("utf-8", errors="replace")
-                buf.append(text)
-                if PROMPT in "".join(buf):
+            if self.ser.in_waiting:
+                chunk = self.ser.read(self.ser.in_waiting).decode("utf-8", errors="replace")
+                buf += chunk
+                if cmd.strip() in buf:
+                    seen_cmd = True
+                if seen_cmd and buf.rstrip().endswith(PROMPT.strip()):
                     break
             else:
                 time.sleep(0.05)
-        return "".join(buf)
+        return buf
 
     def test_version_and_presets(self):
         print("\n--- Test 1: Version & Preset List ---")
