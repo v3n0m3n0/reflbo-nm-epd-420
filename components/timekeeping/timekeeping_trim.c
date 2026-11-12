@@ -88,3 +88,36 @@ int timekeeping_trim_drift_s10_per_day(const rtc_trim_t *t)
     }
     return (int)div_round((int64_t)t->drift_ppb * 864, 1000000); /* ppb × 86 400 s × 10 / 10⁹ */
 }
+
+int64_t timekeeping_drift_us(int64_t elapsed_us, int32_t drift_ppb)
+{
+    if (elapsed_us <= 0 || drift_ppb == TRIM_NO_DRIFT || drift_ppb == 0) {
+        return 0;
+    }
+    int64_t ppb = drift_ppb;
+    if (ppb > TIMEKEEPING_SW_DRIFT_MAX_PPB) {
+        ppb = TIMEKEEPING_SW_DRIFT_MAX_PPB;
+    } else if (ppb < -TIMEKEEPING_SW_DRIFT_MAX_PPB) {
+        ppb = -TIMEKEEPING_SW_DRIFT_MAX_PPB;
+    }
+    int64_t whole = (elapsed_us / 1000000000LL) * ppb;
+    int64_t rem = div_round((elapsed_us % 1000000000LL) * ppb, 1000000000LL);
+    return whole + rem;
+}
+
+bool timekeeping_sw_drift_measure(int32_t *drift_ppb, int64_t span_ms, int64_t error_ms)
+{
+    if (drift_ppb == NULL || span_ms < (int64_t)TIMEKEEPING_SW_MIN_SPAN_S * 1000) {
+        return false;
+    }
+    const int64_t limit = INT64_MAX / 1000000000LL;
+    if (error_ms > limit || error_ms < -limit) {
+        return false;
+    }
+    int64_t ppb = div_round(error_ms * 1000000000LL, span_ms);
+    if (ppb > TIMEKEEPING_SW_DRIFT_MAX_PPB || ppb < -TIMEKEEPING_SW_DRIFT_MAX_PPB) {
+        return false;
+    }
+    *drift_ppb = (int32_t)ppb;
+    return true;
+}

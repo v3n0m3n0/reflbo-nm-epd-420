@@ -98,10 +98,21 @@ void app_sync_schedule(void)
     }
 }
 
+#define FOCUS_NTP_INTERVAL_S (12 * 3600)
+#define FOCUS_NTP_RETRY_S    3600
+
 time_t app_sync_due(void)
 {
     if (app_focus_mode_active()) {
-        return 0;
+        if (st()->ok_at == 0) {
+            return 0;
+        }
+        time_t next = (time_t)st()->ok_at + FOCUS_NTP_INTERVAL_S;
+        if (st()->history.failed_at != 0 && st()->history.failed_at >= st()->ok_at) {
+            time_t retry = (time_t)st()->history.failed_at + FOCUS_NTP_RETRY_S;
+            return retry > next ? retry : next;
+        }
+        return next;
     }
     return st()->due.at;
 }
@@ -328,15 +339,18 @@ static esp_err_t start(bool manual, sync_due_t due)
         return ESP_FAIL;
     }
     const settings_t *set = app_settings();
+    uint32_t steps = app_focus_mode_active() ? 0 : set->sync_steps;
     EXT_RAM_BSS_ATTR static sync_request_t req; /* the radar's and the solar parts are large for the stack */
-    req = (sync_request_t){ .kind = SYNC_KIND_SYNC, .steps = set->sync_steps, .lat_e4 = set->lat_e4,
+    req = (sync_request_t){ .kind = SYNC_KIND_SYNC, .steps = steps, .lat_e4 = set->lat_e4,
                             .lon_e4 = set->lon_e4, .now = timekeeping_valid() ? (uint32_t)time(NULL) : 0 };
     memcpy(req.ntp, set->ntp, sizeof(req.ntp));
-    app_radar_request(&req.radar);
-    app_solar_request(&req.solar, &req.energy);
-    req.pc = (sync_pc_req_t){ .enabled = set->pc_enabled, .port = set->pc_port }; /* M7: the PC step */
-    snprintf(req.pc.host, sizeof(req.pc.host), "%s", set->pc_host);
-    app_secret_get(SETTINGS_SECRET_PC_TOKEN, req.pc.token, sizeof(req.pc.token));
+    if (steps != 0) {
+        app_radar_request(&req.radar);
+        app_solar_request(&req.solar, &req.energy);
+        req.pc = (sync_pc_req_t){ .enabled = set->pc_enabled, .port = set->pc_port }; /* M7: the PC step */
+        snprintf(req.pc.host, sizeof(req.pc.host), "%s", set->pc_host);
+        app_secret_get(SETTINGS_SECRET_PC_TOKEN, req.pc.token, sizeof(req.pc.token));
+    }
     esp_err_t err = sync_start(&req, done);
     if (err == ESP_OK) {
         s_active = true;
@@ -555,8 +569,20 @@ void app_sync_tick(void)
     time_t now = time(NULL);
     bool critical = app_state()->critical;
     app_sync_wifi_check();
-    if (critical || app_ui_night() || app_focus_mode_active()) {
+    if (critical || app_ui_night()) {
         return; /* nothing may drain the battery, and the night runs nothing (spec §9.1) */
+    }
+    if (app_focus_mode_active()) {
+        time_t focus_due = app_sync_due();
+        if (focus_due != 0 && now >= focus_due && !s_active) {
+            sync_due_t d = { .at = focus_due,
+                             .retry = (st()->history.failed_at != 0 && st()->history.failed_at >= st()->ok_at) };
+            if (start(false, d) != ESP_OK) {
+                ESP_LOGE(TAG, "focus NTP sync didn't start");
+                sync_history_record(&st()->history, d, false, now);
+            }
+        }
+        return;
     }
     refresh_tick(now);
     sync_due_t due = st()->due;

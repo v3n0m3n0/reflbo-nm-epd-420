@@ -26,3 +26,6 @@ const rtc_trim_t *timekeeping_trim(void);
  * system clock, trims the RTC when the measurement allows and sets it to the millisecond. Takes up to
  * 2.6 s. `*moved_ms`: how far the system clock moved. */
 esp_err_t timekeeping_apply_true_time(int64_t true_utc_us, int64_t mono_us, int64_t *moved_ms);
+/* Applies software drift compensation to system time based on elapsed time since the last
+ * correction/sync (survives deep sleep in RTC RAM). No-op if |drift| < 50 ms or drift unknown. */
+esp_err_t timekeeping_drift_correct(void);

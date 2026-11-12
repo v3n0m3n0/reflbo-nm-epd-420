@@ -29,7 +29,7 @@ static int sensors_body(int argc, char **argv)
     (void)argv;
     esp_err_t err = sensors_sample_env(time(NULL));
     if (err != ESP_OK) {
-        printf("sensors: SHTC3 read failed: %s\n", esp_err_to_name(err));
+        printf("sensors: AHT20 read failed: %s\n", esp_err_to_name(err));
         return 1;
     }
     sensors_env_t env = sensors_env();
@@ -126,6 +126,19 @@ static int rtc_body(int argc, char **argv)
         printf("rtc: set, local %s\n", local);
         return 0;
     }
+    if (argc == 2 && strcmp(argv[1], "drift") == 0) {
+        const rtc_trim_t *trim = timekeeping_trim();
+        if (trim->drift_ppb == TRIM_NO_DRIFT) {
+            printf("rtc drift: unmeasured\n");
+            return 0;
+        }
+        int drift10 = timekeeping_trim_drift_s10_per_day(trim);
+        double pct = (double)trim->drift_ppb / 10000000.0;
+        printf("rtc drift: %ld ppb (%+.4f%%, %s%d.%d s/day)\n",
+               (long)trim->drift_ppb, pct,
+               drift10 < 0 ? "-" : "+", abs(drift10) / 10, abs(drift10) % 10);
+        return 0;
+    }
     return usage(k_usage);
 }
 
@@ -147,10 +160,10 @@ static int cmd_rtc(int argc, char **argv)
 esp_err_t diag_register_sensor_commands(void)
 {
     const esp_console_cmd_t cmds[] = {
-        { .command = "sensors", .help = "Read the SHTC3 now", .func = &cmd_sensors },
+        { .command = "sensors", .help = "Read the AHT20 now", .func = &cmd_sensors },
         { .command = "battery", .help = "Read the battery now and show the gauge; battery learn start|stop",
           .func = &cmd_battery },
-        { .command = "rtc", .help = "rtc get | rtc set <ISO 8601 time; Z, +HH:MM or local>", .func = &cmd_rtc },
+        { .command = "rtc", .help = "rtc get | rtc set <ISO 8601 time; Z, +HH:MM or local> | rtc drift", .func = &cmd_rtc },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         esp_err_t err = esp_console_cmd_register(&cmds[i]);

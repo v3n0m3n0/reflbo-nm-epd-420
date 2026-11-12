@@ -39,3 +39,16 @@ void timekeeping_trim_pack(const rtc_trim_t *t, uint8_t out[TRIM_RECORD_LEN]);
 bool timekeeping_trim_unpack(rtc_trim_t *t, const uint8_t *in, size_t len); /* false: wrong length or version */
 /* For display: the drift as seconds a day, tenths (−3.4 s/day → −34); 0 if none. */
 int timekeeping_trim_drift_s10_per_day(const rtc_trim_t *t);
+
+/* Software drift compensation for internal 136 kHz RC oscillator (up to ±5% = ±50,000,000 ppb). */
+#define TIMEKEEPING_SW_DRIFT_MAX_PPB 50000000
+#define TIMEKEEPING_SW_MIN_SPAN_S 600
+
+/* Signed microsecond drift over `elapsed_us` at `drift_ppb` (positive = clock ran fast).
+ * Returns 0 if `elapsed_us <= 0` or `drift_ppb == TRIM_NO_DRIFT`. Overflow-safe 64-bit math. */
+int64_t timekeeping_drift_us(int64_t elapsed_us, int32_t drift_ppb);
+
+/* Measures software drift in ppb across `span_ms` given `error_ms` (positive = clock ahead).
+ * Updates `*drift_ppb` and returns true if `span_ms >= TIMEKEEPING_SW_MIN_SPAN_S * 1000` and
+ * the measured drift is within ±TIMEKEEPING_SW_DRIFT_MAX_PPB (jump guard). */
+bool timekeeping_sw_drift_measure(int32_t *drift_ppb, int64_t span_ms, int64_t error_ms);
