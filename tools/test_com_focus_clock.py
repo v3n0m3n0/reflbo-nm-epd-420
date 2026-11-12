@@ -193,6 +193,90 @@ class ReflboTester:
         print(f"\n[*] Monitoring finished. Tick observed: {tick_observed}, Refresh observed: {refresh_observed}")
         return True
 
+    def test_t6_focus_lora_sleep(self):
+        print("\n[T6] Checking Focus mode keeps LoRa asleep...")
+        out = self.send_cmd("lora")
+        print(out.strip())
+        low = out.lower()
+        if "lora:" not in low or "err_" in low or "unrecognized" in low or "usage:" in low:
+            return False
+        presets = self.send_cmd("preset list").lower()
+        if "focus" in presets and "active" in presets:
+            return "disabled or not populated" in low or "asleep" in low
+        return True
+
+    def test_t7_rtc_no_jump_on_restart(self):
+        print("\n[T7] Checking RTC time across reboot...")
+        import re
+        from datetime import datetime, timezone
+        out1 = self.send_cmd("rtc get")
+        print(out1.strip())
+        m1 = re.search(r"rtc:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)", out1)
+        if not m1 or "INVALID" in out1 or int(m1.group(1)[:4]) < 2020:
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            print(f"[*] Setting RTC to {now_iso}...")
+            print(self.send_cmd(f"rtc set {now_iso}").strip())
+            out1 = self.send_cmd("rtc get")
+            print(out1.strip())
+            m1 = re.search(r"rtc:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)", out1)
+            if not m1:
+                return False
+        t1 = datetime.strptime(m1.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        w1 = time.time()
+        self.send_cmd("reboot")
+        self.close()
+        time.sleep(5.0)
+        for _ in range(10):
+            if self.connect():
+                resp = self.send_cmd("version").lower()
+                if "reflbo" in resp or "esp-idf" in resp:
+                    break
+                self.close()
+            time.sleep(1.0)
+        out2 = self.send_cmd("rtc get")
+        print(out2.strip())
+        m2 = re.search(r"rtc:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)", out2)
+        if not m2:
+            return False
+        dt2 = datetime.strptime(m2.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        if dt2.year < 2020:
+            return False
+        t2 = dt2.timestamp()
+        w2 = time.time()
+        return abs((t2 - t1) - (w2 - w1)) <= 5.0
+
+    def test_t8_seconds_disabled(self):
+        print("\n[T8] Checking preset list & power stats (no 1s wake loop)...")
+        presets = self.send_cmd("preset list")
+        print(presets.strip())
+        stats = self.send_cmd("power stats")
+        print(stats.strip())
+        low = (presets + "\n" + stats).lower()
+        return "1 hz" not in low and "every_second" not in low and len(stats.strip()) > 0
+
+    def test_t9_deep_sleep_partial(self):
+        print("\n[T9] Checking `panel status` partial count...")
+        out = self.send_cmd("panel status")
+        print(out.strip())
+        low = out.lower()
+        return "ssd1683" in low and "partials" in low and "usage:" not in low and "unrecognized" not in low
+
+    def test_t10_rtc_drift(self):
+        print("\n[T10] Checking `rtc drift` command...")
+        out = self.send_cmd("rtc drift")
+        print(out.strip())
+        return "rtc drift:" in out.lower()
+
+    def test_t11_display_busy_diag(self):
+        print("\n[T11] Checking `sensors` (AHT20) & `panel status`...")
+        s_out = self.send_cmd("sensors")
+        print(s_out.strip())
+        p_out = self.send_cmd("panel status")
+        print(p_out.strip())
+        s_low = s_out.lower()
+        p_low = p_out.lower()
+        return ("shtc3" not in s_low) and ("mode " not in p_low) and ("lpm rate" not in p_low)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Automated COM Port Focus Clock Verification")
@@ -200,6 +284,7 @@ def main():
     parser.add_argument("-b", "--baud", type=int, default=115200, help="Baud rate (default: 115200)")
     parser.add_argument("-t", "--monitor-sec", type=int, default=70, help="Seconds to monitor for minute tick (default: 70)")
     parser.add_argument("--skip-monitor", action="store_true", help="Skip the 70-second minute boundary monitor")
+    parser.add_argument("--extended", action="store_true", help="Run extended diagnostic tests T6-T11")
     args = parser.parse_args()
 
     tester = ReflboTester(port=args.port, baud=args.baud)
@@ -225,6 +310,20 @@ def main():
         print("==========================================")
 
         all_ok = ok_ver and ok_pwr and ok_bat and ok_mon
+        if args.extended:
+            ok_t6 = tester.test_t6_focus_lora_sleep()
+            ok_t7 = tester.test_t7_rtc_no_jump_on_restart()
+            ok_t8 = tester.test_t8_seconds_disabled()
+            ok_t9 = tester.test_t9_deep_sleep_partial()
+            ok_t10 = tester.test_t10_rtc_drift()
+            ok_t11 = tester.test_t11_display_busy_diag()
+            print(f"  T6 Focus LoRa:       {'PASS' if ok_t6 else 'FAIL'}")
+            print(f"  T7 RTC Get:          {'PASS' if ok_t7 else 'FAIL'}")
+            print(f"  T8 Power Stats:      {'PASS' if ok_t8 else 'FAIL'}")
+            print(f"  T9 Display Partial:  {'PASS' if ok_t9 else 'FAIL'}")
+            print(f"  T10 RTC Drift:       {'PASS' if ok_t10 else 'FAIL'}")
+            print(f"  T11 Sensors AHT20:   {'PASS' if ok_t11 else 'FAIL'}")
+            all_ok = all_ok and ok_t6 and ok_t7 and ok_t8 and ok_t9 and ok_t10 and ok_t11
         sys.exit(0 if all_ok else 1)
     finally:
         tester.close()
