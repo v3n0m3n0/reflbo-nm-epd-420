@@ -747,6 +747,9 @@ void netmgr_start(bool keep_ap)
 
 void netmgr_stop(void)
 {
+    if (s_cmds == NULL) {
+        return; /* routine deep-sleep wakes skip netmgr_init() */
+    }
     post(&(cmd_t){ .kind = CMD_STOP });
 }
 
@@ -762,6 +765,9 @@ esp_err_t netmgr_join(int timeout_ms)
 
 void netmgr_ap_off(void)
 {
+    if (s_cmds == NULL) {
+        return; /* routine deep-sleep wakes skip netmgr_init() */
+    }
     post(&(cmd_t){ .kind = CMD_AP_OFF });
 }
 
