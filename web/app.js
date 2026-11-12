@@ -2148,8 +2148,7 @@ function renderPresets(ed) {
                 h('p', { class: 'muted small', text: 'Sunrise and sunset are the location\'s, with minutes after (+) or ' +
                   'before (-). Evening to morning runs past midnight (sunset to sunrise, 22:00 to 06:00), as do two ' +
                   'times whose end comes first; a day when the sun puts the end before the start has no window.' })] : null,
-    field('Time format', clock), check('seconds', 'Show seconds'),
-    o.seconds ? h('p', { class: 'bad small', text: 'Seconds wake the device every second: the battery lasts far less.' }) : null,
+    field('Time format', clock),
     check('invert', 'White on black'), field('Old or missing data', stale),
     h('label', {}, 'Status bar'), check('status_clock', 'A small clock'),
     h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!o.status_sync, onchange: (ev) => {

@@ -50,7 +50,7 @@
 #define TETHER_RECHECK_MS 1000
 #define RETRY_S           300  /* after a failed boot with no PC attached */
 #define SNAP_MAGIC        0x72666c62u /* "rflb" */
-#define SNAP_VERSION      19 /* 6: the weather, the air quality and the syncs' state; 7: the rain; 8: split presets;
+#define SNAP_VERSION      20 /* 6: the weather, the air quality and the syncs' state; 7: the rain; 8: split presets;
                                    9: 24 cells (M6c); 10: the solar state and the sync's two steps (M6d);
                                    11: the Developer API's plant (D37); 12: the presets' cycle windows (D41);
                                    13: the presets' titles (D42); 14: the last good sync and the presets'
@@ -269,6 +269,15 @@ bool app_focus_mode_active(void)
     return ui_preset_is_focus(&p->presets[p->active]);
 }
 
+void app_lora_apply(void)
+{
+    if (app_focus_mode_active()) {
+        lora_widget_sleep();
+        return;
+    }
+    lora_widget_apply(&app_state()->settings.lora);
+}
+
 void app_focus_mode_sync(bool entering)
 {
     static bool s_in_focus = false;
@@ -285,7 +294,7 @@ void app_focus_mode_sync(bool entering)
     } else {
         ESP_LOGI(TAG, "Exiting Super Power Efficient mode (Focus clock)");
         if (app_state()->settings.lora.enabled) {
-            lora_widget_apply(&app_state()->settings.lora);
+            app_lora_apply();
         }
         if (app_state()->settings.sync_mode == SETTINGS_SYNC_ALWAYS) {
             app_sync_schedule();
@@ -304,6 +313,7 @@ static void on_tick(bool force, bool rtc_edge)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "RTC read: %s", esp_err_to_name(err));
     }
+    timekeeping_drift_correct();
     time_t now = time(NULL);
     if (now >= s_next_alarm) {
         s_next_alarm = 0; /* fired: program the next one, even if it is the same minute again */
@@ -706,20 +716,27 @@ static esp_err_t boot(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "RTC read: %s", esp_err_to_name(err));
     }
+    timekeeping_drift_correct();
     ESP_RETURN_ON_ERROR(sensors_init(board_i2c(), !warm), TAG, "sensors");
     if (!warm) {
         app_ui_restore_learning(); /* D21: a restart keeps a discharge being learned */
     }
     if (warm) {
         sensors_import(&s_snap.sensors);
+        sensors_env_t env = sensors_env();
+        if (env.time != 0) {
+            display_set_ambient_c((int16_t)(env.temp_c100 / 100));
+        }
         ESP_RETURN_ON_ERROR(display_init_warm(&s_snap.display), TAG, "display");
+        if (s_snap.display.pushed && s_snap.display.partial_count > 0 &&
+            s_snap.display.partial_count < 20) {
+            app_ui_seed_previous(s_snap.display.partial_count);
+        }
     } else if (wake != POWER_WAKE_COLD) {
         /* Woke from deep sleep without a valid snapshot: the panel still runs, don't reset it. It
          * may have been asleep for the night, so wake it anyway (SLPOUT is harmless otherwise). */
-        display_state_t fallback = { .variant = PANEL_VARIANT, .mode = ST7305_MODE_LPM, .lpm_rate = ST7305_LPM_1HZ,
-                                     .asleep = true };
+        display_state_t fallback = { .variant = PANEL_VARIANT, .asleep = true };
         ESP_RETURN_ON_ERROR(display_init_warm(&fallback), TAG, "display");
-        st7305_set_lpm_rate(ST7305_LPM_1HZ); /* assumed, so send it; safe without a reset */
         err = display_wake();
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "panel wake: %s", esp_err_to_name(err));

@@ -861,7 +861,7 @@ void app_web_api(const char *method, const char *path, const char *query, const 
             uint8_t resp[COMPANION_MAX_FRAME_SIZE];
             size_t resp_len = lora_widget_handle_companion_cmd(cmd_buf, cmd_len, &s->settings.lora, &changed, resp, sizeof(resp));
             if (changed) {
-                lora_widget_apply(&s->settings.lora);
+                app_lora_apply();
                 app_ui_save_settings();
             }
             cJSON *res = cJSON_CreateObject();
@@ -936,7 +936,7 @@ void app_web_api(const char *method, const char *path, const char *query, const 
             lora_widget_exec_cli(cmd->valuestring, &s->settings.lora, &changed, reply_buf, sizeof(reply_buf));
             cJSON_Delete(in);
             if (changed) {
-                lora_widget_apply(&s->settings.lora);
+                app_lora_apply();
                 app_ui_save_settings();
             }
             cJSON *res = cJSON_CreateObject();

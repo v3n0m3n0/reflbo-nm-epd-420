@@ -633,7 +633,7 @@ static int lora_body(int argc, char **argv)
         bool enable = strcmp(argv[1], "on") == 0;
         app_ui_state_t *st = app_state();
         st->settings.lora.enabled = enable;
-        lora_widget_apply(&st->settings.lora);
+        app_lora_apply();
         app_ui_save_settings();
         printf("lora: radio turned %s\n", enable ? "on" : "off");
         return 0;
@@ -697,7 +697,7 @@ static int lora_body(int argc, char **argv)
         char reply[512] = { 0 };
         lora_widget_exec_cli(cmd_buf, &st->settings.lora, &changed, reply, sizeof(reply));
         if (changed) {
-            lora_widget_apply(&st->settings.lora);
+            app_lora_apply();
             app_ui_save_settings();
         }
         printf("%s", reply);

@@ -380,7 +380,7 @@ static void test_defaults_survive_a_json_round_trip(void)
     s_p.cycle_enabled = true;
     s_p.cycle_interval_s = 120;
     s_p.presets[3].clock = UI_CLOCK_12H;
-    s_p.presets[3].seconds = true;
+    s_p.presets[3].seconds = false;
     s_p.presets[3].stale_policy = UI_STALE_HIDE;
     s_p.presets[3].status_battery = UI_STATUS_BAT_VOLTAGE | UI_STATUS_BAT_DAYS;
     s_p.presets[3].status_clock = true;
@@ -1023,6 +1023,16 @@ static void test_defaults_have_no_titles(void)
     }
 }
 
+static void test_seconds_are_disabled_on_epaper(void)
+{
+    const char *json = "{\"schema\":1,\"presets\":[{\"id\":\"a\",\"layout\":\"classic\",\"options\":{\"seconds\":true}}]}";
+    TEST_ASSERT_TRUE_MESSAGE(ui_presets_from_json(json, &s_p, s_err, sizeof(s_err)), s_err);
+    TEST_ASSERT_FALSE(s_p.presets[0].seconds);
+    s_p.presets[0].seconds = true;
+    TEST_ASSERT_TRUE(ui_presets_to_json(&s_p, s_json, sizeof(s_json)) > 0);
+    TEST_ASSERT_NOT_NULL(strstr(s_json, "\"seconds\":false"));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1087,5 +1097,6 @@ int main(void)
     RUN_TEST(test_set_title_refuses_what_overflows_the_pool);
     RUN_TEST(test_offer_builtins_keeps_titles);
     RUN_TEST(test_defaults_have_no_titles);
+    RUN_TEST(test_seconds_are_disabled_on_epaper);
     return UNITY_END();
 }

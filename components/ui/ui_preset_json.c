@@ -465,7 +465,8 @@ static bool parse_preset(const cJSON *item, ui_presets_t *all, int index, char *
     const cJSON *options = cJSON_GetObjectItemCaseSensitive(item, "options");
     const cJSON *h24 = cJSON_GetObjectItemCaseSensitive(options, "clock_24h");
     out->clock = cJSON_IsBool(h24) ? (cJSON_IsTrue(h24) ? UI_CLOCK_24H : UI_CLOCK_12H) : UI_CLOCK_DEFAULT;
-    out->seconds = optional_bool(options, "seconds", false);
+    (void)optional_bool(options, "seconds", false);
+    out->seconds = false; /* SSD1683 e-paper: seconds disabled */
     out->invert = optional_bool(options, "invert", false);
     out->stale_policy = UI_STALE_STALE;
     const cJSON *policy = cJSON_GetObjectItemCaseSensitive(options, "stale_policy");
@@ -708,7 +709,7 @@ static cJSON *preset_json(const ui_presets_t *all, int index)
     if (p->clock != UI_CLOCK_DEFAULT) {
         cJSON_AddBoolToObject(options, "clock_24h", p->clock == UI_CLOCK_24H);
     }
-    cJSON_AddBoolToObject(options, "seconds", p->seconds);
+    cJSON_AddBoolToObject(options, "seconds", false);
     cJSON_AddBoolToObject(options, "invert", p->invert);
     cJSON_AddStringToObject(options, "stale_policy", k_policies[p->stale_policy < 3 ? p->stale_policy : 0]);
     cJSON_AddBoolToObject(options, "status_clock", p->status_clock);

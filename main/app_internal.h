@@ -87,9 +87,11 @@ void app_seal_snapshot(void);
 
 /* Applies the settings that live outside the app: time zone, sensor offsets, freshness, panel rate. */
 void app_ui_apply_settings(void);
+void app_lora_apply(void);
 /* Draws what the screen shows now (the menu, the critical screen or the dashboard, and a toast
  * over it) and pushes it. */
 void app_ui_render(void);
+void app_ui_seed_previous(uint8_t partial_count);
 /* The context a render uses right now (also for the `field` command). */
 void app_ui_context(ui_context_t *ctx);
 void app_ui_sample(time_t now); /* SHTC3 and battery into the datastore */

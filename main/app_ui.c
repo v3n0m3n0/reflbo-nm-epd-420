@@ -23,6 +23,7 @@
 #include "webui.h"
 
 #define TOAST_MS 3000
+#define DISPLAY_SUPPORTS_SECONDS 0 /* SSD1683 e-paper: no 1 Hz refresh */
 
 static const char *TAG = "app_ui";
 
@@ -207,23 +208,12 @@ void app_ui_apply_settings(void)
     for (int f = 0; f < DS_FIELD_COUNT; f++) {
         ds_set_ttl(&s.ds, (ds_field_t)f, ttl);
     }
-    int quarter_hz = s.settings.lpm_quarter_hz, rate = 0;
-    while (quarter_hz > 1 && rate < ST7305_LPM_8HZ) {
-        quarter_hz /= 2;
-        rate++;
-    }
-    if (display_fb() != NULL && st7305_lpm_rate() != (st7305_lpm_rate_t)rate) {
-        esp_err_t err = st7305_set_lpm_rate((st7305_lpm_rate_t)rate);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "panel rate: %s", esp_err_to_name(err));
-        }
-    }
     lora_widget_set_location(s.settings.lat_e4, s.settings.lon_e4);
     sensors_battery_t bat = sensors_battery(time(NULL));
     if (bat.smoothed_mv > 0) {
         lora_widget_set_battery((uint16_t)bat.smoothed_mv, (uint8_t)(bat.level >= 0 ? bat.level : 0));
     }
-    lora_widget_apply(&s.settings.lora);
+    app_lora_apply();
     if (!s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
         app_ui_select(ui_presets_next_with_lora(&s_presets, s.settings.sync_mode == SETTINGS_SYNC_ALWAYS, false), false);
     }
@@ -403,6 +393,22 @@ void app_ui_render(void)
     }
 }
 
+void app_ui_seed_previous(uint8_t partial_count)
+{
+    gfx_fb_t *fb = display_fb();
+    if (fb == NULL || s.done_slot == 0 || s.critical || s.first_run) {
+        return;
+    }
+    ui_context_t ctx;
+    app_ui_context(&ctx);
+    ctx.now = s.done_slot;
+    localtime_r(&ctx.now, &ctx.local);
+    ui_titles_t titles;
+    ui_presets_titles(&s_presets, s_presets.active, &titles);
+    ui_draw_dashboard(fb, &ctx, &s_presets.presets[s_presets.active], &titles);
+    display_seed_previous(partial_count);
+}
+
 void app_ui_toast(const char *text)
 {
     snprintf(s_toast, sizeof(s_toast), "%s", text);
@@ -561,8 +567,9 @@ void app_ui_sample(time_t now)
     if (err == ESP_OK) {
         sensors_env_t env = sensors_env();
         ds_set_env(&s.ds, env.temp_c100, env.hum_pct100, env.time, local_day(&local));
+        display_set_ambient_c((int16_t)(env.temp_c100 / 100));
     } else {
-        ESP_LOGW(TAG, "SHTC3: %s; keeping the last reading", esp_err_to_name(err));
+        ESP_LOGW(TAG, "AHT20: %s; keeping the last reading", esp_err_to_name(err));
     }
     /* Config mode too (D20): the radio's load pulls VBAT down, which errs on the safe side, as a
      * battery that sags under it would brown out anyway. */
@@ -781,7 +788,7 @@ void app_ui_tick(bool force)
     bool focus = app_focus_mode_active();
     time_t slot = now - now % 60;
     bool new_slot = slot != s.done_slot;
-    bool render = force || (!focus && s_presets.presets[s_presets.active].seconds);
+    bool render = force || (DISPLAY_SUPPORTS_SECONDS && !focus && s_presets.presets[s_presets.active].seconds);
     int sensors_every = focus ? 15 : s.settings.sensors_every_min;
     int display_every = focus ? 1 : s.settings.display_every_min;
     if (force || s.done_slot == 0 || !sensors_battery(now).valid || (new_slot && scheduler_is_slot(slot, sensors_every))) {
@@ -792,9 +799,9 @@ void app_ui_tick(bool force)
         render = true;
     }
     s.done_slot = slot;
+    app_sync_tick();
     if (!focus) {
         run_schedule(now);
-        app_sync_tick();
         if (s_presets.cycle_enabled && (s.cycle_at == 0 || s.cycle_at - now > s_presets.cycle_interval_s)) {
             s.cycle_at = now + s_presets.cycle_interval_s; /* the first tick, or the clock moved back */
         }
@@ -841,9 +848,9 @@ sched_wake_t app_ui_next_wake(time_t now)
         .display_every_min = focus ? 1 : s.settings.display_every_min,
         .sensors_every_min = focus ? 15 : s.settings.sensors_every_min,
         .cycle_at = (s_presets.cycle_enabled && !focus) ? s.cycle_at : 0,
-        .every_second = focus ? false : s_presets.presets[s_presets.active].seconds,
+        .every_second = DISPLAY_SUPPORTS_SECONDS && !focus && s_presets.presets[s_presets.active].seconds,
         .schedule_at = (schedule_runs() && !focus) ? ui_schedule_next(&s_presets.schedule, now, &index) : 0,
-        .sync_at = (s.critical || s.night_until != 0 || focus) ? 0 : app_sync_due(),
+        .sync_at = (s.critical || s.night_until != 0) ? 0 : app_sync_due(),
     };
     return scheduler_next_wake(&in);
 }
