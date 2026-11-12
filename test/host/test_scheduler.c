@@ -186,9 +186,36 @@ static void test_a_sync_between_display_slots_wakes_the_board(void)
     TEST_ASSERT_EQUAL_UINT(SCHED_DISPLAY | SCHED_SENSORS, scheduler_next_wake(&in).reasons); /* 05:30 */
 }
 
+static void test_focus_mode_scheduler_behavior(void)
+{
+    /* Focus clock super power efficient mode:
+     * display = 1 min, sensors = 15 min, cycle = 0, sync = 0, every_second = false */
+    time_t now = utc(2026, 9, 25, 8, 2, 10); /* 10:02:10 CEST */
+    sched_input_t in = {
+        .now = now,
+        .display_every_min = 1,
+        .sensors_every_min = 15,
+        .cycle_at = 0,
+        .every_second = false,
+        .schedule_at = 0,
+        .sync_at = 0,
+    };
+    sched_wake_t w = scheduler_next_wake(&in);
+    /* Next wake at 10:03:00 (display only) */
+    TEST_ASSERT_EQUAL_INT64(utc(2026, 9, 25, 8, 3, 0), w.when);
+    TEST_ASSERT_EQUAL_UINT(SCHED_DISPLAY, w.reasons);
+
+    /* At 10:14:30 CEST: next wake at 10:15:00 should wake for both display and sensors */
+    in.now = utc(2026, 9, 25, 8, 14, 30);
+    w = scheduler_next_wake(&in);
+    TEST_ASSERT_EQUAL_INT64(utc(2026, 9, 25, 8, 15, 0), w.when);
+    TEST_ASSERT_EQUAL_UINT(SCHED_DISPLAY | SCHED_SENSORS, w.reasons);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_focus_mode_scheduler_behavior);
     RUN_TEST(test_a_sync_between_display_slots_wakes_the_board);
     RUN_TEST(test_next_minute_for_every_minute_updates);
     RUN_TEST(test_a_wake_exactly_on_a_minute_moves_to_the_next_one);

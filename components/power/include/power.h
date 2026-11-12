@@ -79,3 +79,7 @@ void power_start_test(power_idle_t mode, int cycles);
 int power_test_cycles_left(void);
 power_stats_t power_stats(void);
 void power_reset_stats(void);
+
+/* CPU frequency scaling (spec §3.4, Super Power Efficient Mode). */
+esp_err_t power_set_cpu_freq_mhz(int mhz);
+esp_err_t power_set_cpu_freq_low(bool low);

@@ -35,6 +35,7 @@
 #include "sdkconfig.h"
 #include "sensors.h"
 #include "lora_widget.h"
+#include "netmgr.h"
 #include "storage.h"
 #include "timekeeping.h"
 #include "ui_screens.h"
@@ -255,6 +256,43 @@ static time_t sleep_until(void)
 int64_t app_uptime_ms(void)
 {
     return esp_timer_get_time() / 1000;
+}
+
+bool app_focus_mode_active(void)
+{
+    ui_presets_t *p = app_presets();
+    if (p == NULL || p->active >= p->count) {
+        return false;
+    }
+    return ui_preset_is_focus(&p->presets[p->active]);
+}
+
+void app_focus_mode_sync(bool entering)
+{
+    static bool s_in_focus = false;
+    if (entering == s_in_focus) {
+        return;
+    }
+    s_in_focus = entering;
+    if (entering) {
+        ESP_LOGI(TAG, "Entering Super Power Efficient mode (Focus clock)");
+        lora_widget_sleep();
+        netmgr_stop();
+        power_set_cpu_freq_low(true);
+        app_state()->cycle_at = 0;
+    } else {
+        ESP_LOGI(TAG, "Exiting Super Power Efficient mode (Focus clock)");
+        power_set_cpu_freq_low(false);
+        if (app_state()->settings.lora.enabled) {
+            lora_widget_apply(&app_state()->settings.lora);
+        }
+        if (app_state()->settings.sync_mode == SETTINGS_SYNC_ALWAYS) {
+            app_sync_schedule();
+        }
+        if (app_presets()->cycle_enabled) {
+            app_state()->cycle_at = time(NULL) + app_presets()->cycle_interval_s;
+        }
+    }
 }
 
 /* A scheduled wake: the RTC alarm, its backup, a cycle switch or a seconds tick. `force` also
@@ -718,6 +756,9 @@ static esp_err_t boot(void)
     if (s_ota_pending) { /* spec §10.5: awake, without deep sleep, until it has proved itself */
         ESP_LOGW(TAG, "new firmware: valid after %d s without a panic", OTA_VERIFY_MS / 1000);
     }
+    if (app_focus_mode_active()) {
+        app_focus_mode_sync(true);
+    }
     ESP_LOGI(TAG, "reflbo ready (%s wake%s)", power_wake_name(wake), warm ? ", warm" : "");
     return ESP_OK;
 }
@@ -750,11 +791,12 @@ static void app_task(void *arg)
     for (;;) {
         /* Config mode and a new image waiting to prove itself keep the chip awake: sleep would
          * drop Wi-Fi, and a deep-sleep wake would roll the image back (spec §10.5). */
+        bool focus = app_focus_mode_active();
+        bool lora_wake_lock = !focus && (app_state() && app_state()->settings.lora.enabled);
+        bool sync_wifi_lock = !focus && (app_sync_active() || app_sync_holds_wifi() || app_sync_wifi_pending());
         bool pending = uxQueueMessagesWaiting(s_queue) > 0 || board_buttons_busy() || app_config_active() ||
                        app_radar_loop_deadline_ms() != 0 ||
-                       s_ota_pending || app_sync_active() || app_sync_holds_wifi() || /* neither sleep keeps Wi-Fi */
-                       app_sync_wifi_pending() ||
-                       (app_state() && app_state()->settings.lora.enabled);
+                       s_ota_pending || sync_wifi_lock || lora_wake_lock;
         if (err == ESP_OK) {
             check_clock_jump();
             check_ota();

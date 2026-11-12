@@ -100,6 +100,9 @@ void app_sync_schedule(void)
 
 time_t app_sync_due(void)
 {
+    if (app_focus_mode_active()) {
+        return 0;
+    }
     return st()->due.at;
 }
 
@@ -144,7 +147,7 @@ static bool wifi_off(void)
  * sleeps whatever else runs. */
 static bool always_wanted(time_t now)
 {
-    if (app_ui_night()) {
+    if (app_focus_mode_active() || app_ui_night()) {
         return false;
     }
     if (app_pc_keeps_wifi()) {
@@ -160,7 +163,7 @@ static bool always_wanted(time_t now)
 
 bool app_sync_holds_wifi(void)
 {
-    if (!app_net_ready() || !always_wanted(time(NULL)) || app_state()->critical) {
+    if (app_focus_mode_active() || !app_net_ready() || !always_wanted(time(NULL)) || app_state()->critical) {
         return false;
     }
     netmgr_status_t ns;
@@ -552,7 +555,7 @@ void app_sync_tick(void)
     time_t now = time(NULL);
     bool critical = app_state()->critical;
     app_sync_wifi_check();
-    if (critical || app_ui_night()) {
+    if (critical || app_ui_night() || app_focus_mode_active()) {
         return; /* nothing may drain the battery, and the night runs nothing (spec §9.1) */
     }
     refresh_tick(now);

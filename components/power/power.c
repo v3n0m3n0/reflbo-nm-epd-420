@@ -19,6 +19,7 @@
 #include "lora_widget.h"
 #include "nvs.h"
 #include "sdkconfig.h"
+#include "soc/rtc.h"
 #include "util_snapshot.h"
 
 #define STATE_MAGIC   0x72666c70u /* "rflp" */
@@ -440,4 +441,21 @@ void power_reset_stats(void)
     s_rtc.stats = (power_stats_t){ 0 };
     s_awake_since_us = -1;
     seal();
+}
+
+esp_err_t power_set_cpu_freq_mhz(int mhz)
+{
+    rtc_cpu_freq_config_t conf;
+    if (!rtc_clk_cpu_freq_mhz_to_config((uint32_t)mhz, &conf)) {
+        ESP_LOGE(TAG, "failed to get config for %d MHz", mhz);
+        return ESP_ERR_INVALID_ARG;
+    }
+    rtc_clk_cpu_freq_set_config_fast(&conf);
+    ESP_LOGI(TAG, "CPU freq set to %d MHz", mhz);
+    return ESP_OK;
+}
+
+esp_err_t power_set_cpu_freq_low(bool low)
+{
+    return power_set_cpu_freq_mhz(low ? 80 : 160);
 }

@@ -91,6 +91,14 @@ int ui_preset_slots(const ui_preset_t *p)
     return layout != NULL ? layout->slot_count : 0;
 }
 
+bool ui_preset_is_focus(const ui_preset_t *preset)
+{
+    if (preset == NULL) {
+        return false;
+    }
+    return preset->layout == UI_LAYOUT_FOCUS || (preset->id[0] != '\0' && strcmp(preset->id, "focus") == 0);
+}
+
 int ui_presets_find(const ui_presets_t *p, const char *id)
 {
     for (int i = 0; id != NULL && i < p->count; i++) {

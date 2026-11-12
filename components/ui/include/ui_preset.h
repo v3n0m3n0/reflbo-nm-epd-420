@@ -150,6 +150,9 @@ typedef struct {
  * (0 for a tree cut short). */
 int ui_preset_slots(const ui_preset_t *p);
 
+/* Whether `preset` is the Focus clock preset (spec §5.4, Focus clock power optimization). */
+bool ui_preset_is_focus(const ui_preset_t *preset);
+
 /* The built-in presets (spec §5.4): used when presets.json is missing or invalid. */
 void ui_presets_defaults(ui_presets_t *p);
 int ui_presets_find(const ui_presets_t *p, const char *id); /* index, or -1 */

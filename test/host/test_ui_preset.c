@@ -58,6 +58,32 @@ static void test_defaults_are_the_ten_built_ins(void)
     TEST_ASSERT_EQUAL_INT(-1, ui_presets_find(&s_p, "nope"));
 }
 
+static void test_ui_preset_is_focus_identification(void)
+{
+    TEST_ASSERT_FALSE(ui_preset_is_focus(NULL));
+
+    /* Check defaults: preset 0 is home, 1 is indoor, 2 is weather, 3 is focus */
+    TEST_ASSERT_FALSE(ui_preset_is_focus(&s_p.presets[0]));
+    TEST_ASSERT_FALSE(ui_preset_is_focus(&s_p.presets[1]));
+    TEST_ASSERT_FALSE(ui_preset_is_focus(&s_p.presets[2]));
+    TEST_ASSERT_TRUE(ui_preset_is_focus(&s_p.presets[3]));
+
+    /* Custom preset with UI_LAYOUT_FOCUS and different ID */
+    ui_preset_t custom = { .layout = UI_LAYOUT_FOCUS };
+    snprintf(custom.id, sizeof(custom.id), "custom_clk");
+    TEST_ASSERT_TRUE(ui_preset_is_focus(&custom));
+
+    /* Custom preset with ID "focus" and different layout */
+    ui_preset_t id_only = { .layout = UI_LAYOUT_CLASSIC };
+    snprintf(id_only.id, sizeof(id_only.id), "focus");
+    TEST_ASSERT_TRUE(ui_preset_is_focus(&id_only));
+
+    /* Custom preset without either */
+    ui_preset_t other = { .layout = UI_LAYOUT_GRID };
+    snprintf(other.id, sizeof(other.id), "work");
+    TEST_ASSERT_FALSE(ui_preset_is_focus(&other));
+}
+
 static void test_the_cycle_visits_lora_only_when_lora_is_on(void)
 {
     s_p.active = 5; /* flights */
@@ -1001,6 +1027,7 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_defaults_are_the_ten_built_ins);
+    RUN_TEST(test_ui_preset_is_focus_identification);
     RUN_TEST(test_next_follows_cycle_order_and_skips_presets_out_of_it);
     RUN_TEST(test_the_cycle_visits_flights_only_in_sync_mode_always);
     RUN_TEST(test_the_cycle_visits_lora_only_when_lora_is_on);

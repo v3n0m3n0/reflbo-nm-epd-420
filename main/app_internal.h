@@ -331,5 +331,9 @@ int64_t app_uptime_ms(void); /* milliseconds since boot, unmoved by clock change
 /* Logs, NVS and the console, as a board that stays awake has them (spec §3.3): a sync needs NVS. */
 void app_alive(void);
 
+/* Focus clock power-saving mode (Super Power Efficient Mode). */
+bool app_focus_mode_active(void);
+void app_focus_mode_sync(bool entering);
+
 /* The `field`, `preset` and `night` console commands (main/app_cmds.c); call after diag_start(). */
 void app_register_commands(void);

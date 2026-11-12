@@ -678,8 +678,13 @@ void app_ui_select(int index, bool persist)
     if (index < 0 || index >= s_presets.count) {
         return;
     }
+    bool was_focus = app_focus_mode_active();
     s_presets.active = (uint8_t)index;
-    if (s_presets.cycle_enabled) {
+    bool is_focus = app_focus_mode_active();
+    if (was_focus != is_focus) {
+        app_focus_mode_sync(is_focus);
+    }
+    if (s_presets.cycle_enabled && !is_focus) {
         s.cycle_at = time(NULL) + s_presets.cycle_interval_s; /* a switch restarts the interval */
     }
     ESP_LOGI(TAG, "preset %s", s_presets.presets[index].id);
@@ -773,47 +778,52 @@ void app_ui_tick(bool force)
     if (s.night_until != 0 && now < s.night_until && display_asleep()) {
         return; /* night sleep: nothing is sampled or drawn (spec §9.1) */
     }
+    bool focus = app_focus_mode_active();
     time_t slot = now - now % 60;
     bool new_slot = slot != s.done_slot;
-    bool render = force || s_presets.presets[s_presets.active].seconds;
-    if (force || (new_slot && scheduler_is_slot(slot, s.settings.sensors_every_min))) {
+    bool render = force || (!focus && s_presets.presets[s_presets.active].seconds);
+    int sensors_every = focus ? 15 : s.settings.sensors_every_min;
+    int display_every = focus ? 1 : s.settings.display_every_min;
+    if (force || (new_slot && scheduler_is_slot(slot, sensors_every))) {
         app_ui_sample(now);
         render = true;
     }
-    if (new_slot && scheduler_is_slot(slot, s.settings.display_every_min)) {
+    if (new_slot && scheduler_is_slot(slot, display_every)) {
         render = true;
     }
     s.done_slot = slot;
-    run_schedule(now);
-    app_sync_tick();
-    if (s_presets.cycle_enabled && (s.cycle_at == 0 || s.cycle_at - now > s_presets.cycle_interval_s)) {
-        s.cycle_at = now + s_presets.cycle_interval_s; /* the first tick, or the clock moved back */
-    }
-    if (s_presets.cycle_enabled && now >= s.cycle_at && app_pc_pauses_cycle()) {
-        s.cycle_at = now + s_presets.cycle_interval_s; /* spec §12a.4: it waits while the session's preset shows */
-    }
-    if (s_presets.cycle_enabled && now >= s.cycle_at) {
-        time_t at = timekeeping_valid() ? now : 0; /* without a valid clock every window is open (spec §5.4) */
-        app_ui_select(ui_presets_cycle_next_with_lora(&s_presets, s.settings.sync_mode == SETTINGS_SYNC_ALWAYS,
-                                                      s.settings.lora.enabled, at,
-                                                      s.settings.lat_e4, s.settings.lon_e4),
-                      false); /* renders; not saved, the cycle will move on */
-        app_seal_snapshot();
-        return;
-    }
-    if (s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
-        lora_stats_t st = lora_widget_get_stats();
-        if (st.msg_seq != s_last_lora_msg_seq ||
-            st.msg_count != s_last_lora_msg_count ||
-            st.advert_seq != s_last_lora_adv_seq ||
-            st.ble_connected != s_last_lora_ble) {
-            s_last_lora_msg_seq = st.msg_seq;
-            s_last_lora_msg_count = st.msg_count;
-            s_last_lora_adv_seq = st.advert_seq;
-            s_last_lora_ble = st.ble_connected;
-            s_last_lora_pkt_count = st.packet_count;
-            s_last_lora_sent_count = st.packets_sent;
-            render = true;
+    if (!focus) {
+        run_schedule(now);
+        app_sync_tick();
+        if (s_presets.cycle_enabled && (s.cycle_at == 0 || s.cycle_at - now > s_presets.cycle_interval_s)) {
+            s.cycle_at = now + s_presets.cycle_interval_s; /* the first tick, or the clock moved back */
+        }
+        if (s_presets.cycle_enabled && now >= s.cycle_at && app_pc_pauses_cycle()) {
+            s.cycle_at = now + s_presets.cycle_interval_s; /* spec §12a.4: it waits while the session's preset shows */
+        }
+        if (s_presets.cycle_enabled && now >= s.cycle_at) {
+            time_t at = timekeeping_valid() ? now : 0; /* without a valid clock every window is open (spec §5.4) */
+            app_ui_select(ui_presets_cycle_next_with_lora(&s_presets, s.settings.sync_mode == SETTINGS_SYNC_ALWAYS,
+                                                          s.settings.lora.enabled, at,
+                                                          s.settings.lat_e4, s.settings.lon_e4),
+                          false); /* renders; not saved, the cycle will move on */
+            app_seal_snapshot();
+            return;
+        }
+        if (s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
+            lora_stats_t st = lora_widget_get_stats();
+            if (st.msg_seq != s_last_lora_msg_seq ||
+                st.msg_count != s_last_lora_msg_count ||
+                st.advert_seq != s_last_lora_adv_seq ||
+                st.ble_connected != s_last_lora_ble) {
+                s_last_lora_msg_seq = st.msg_seq;
+                s_last_lora_msg_count = st.msg_count;
+                s_last_lora_adv_seq = st.advert_seq;
+                s_last_lora_ble = st.ble_connected;
+                s_last_lora_pkt_count = st.packet_count;
+                s_last_lora_sent_count = st.packets_sent;
+                render = true;
+            }
         }
     }
     if (render) {
@@ -825,14 +835,15 @@ void app_ui_tick(bool force)
 sched_wake_t app_ui_next_wake(time_t now)
 {
     int index = -1;
+    bool focus = app_focus_mode_active();
     sched_input_t in = {
         .now = now,
-        .display_every_min = s.settings.display_every_min,
-        .sensors_every_min = s.settings.sensors_every_min,
-        .cycle_at = s_presets.cycle_enabled ? s.cycle_at : 0,
-        .every_second = s_presets.presets[s_presets.active].seconds,
-        .schedule_at = schedule_runs() ? ui_schedule_next(&s_presets.schedule, now, &index) : 0,
-        .sync_at = s.critical || s.night_until != 0 ? 0 : app_sync_due(),
+        .display_every_min = focus ? 1 : s.settings.display_every_min,
+        .sensors_every_min = focus ? 15 : s.settings.sensors_every_min,
+        .cycle_at = (s_presets.cycle_enabled && !focus) ? s.cycle_at : 0,
+        .every_second = focus ? false : s_presets.presets[s_presets.active].seconds,
+        .schedule_at = (schedule_runs() && !focus) ? ui_schedule_next(&s_presets.schedule, now, &index) : 0,
+        .sync_at = (s.critical || s.night_until != 0 || focus) ? 0 : app_sync_due(),
     };
     return scheduler_next_wake(&in);
 }
@@ -905,9 +916,14 @@ esp_err_t app_ui_patch_settings(const char *patch, char *err, size_t err_size)
 
 esp_err_t app_ui_replace_presets(const ui_presets_t *presets)
 {
+    bool was_focus = app_focus_mode_active();
     uint8_t offered = s_presets.offered;
     s_presets = *presets;
     s_presets.offered |= offered; /* a page or backup without the marker: what was offered stays offered */
+    bool is_focus = app_focus_mode_active();
+    if (was_focus != is_focus) {
+        app_focus_mode_sync(is_focus);
+    }
     s.cycle_at = 0;              /* the next tick starts the cycle interval */
     s.sched_checked = time(NULL); /* entries don't run late for a new schedule */
     esp_err_t err = app_ui_save_presets();
