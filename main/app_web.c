@@ -15,6 +15,7 @@
 #include "lora_widget.h"
 #include "meshcore_companion.h"
 #include "netmgr.h"
+#include "power.h"
 #include "sensors.h"
 #include "storage_backup.h"
 #include "timekeeping.h"
@@ -137,6 +138,7 @@ static void get_status(uint8_t *out, size_t size, webui_reply_t *reply)
     }
     add_value(bat, "days_left", DS_BAT_DAYS, 10.0);
     cJSON_AddBoolToObject(bat, "critical", st->critical);
+    cJSON_AddBoolToObject(bat, "usb", power_tethered());
     const battery_learn_t *l = sensors_learn(); /* D21 */
     cJSON *learn = cJSON_AddObjectToObject(bat, "learn");
     cJSON_AddStringToObject(learn, "state", battery_learn_state_name(battery_learn_state(l)));

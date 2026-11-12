@@ -257,6 +257,7 @@ static void build_model(void)
     m->choices[UI_MI_REFRESH_RATE] = s_rates;
     m->choice_count[UI_MI_REFRESH_RATE] = RATE_COUNT;
     m->value[UI_MI_REFRESH_RATE] = rate;
+    m->hidden[UI_MI_REFRESH_RATE] = true;
 
     m->value[UI_MI_TEMP_OFFSET] = set->temp_offset_c100 / 10;
     m->value[UI_MI_HUM_OFFSET] = set->hum_offset_pct100 / 10;

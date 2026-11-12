@@ -6,6 +6,7 @@
 #include "diag_internal.h"
 #include "esp_console.h"
 #include "pcf85063.h"
+#include "power.h"
 #include "sensors.h"
 #include "timekeeping.h"
 #include "timekeeping_iso.h"
@@ -73,8 +74,16 @@ static int battery_body(int argc, char **argv)
         return 1;
     }
     sensors_battery_t b = sensors_battery(now);
-    printf("battery: %d mV now, %d mV smoothed, %d %%, %s\n", b.last_mv, b.smoothed_mv, b.level,
-           battery_state_name(b.state));
+    bool usb = power_tethered();
+    if (usb && b.state == BATTERY_UNKNOWN) {
+        printf("battery: %d mV now, %d mV smoothed, %d %%, usb\n", b.last_mv, b.smoothed_mv, b.level);
+    } else if (usb) {
+        printf("battery: %d mV now, %d mV smoothed, %d %%, %s (usb)\n", b.last_mv, b.smoothed_mv, b.level,
+               battery_state_name(b.state));
+    } else {
+        printf("battery: %d mV now, %d mV smoothed, %d %%, %s\n", b.last_mv, b.smoothed_mv, b.level,
+               battery_state_name(b.state));
+    }
     const battery_learn_t *l = sensors_learn();
     printf("learning: %s, %u h of discharge, %d points\n", battery_learn_state_name(battery_learn_state(l)),
            (unsigned)battery_learn_hours(l), battery_learn_points(l));
@@ -134,9 +143,18 @@ static int rtc_body(int argc, char **argv)
         }
         int drift10 = timekeeping_trim_drift_s10_per_day(trim);
         double pct = (double)trim->drift_ppb / 10000000.0;
-        printf("rtc drift: %ld ppb (%+.4f%%, %s%d.%d s/day)\n",
+        printf("rtc drift: %ld ppb (%+.4f%%, %s%d.%d s/day)",
                (long)trim->drift_ppb, pct,
                drift10 < 0 ? "-" : "+", abs(drift10) / 10, abs(drift10) % 10);
+        int16_t cal_t = timekeeping_cal_temp_c100();
+        int16_t cur_t = timekeeping_cur_temp_c100();
+        if (cal_t != TIMEKEEPING_TEMP_UNSET && cur_t != TIMEKEEPING_TEMP_UNSET) {
+            printf(" @ cal %.1f C, now %.1f C", cal_t / 100.0, cur_t / 100.0);
+            if (timekeeping_temp_excursion_active()) {
+                printf(" [thermal >=5C: 2h SNTP]");
+            }
+        }
+        printf("\n");
         return 0;
     }
     return usage(k_usage);

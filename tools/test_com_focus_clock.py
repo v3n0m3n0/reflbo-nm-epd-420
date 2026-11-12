@@ -147,21 +147,34 @@ class ReflboTester:
         bat_resp = self.send_cmd("battery")
         print(f"battery:\n{bat_resp.strip()}")
 
-        m_bat = re.search(r"battery:\s+(\d+)\s+mV\s+now,\s+(\d+)\s+mV\s+smoothed,\s+(-?\d+)\s+%,\s+(\w+)", bat_resp)
+        m_bat = re.search(r"battery:\s+(\d+)\s+mV\s+now,\s+(\d+)\s+mV\s+smoothed,\s+(-?\d+)\s+%,\s+([^\r\n]+)", bat_resp)
         if m_bat:
             mv_now = int(m_bat.group(1))
             mv_smoothed = int(m_bat.group(2))
             level = int(m_bat.group(3))
-            state = m_bat.group(4)
+            state = m_bat.group(4).strip()
+            usb_detected = "usb" in state.lower()
             print(f"[+] Parsed Battery Info:")
             print(f"    - Voltage (now):      {mv_now} mV")
             print(f"    - Voltage (smoothed): {mv_smoothed} mV")
             print(f"    - Level:              {level}%")
             print(f"    - State:              {state}")
+            print(f"    - USB detected:       {usb_detected}")
             return True
         else:
             print("[-] Could not parse battery output format")
             return False
+
+    def ensure_rtc_valid(self):
+        out = self.send_cmd("rtc get")
+        m = re.search(r"rtc:\s+(\d{4})-\d{2}-\d{2}T", out)
+        year = int(m.group(1)) if m else 0
+        if "INVALID" in out or year < 2020:
+            iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print(f"[!] RTC invalid/unset ({year}); setting to {iso}")
+            self.send_cmd(f"rtc set {iso}")
+        else:
+            print(f"[+] RTC already valid (year {year}); leaving untouched")
 
     def monitor_minute_boundary(self, duration_s=70):
         print(f"\n--- Test 4: Monitor Serial Output for Minute Boundary Tick ({duration_s}s) ---")
@@ -255,11 +268,18 @@ class ReflboTester:
         return "1 hz" not in low and "every_second" not in low and len(stats.strip()) > 0
 
     def test_t9_deep_sleep_partial(self):
-        print("\n[T9] Checking `panel status` partial count...")
+        print("\n[T9] Checking `panel status` partial/full/timeouts count...")
         out = self.send_cmd("panel status")
         print(out.strip())
         low = out.lower()
-        return "ssd1683" in low and "partials" in low and "usage:" not in low and "unrecognized" not in low
+        return (
+            "ssd1683" in low
+            and "partials" in low
+            and "full" in low
+            and "timeouts 0" in low
+            and "usage:" not in low
+            and "unrecognized" not in low
+        )
 
     def test_t10_rtc_drift(self):
         print("\n[T10] Checking `rtc drift` command...")
@@ -275,7 +295,13 @@ class ReflboTester:
         print(p_out.strip())
         s_low = s_out.lower()
         p_low = p_out.lower()
-        return ("shtc3" not in s_low) and ("mode " not in p_low) and ("lpm rate" not in p_low)
+        return (
+            ("shtc3" not in s_low)
+            and ("mode " not in p_low)
+            and ("lpm rate" not in p_low)
+            and ("full" in p_low)
+            and ("timeouts 0" in p_low)
+        )
 
 
 def main():
@@ -284,6 +310,7 @@ def main():
     parser.add_argument("-b", "--baud", type=int, default=115200, help="Baud rate (default: 115200)")
     parser.add_argument("-t", "--monitor-sec", type=int, default=70, help="Seconds to monitor for minute tick (default: 70)")
     parser.add_argument("--skip-monitor", action="store_true", help="Skip the 70-second minute boundary monitor")
+    parser.add_argument("--no-set-rtc", action="store_true", help="Do not auto-set RTC if invalid/unset")
     parser.add_argument("--extended", action="store_true", help="Run extended diagnostic tests T6-T11")
     args = parser.parse_args()
 
@@ -295,6 +322,8 @@ def main():
         ok_ver = tester.test_version_and_presets()
         ok_pwr = tester.test_power_stats()
         ok_bat = tester.test_battery()
+        if not args.no_set_rtc:
+            tester.ensure_rtc_valid()
         if not args.skip_monitor:
             ok_mon = tester.monitor_minute_boundary(duration_s=args.monitor_sec)
         else:
