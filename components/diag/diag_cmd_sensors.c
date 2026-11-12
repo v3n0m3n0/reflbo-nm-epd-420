@@ -153,6 +153,15 @@ static int rtc_body(int argc, char **argv)
             if (timekeeping_temp_excursion_active()) {
                 printf(" [thermal >=5C: 2h SNTP]");
             }
+        } else if (cal_t == TIMEKEEPING_TEMP_UNSET) {
+            printf(" (cal temp: unset until next SNTP");
+            if (cur_t != TIMEKEEPING_TEMP_UNSET) {
+                printf(", now %.1f C)", cur_t / 100.0);
+            } else {
+                printf(")");
+            }
+        } else {
+            printf(" @ cal %.1f C (now temp: unset)", cal_t / 100.0);
         }
         printf("\n");
         return 0;

@@ -301,6 +301,29 @@ static void test_the_gauge_shows_the_level_on_a_learned_curve(void)
     TEST_ASSERT_EQUAL_INT(50, battery_gauge_level(&s_g)); /* the built-in curve says 26 % */
 }
 
+static void test_cv_taper_above_full_mv_stays_charging_then_full_then_discharging(void)
+{
+    uint32_t t = 1000;
+    /* Start at 4150 mV (95%), then slowly taper up by +20 mV over 35 min (+10 <= rise < +30). */
+    for (int i = 0; i < 8; i++, t += 300) {
+        battery_gauge_add(&s_g, t, 4150 + (i * 20) / 7);
+    }
+    t -= 300;
+    TEST_ASSERT_EQUAL(BATTERY_CHARGING, battery_gauge_state(&s_g, t));
+    TEST_ASSERT_TRUE(battery_gauge_level(&s_g) > 95);
+
+    /* Settling within +-9 mV at >= 4150 mV transitions to BATTERY_FULL. */
+    t = add_steady(t + 300, 4170, 8);
+    TEST_ASSERT_EQUAL(BATTERY_FULL, battery_gauge_state(&s_g, t));
+
+    /* Unplugging and dropping <= -10 mV transitions to BATTERY_DISCHARGING. */
+    for (int i = 1; i <= 7; i++) {
+        t += 300;
+        battery_gauge_add(&s_g, t, 4170 - i * 3);
+    }
+    TEST_ASSERT_EQUAL(BATTERY_DISCHARGING, battery_gauge_state(&s_g, t));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -329,5 +352,6 @@ int main(void)
     RUN_TEST(test_a_learned_curve_is_looked_up);
     RUN_TEST(test_a_learned_curve_must_rise_within_the_battery_range);
     RUN_TEST(test_the_gauge_shows_the_level_on_a_learned_curve);
+    RUN_TEST(test_cv_taper_above_full_mv_stays_charging_then_full_then_discharging);
     return UNITY_END();
 }
