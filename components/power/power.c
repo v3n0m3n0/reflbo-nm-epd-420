@@ -48,7 +48,6 @@ static power_idle_t s_strategy;
 static power_wake_t s_boot_wake;
 static bool s_boot_failed;
 static bool s_image_pending; /* with s_boot_failed: the failed image came from an upload */
-static bool s_cpu_pd_ready;
 static int64_t s_hold_until_us;
 static int64_t s_awake_since_us; /* esp_timer time this awake phase began; -1 after a stats reset */
 static unsigned s_masked;        /* POWER_BUTTON_* the sleep that just ended left out */
@@ -253,13 +252,10 @@ static uint64_t sleep_us_until(time_t until_utc)
 
 power_wake_t power_sleep_light(time_t until_utc)
 {
-    if (!s_cpu_pd_ready) { /* on first use: boots that only deep-sleep never need the buffer */
-        s_cpu_pd_ready = true;
-        esp_err_t err = esp_sleep_cpu_pd_low_init();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "CPU stays powered in light sleep: %s", esp_err_to_name(err));
-        }
-    }
+    /* NOTE: On ESP32-S3R8 with Octal PSRAM (OPI), esp_sleep_cpu_pd_low_init() (CPU power down)
+     * corrupts ROM cache restoration (resume_cache / spi_flash_restore_cache lockup) upon wake.
+     * Standard light sleep with clock gating consumes ~0.8-1.0 mA and is 100% stable.
+     * Maintain 160 MHz CPU frequency during sleep cycles to prevent OPI PSRAM bus divider instability. */
     unsigned held = held_buttons();
     for (size_t i = 0; i < sizeof(k_wake_pins) / sizeof(k_wake_pins[0]); i++) {
         gpio_intr_disable(k_wake_pins[i]);
@@ -457,5 +453,8 @@ esp_err_t power_set_cpu_freq_mhz(int mhz)
 
 esp_err_t power_set_cpu_freq_low(bool low)
 {
-    return power_set_cpu_freq_mhz(low ? 80 : 160);
+    /* On ESP32-S3R8 with Octal PSRAM (OPI), changing CPU frequency can destabilize
+     * the external PSRAM bus dividers across light sleep cycles. Maintain standard 160 MHz. */
+    (void)low;
+    return power_set_cpu_freq_mhz(160);
 }

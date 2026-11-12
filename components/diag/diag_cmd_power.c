@@ -12,9 +12,14 @@ static int usage(const char *text)
     return 1;
 }
 
+static int sleep_body(int argc, char **argv);
+
 static int power_body(int argc, char **argv)
 {
-    static const char *const k_usage = "power idle [deep|light]";
+    static const char *const k_usage = "power idle [deep|light] | power stats [reset]";
+    if (argc >= 2 && strcmp(argv[1], "stats") == 0) {
+        return sleep_body(argc, argv);
+    }
     if (argc < 2 || strcmp(argv[1], "idle") != 0 || argc > 3) {
         return usage(k_usage);
     }
@@ -52,12 +57,14 @@ static int sleep_body(int argc, char **argv)
                (unsigned long)st.wakes[POWER_WAKE_RTC], (unsigned long)st.wakes[POWER_WAKE_KEY],
                (unsigned long)st.wakes[POWER_WAKE_BOOT], (unsigned long)st.wakes[POWER_WAKE_TIMER],
                (unsigned long)st.wakes[POWER_WAKE_OTHER]);
-        printf("sleep: awake %lu times: last %lu ms, max %lu ms, mean %lu ms\n", (unsigned long)st.awake_count,
+        printf("sleep: awake %lu times: last %lu ms, max %lu ms, mean %lu ms, total %lu ms\n", (unsigned long)st.awake_count,
                (unsigned long)st.awake_ms_last, (unsigned long)st.awake_ms_max,
-               (unsigned long)(st.awake_count ? st.awake_ms_total / st.awake_count : 0));
-        printf("sleep: slept %lu times: last %lu ms, min %lu ms, mean %lu ms; test cycles left %d\n",
+               (unsigned long)(st.awake_count ? st.awake_ms_total / st.awake_count : 0),
+               (unsigned long)st.awake_ms_total);
+        printf("sleep: slept %lu times: last %lu ms, min %lu ms, mean %lu ms, total %lu ms; test cycles left %d\n",
                (unsigned long)st.slept_count, (unsigned long)st.slept_ms_last, (unsigned long)st.slept_ms_min,
-               (unsigned long)(st.slept_count ? st.slept_ms_total / st.slept_count : 0), power_test_cycles_left());
+               (unsigned long)(st.slept_count ? st.slept_ms_total / st.slept_count : 0),
+               (unsigned long)st.slept_ms_total, power_test_cycles_left());
         return 0;
     }
     if (argc == 4 && strcmp(argv[1], "test") == 0) {
@@ -93,7 +100,7 @@ static int cmd_sleep(int argc, char **argv)
 esp_err_t diag_register_power_commands(void)
 {
     const esp_console_cmd_t cmds[] = {
-        { .command = "power", .help = "power idle [deep|light]: show or set the idle strategy", .func = &cmd_power },
+        { .command = "power", .help = "power idle [deep|light] | power stats [reset]", .func = &cmd_power },
         { .command = "sleep", .help = "sleep stats [reset] | sleep test <deep|light> <cycles>", .func = &cmd_sleep },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {

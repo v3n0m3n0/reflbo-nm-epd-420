@@ -250,6 +250,8 @@ static void schedule_next(void)
 /* The timer wake: a cycle switch or seconds tick if one comes before the alarm, else the alarm itself. */
 static time_t sleep_until(void)
 {
+    if (s_wake_at == 0) return s_next_alarm;
+    if (s_next_alarm == 0) return s_wake_at;
     return s_wake_at < s_next_alarm ? s_wake_at : s_next_alarm;
 }
 
@@ -278,11 +280,10 @@ void app_focus_mode_sync(bool entering)
         ESP_LOGI(TAG, "Entering Super Power Efficient mode (Focus clock)");
         lora_widget_sleep();
         netmgr_stop();
-        power_set_cpu_freq_low(true);
+        /* Maintain 160 MHz CPU frequency during sleep cycles to prevent Octal PSRAM bus divider instability */
         app_state()->cycle_at = 0;
     } else {
         ESP_LOGI(TAG, "Exiting Super Power Efficient mode (Focus clock)");
-        power_set_cpu_freq_low(false);
         if (app_state()->settings.lora.enabled) {
             lora_widget_apply(&app_state()->settings.lora);
         }
@@ -497,6 +498,9 @@ static void handle_wake(power_wake_t wake)
         }
         board_buttons_resync(); /* edges during sleep raised no interrupt */
         power_hold_awake_ms(GRACE_MS);
+        app_ui_sample(time(NULL));
+        app_ui_render();
+        schedule_next();
         break;
     default:
         if ((s_next_alarm != 0 && time(NULL) >= s_next_alarm) || (s_wake_at != 0 && time(NULL) >= s_wake_at)) {

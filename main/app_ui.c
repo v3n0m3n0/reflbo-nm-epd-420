@@ -784,7 +784,7 @@ void app_ui_tick(bool force)
     bool render = force || (!focus && s_presets.presets[s_presets.active].seconds);
     int sensors_every = focus ? 15 : s.settings.sensors_every_min;
     int display_every = focus ? 1 : s.settings.display_every_min;
-    if (force || (new_slot && scheduler_is_slot(slot, sensors_every))) {
+    if (force || s.done_slot == 0 || !sensors_battery(now).valid || (new_slot && scheduler_is_slot(slot, sensors_every))) {
         app_ui_sample(now);
         render = true;
     }
