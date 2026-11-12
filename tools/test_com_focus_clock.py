@@ -10,6 +10,7 @@ Verifies:
 """
 
 import argparse
+from datetime import datetime, timezone
 import re
 import sys
 import time
@@ -23,6 +24,38 @@ except ImportError:
 PROMPT = "reflbo> "
 
 
+def parse_panel_status(text):
+    m = re.search(r"partials\s+(\d+)/(\d+),\s+full\s+(\d+),\s+timeouts\s+(\d+)", text)
+    if not m:
+        return None
+    return {
+        "partials": int(m.group(1)),
+        "partial_max": int(m.group(2)),
+        "full": int(m.group(3)),
+        "timeouts": int(m.group(4)),
+    }
+
+
+def parse_sleep_stats(text):
+    m = re.search(r"sleep:\s+(\d+)\s+light,\s+(\d+)\s+deep", text)
+    if not m:
+        return None
+    m_left = re.search(r"test cycles left\s+(\d+)", text)
+    return {
+        "light": int(m.group(1)),
+        "deep": int(m.group(2)),
+        "test_cycles_left": int(m_left.group(1)) if m_left else 0,
+    }
+
+
+def parse_rtc_epoch(text):
+    m = re.search(r"rtc:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)", text)
+    if not m or "INVALID" in text:
+        return None, 0
+    dt = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return dt.timestamp(), dt.year
+
+
 class ReflboTester:
     def __init__(self, port, baud=115200, timeout=1.0):
         self.port = port
@@ -33,7 +66,16 @@ class ReflboTester:
     def connect(self):
         print(f"[*] Opening serial port {self.port} at {self.baud} baud...")
         try:
-            self.ser = serial.Serial(self.port, self.baud, timeout=self.timeout)
+            ser = serial.Serial()
+            ser.port = self.port
+            ser.baudrate = self.baud
+            ser.timeout = self.timeout
+            ser.dtr = True
+            ser.rts = True
+            ser.open()
+            ser.rts = False
+            ser.dtr = False
+            self.ser = ser
             # Give device a moment to settle
             time.sleep(0.5)
             self.ser.reset_input_buffer()
@@ -50,6 +92,11 @@ class ReflboTester:
 
     def close(self):
         if self.ser and self.ser.is_open:
+            try:
+                self.ser.rts = False
+                self.ser.dtr = False
+            except Exception:
+                pass
             self.ser.close()
 
     def send_cmd(self, cmd, wait_s=2.0):
@@ -178,14 +225,21 @@ class ReflboTester:
 
     def monitor_minute_boundary(self, duration_s=70):
         print(f"\n--- Test 4: Monitor Serial Output for Minute Boundary Tick ({duration_s}s) ---")
+        before_panel_raw = self.send_cmd("panel status")
+        before_panel = parse_panel_status(before_panel_raw)
+        before_rtc_raw = self.send_cmd("rtc get")
+        _, before_year = parse_rtc_epoch(before_rtc_raw)
+        before_rtc_valid = before_year >= 2020
+        print(f"[*] Before monitor - RTC valid: {before_rtc_valid}, panel: {before_panel}")
+
         print(f"[*] Listening on {self.port} for up to {duration_s} seconds to observe :00 tick & refresh...")
         start_time = time.time()
         line_buf = ""
         tick_observed = False
         refresh_observed = False
+        error_observed = False
 
         while time.time() - start_time < duration_s:
-            rem = int(duration_s - (time.time() - start_time))
             if self.ser.in_waiting:
                 chunk = self.ser.read(self.ser.in_waiting).decode("utf-8", errors="replace")
                 line_buf += chunk
@@ -196,6 +250,8 @@ class ReflboTester:
                         curr_t = time.strftime("%H:%M:%S")
                         print(f"[{curr_t}] {line_clean}")
                         line_lower = line_clean.lower()
+                        if any(w in line_lower for w in ["guru meditation", "panic", "busy timeout"]):
+                            error_observed = True
                         if any(w in line_lower for w in ["tick", "minute", "wake", "alarm", "pcf85063"]):
                             tick_observed = True
                         if any(w in line_lower for w in ["refresh", "display", "render", "draw", "st7305", "partial"]):
@@ -203,7 +259,31 @@ class ReflboTester:
             else:
                 time.sleep(0.1)
 
+        after_panel_raw = self.send_cmd("panel status")
+        after_panel = parse_panel_status(after_panel_raw)
         print(f"\n[*] Monitoring finished. Tick observed: {tick_observed}, Refresh observed: {refresh_observed}")
+        if before_panel and after_panel:
+            print(
+                f"[*] Panel delta: partials: {before_panel['partials']} -> {after_panel['partials']}, "
+                f"full: {before_panel['full']} -> {after_panel['full']}, "
+                f"timeouts: {before_panel['timeouts']} -> {after_panel['timeouts']}"
+            )
+        else:
+            print(f"[-] Failed to parse panel status (before={before_panel}, after={after_panel})")
+
+        if error_observed:
+            print("[-] Error/panic/BUSY timeout observed during monitoring")
+            return False
+
+        if before_rtc_valid:
+            if not before_panel or not after_panel:
+                return False
+            if after_panel["timeouts"] != before_panel["timeouts"]:
+                print("[-] Panel timeouts increased during monitoring")
+                return False
+            if not (after_panel["partials"] > before_panel["partials"] or after_panel["full"] > before_panel["full"]):
+                print("[-] Panel partials/full failed to advance across minute boundary")
+                return False
         return True
 
     def test_t6_focus_lora_sleep(self):
@@ -303,6 +383,134 @@ class ReflboTester:
             and ("timeouts 0" in p_low)
         )
 
+    def test_sleep_cycles(self, cycles, mode="deep"):
+        print(f"\n--- Sleep Cycles Test ({cycles}x {mode}) ---")
+        self.ensure_rtc_valid()
+
+        preset_resp = self.send_cmd("preset list")
+        m_preset = re.search(r"^\*\s+(\S+)", preset_resp, re.MULTILINE)
+        orig_preset = m_preset.group(1) if m_preset else None
+        if orig_preset and orig_preset != "focus":
+            print(f"[*] Switching preset '{orig_preset}' -> 'focus' for sleep test...")
+            self.send_cmd("preset set focus")
+            time.sleep(2.0)
+
+        before_stats_raw = self.send_cmd("sleep stats")
+        before_stats = parse_sleep_stats(before_stats_raw)
+        before_panel_raw = self.send_cmd("panel status")
+        before_panel = parse_panel_status(before_panel_raw)
+        before_rtc_raw = self.send_cmd("rtc get")
+        before_rtc_epoch, before_year = parse_rtc_epoch(before_rtc_raw)
+        wall_start = time.time()
+
+        if not before_stats or not before_panel or before_rtc_epoch is None or before_year < 2020:
+            print(f"[-] Failed to capture baseline (stats={before_stats}, panel={before_panel}, rtc_year={before_year})")
+            return False
+
+        if before_panel["partials"] == 0 and before_panel["full"] == 0:
+            print("[*] Note: baseline panel partials=0, full=0")
+
+        ack = self.send_cmd(f"sleep test {mode} {cycles}", wait_s=3.0)
+        print(f"sleep test ack:\n{ack.strip()}")
+        if "sleep cycles follow" not in ack.lower():
+            print("[-] Did not receive 'sleep cycles follow' confirmation")
+            return False
+
+        if mode == "deep":
+            self.close()
+            time.sleep(4.0)
+
+        timeout_s = max(180, cycles * 75 + 45)
+        deadline = time.time() + timeout_s
+        after_stats = None
+        after_stats_raw = ""
+
+        try:
+            while time.time() < deadline:
+                if not self.ser or not self.ser.is_open:
+                    if not self.connect():
+                        time.sleep(2.0)
+                        continue
+
+                try:
+                    after_stats_raw = self.send_cmd("sleep stats", wait_s=5.0)
+                except Exception as e:
+                    print(f"[*] Transient serial error while polling: {e}")
+                    self.close()
+                    time.sleep(2.0)
+                    continue
+
+                low = after_stats_raw.lower()
+                if "guru meditation" in low or "panic" in low:
+                    print(f"[-] Panic detected during sleep test:\n{after_stats_raw.strip()}")
+                    return False
+
+                parsed = parse_sleep_stats(after_stats_raw)
+                if parsed and parsed["test_cycles_left"] == 0 and parsed[mode] >= before_stats[mode] + cycles:
+                    after_stats = parsed
+                    break
+
+                if mode == "deep":
+                    self.close()
+                time.sleep(3.0)
+
+            if not after_stats:
+                print(f"[-] Timed out after {timeout_s}s waiting for {cycles} {mode} sleep cycles (last stats:\n{after_stats_raw.strip()})")
+                return False
+
+            after_panel_raw = self.send_cmd("panel status")
+            after_panel = parse_panel_status(after_panel_raw)
+            after_rtc_raw = self.send_cmd("rtc get")
+            after_rtc_epoch, after_year = parse_rtc_epoch(after_rtc_raw)
+            wall_elapsed = time.time() - wall_start
+
+            print(f"[*] Sleep stats: {mode} {before_stats[mode]} -> {after_stats[mode]}, cycles left: {after_stats['test_cycles_left']}")
+            if not after_panel:
+                print(f"[-] Failed to parse after_panel: {after_panel_raw.strip()}")
+                return False
+            print(
+                f"[*] Panel status: partials {before_panel['partials']} -> {after_panel['partials']}, "
+                f"full {before_panel['full']} -> {after_panel['full']}, "
+                f"timeouts {before_panel['timeouts']} -> {after_panel['timeouts']}"
+            )
+
+            if after_panel["timeouts"] != before_panel["timeouts"]:
+                print("[-] Panel timeouts increased during sleep test")
+                return False
+
+            before_total = before_panel["partials"] + before_panel["full"] * 20
+            after_total = after_panel["partials"] + after_panel["full"] * 20
+            if after_total < before_total:
+                print("[-] Panel snapshot count regressed across sleep")
+                return False
+            if (before_panel["partials"] > 0 or before_panel["full"] > 0) and not (
+                after_panel["partials"] > 0 or after_panel["full"] > before_panel["full"]
+            ):
+                print("[-] Panel snapshot did not survive across sleep")
+                return False
+
+            if after_rtc_epoch is None or after_year < 2020:
+                print(f"[-] Invalid RTC after sleep: {after_rtc_raw.strip()}")
+                return False
+            rtc_elapsed = after_rtc_epoch - before_rtc_epoch
+            drift = abs(rtc_elapsed - wall_elapsed)
+            print(f"[*] RTC elapsed: {rtc_elapsed:.1f}s, Wall elapsed: {wall_elapsed:.1f}s, Diff: {drift:.1f}s")
+            if drift > 20.0:
+                print("[-] RTC clock jump exceeded 20s tolerance")
+                return False
+
+            print(f"[+] Sleep cycles test ({cycles}x {mode}) PASSED")
+            return True
+        finally:
+            if not self.ser or not self.ser.is_open:
+                for _ in range(5):
+                    if self.connect():
+                        break
+                    time.sleep(1.0)
+            if orig_preset and orig_preset != "focus" and self.ser and self.ser.is_open:
+                print(f"[*] Restoring preset 'focus' -> '{orig_preset}'...")
+                self.send_cmd(f"preset set {orig_preset}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Automated COM Port Focus Clock Verification")
@@ -312,6 +520,8 @@ def main():
     parser.add_argument("--skip-monitor", action="store_true", help="Skip the 70-second minute boundary monitor")
     parser.add_argument("--no-set-rtc", action="store_true", help="Do not auto-set RTC if invalid/unset")
     parser.add_argument("--extended", action="store_true", help="Run extended diagnostic tests T6-T11")
+    parser.add_argument("--sleep-cycles", type=int, default=0, help="Run automated sleep test for N cycles (default: 0)")
+    parser.add_argument("--sleep-mode", choices=["deep", "light"], default="deep", help="Sleep mode for --sleep-cycles (default: deep)")
     args = parser.parse_args()
 
     tester = ReflboTester(port=args.port, baud=args.baud)
@@ -339,6 +549,10 @@ def main():
         print("==========================================")
 
         all_ok = ok_ver and ok_pwr and ok_bat and ok_mon
+        if args.sleep_cycles > 0:
+            ok_sleep = tester.test_sleep_cycles(args.sleep_cycles, mode=args.sleep_mode)
+            print(f"  Sleep Cycles:        {'PASS' if ok_sleep else 'FAIL'}")
+            all_ok = all_ok and ok_sleep
         if args.extended:
             ok_t6 = tester.test_t6_focus_lora_sleep()
             ok_t7 = tester.test_t7_rtc_no_jump_on_restart()
