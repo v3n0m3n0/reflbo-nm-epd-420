@@ -152,6 +152,9 @@ static bool always_wanted(time_t now)
     }
     sync_schedule_t s;
     schedule_from_settings(&s);
+    if (!timekeeping_valid() && s.mode == SYNC_MODE_ALWAYS) {
+        return true; /* When clock is uncalibrated or reset to 1970, keep Wi-Fi active to fetch NTP */
+    }
     return sync_wifi_wanted(&s, now);
 }
 

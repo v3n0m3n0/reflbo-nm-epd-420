@@ -325,6 +325,22 @@ static void test_wifi_is_wanted_in_always_mode_outside_quiet_hours(void)
     TEST_ASSERT_FALSE(sync_wifi_wanted(&daily, oct1(12, 0)));
 }
 
+static void test_quiet_hours_ignored_when_clock_is_uncalibrated_or_epoch_1970(void)
+{
+    sync_schedule_t night = every(60);
+    quiet(&night, HM(0, 0), HM(5, 0)); /* Default quiet hours 00:00-05:00 */
+    time_t epoch_reset = 3600; /* 1970-01-01 01:00 CET: state after battery drain */
+
+    /* Quiet hours must NOT trigger when clock is reset to epoch 1970 */
+    TEST_ASSERT_FALSE(sync_quiet_at(&night, epoch_reset));
+    TEST_ASSERT_FALSE(sync_quiet_at(&night, 0));
+
+    /* Always mode must want Wi-Fi even during nominal quiet hours if clock is uncalibrated */
+    sync_schedule_t always = { .mode = SYNC_MODE_ALWAYS };
+    quiet(&always, HM(0, 0), HM(5, 0));
+    TEST_ASSERT_TRUE(sync_wifi_wanted(&always, epoch_reset));
+}
+
 static void test_radar_refreshes_follow_the_frames(void)
 {
     /* spec §9.3: ČHMÚ every 5 min, RainViewer every 10, a minute after each step for the frame to appear */
@@ -527,6 +543,7 @@ int main(void)
     RUN_TEST(test_quiet_hours_stretch_the_expected_interval);
     RUN_TEST(test_the_expected_interval_of_always_and_manual);
     RUN_TEST(test_wifi_is_wanted_in_always_mode_outside_quiet_hours);
+    RUN_TEST(test_quiet_hours_ignored_when_clock_is_uncalibrated_or_epoch_1970);
     RUN_TEST(test_radar_refreshes_follow_the_frames);
     RUN_TEST(test_a_sync_fails_on_any_step_but_the_energy);
     RUN_TEST(test_hhmm_text);

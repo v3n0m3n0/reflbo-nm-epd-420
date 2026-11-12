@@ -29,7 +29,7 @@ _Static_assert(NETMGR_REASON_ASSOC_LEAVE == WIFI_REASON_ASSOC_LEAVE, "netmgr_lin
 #define TASK_PRIORITY   4 /* below the app (5) and the buttons (6) */
 #define DNS_STACK       3072
 #define DNS_PRIORITY    3
-#define JOIN_TIMEOUT_MS 8000 /* spec §10.1: 8 s per attempt */
+#define JOIN_TIMEOUT_MS 12000 /* 12 s per attempt (margin for WPA3-SAE ECDH handshake and busy 2.4 GHz channels) */
 #define AP_CLIENTS_MAX  2
 #define LIST_VERSION    1
 #define SEEN_MAX        24

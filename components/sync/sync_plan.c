@@ -7,6 +7,7 @@
 #define DAY_MIN 1440
 #define INTERVAL_MIN 15
 #define ALL_DAYS 0x7F
+#define SYNC_EPOCH_VALID_MIN 1577836800L /* 2020-01-01 00:00:00 UTC: uncalibrated clock (e.g. 1970) has no quiet hours */
 
 static const int k_retry_min[SYNC_RETRY_COUNT] = { 15, 30, 60 };
 
@@ -34,6 +35,9 @@ static int local_minute(time_t t)
 
 bool sync_quiet_at(const sync_schedule_t *s, time_t t)
 {
+    if (t < SYNC_EPOCH_VALID_MIN) {
+        return false; /* An uncalibrated or reset clock (epoch 1970) has no meaningful quiet hours */
+    }
     if (!s->quiet || s->quiet_from == s->quiet_to || s->quiet_from >= DAY_MIN || s->quiet_to >= DAY_MIN) {
         return false;
     }
