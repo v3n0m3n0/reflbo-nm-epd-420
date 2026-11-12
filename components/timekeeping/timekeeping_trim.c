@@ -1,5 +1,7 @@
 #include "timekeeping_trim.h"
 
+#include <stdlib.h>
+
 #define TRIM_VERSION 1
 
 /* a / b to the nearest whole number, halves away from zero; b > 0. */
@@ -120,4 +122,13 @@ bool timekeeping_sw_drift_measure(int32_t *drift_ppb, int64_t span_ms, int64_t e
     }
     *drift_ppb = (int32_t)ppb;
     return true;
+}
+
+bool timekeeping_temp_excursion(int16_t cal_temp_c100, int16_t cur_temp_c100, int16_t threshold_c100)
+{
+    if (cal_temp_c100 == TIMEKEEPING_TEMP_UNSET || cur_temp_c100 == TIMEKEEPING_TEMP_UNSET ||
+        threshold_c100 <= 0) {
+        return false;
+    }
+    return abs((int)cur_temp_c100 - (int)cal_temp_c100) >= threshold_c100;
 }

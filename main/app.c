@@ -726,6 +726,7 @@ static esp_err_t boot(void)
         sensors_env_t env = sensors_env();
         if (env.time != 0) {
             display_set_ambient_c((int16_t)(env.temp_c100 / 100));
+            timekeeping_set_ambient_c100((int16_t)env.temp_c100);
         }
         ESP_RETURN_ON_ERROR(display_init_warm(&s_snap.display), TAG, "display");
         if (s_snap.display.pushed && s_snap.display.partial_count > 0 &&

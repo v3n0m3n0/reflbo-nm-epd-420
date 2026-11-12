@@ -186,6 +186,25 @@ static void test_sw_drift_measure_span_and_jump_guard(void)
     TEST_ASSERT_EQUAL_INT32(-30000000, ppb);
 }
 
+static void test_temp_excursion(void)
+{
+    /* UNSET args -> false */
+    TEST_ASSERT_FALSE(timekeeping_temp_excursion(TIMEKEEPING_TEMP_UNSET, 2500, 500));
+    TEST_ASSERT_FALSE(timekeeping_temp_excursion(2500, TIMEKEEPING_TEMP_UNSET, 500));
+    TEST_ASSERT_FALSE(timekeeping_temp_excursion(TIMEKEEPING_TEMP_UNSET, TIMEKEEPING_TEMP_UNSET, 500));
+    /* threshold <= 0 -> false */
+    TEST_ASSERT_FALSE(timekeeping_temp_excursion(2500, 3500, 0));
+    TEST_ASSERT_FALSE(timekeeping_temp_excursion(2500, 3500, -100));
+    /* delta < 500 -> false */
+    TEST_ASSERT_FALSE(timekeeping_temp_excursion(2500, 2999, 500));
+    TEST_ASSERT_FALSE(timekeeping_temp_excursion(2500, 2001, 500));
+    /* delta == 500 -> true */
+    TEST_ASSERT_TRUE(timekeeping_temp_excursion(2500, 3000, 500));
+    TEST_ASSERT_TRUE(timekeeping_temp_excursion(2500, 2000, 500));
+    /* negative delta -600 -> true */
+    TEST_ASSERT_TRUE(timekeeping_temp_excursion(2500, 1900, 500));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -204,5 +223,6 @@ int main(void)
     RUN_TEST(test_sw_drift_us_3pct_and_12h_no_overflow);
     RUN_TEST(test_sw_drift_us_clamps_to_5pct);
     RUN_TEST(test_sw_drift_measure_span_and_jump_guard);
+    RUN_TEST(test_temp_excursion);
     return UNITY_END();
 }

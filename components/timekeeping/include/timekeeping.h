@@ -29,3 +29,9 @@ esp_err_t timekeeping_apply_true_time(int64_t true_utc_us, int64_t mono_us, int6
 /* Applies software drift compensation to system time based on elapsed time since the last
  * correction/sync (survives deep sleep in RTC RAM). No-op if |drift| < 50 ms or drift unknown. */
 esp_err_t timekeeping_drift_correct(void);
+
+/* Ambient temperature tracking for thermal drift adaptation (centi-degrees Celsius). */
+void timekeeping_set_ambient_c100(int16_t temp_c100);
+int16_t timekeeping_cal_temp_c100(void);
+int16_t timekeeping_cur_temp_c100(void);
+bool timekeeping_temp_excursion_active(void);

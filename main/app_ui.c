@@ -568,6 +568,7 @@ void app_ui_sample(time_t now)
         sensors_env_t env = sensors_env();
         ds_set_env(&s.ds, env.temp_c100, env.hum_pct100, env.time, local_day(&local));
         display_set_ambient_c((int16_t)(env.temp_c100 / 100));
+        timekeeping_set_ambient_c100((int16_t)env.temp_c100);
     } else {
         ESP_LOGW(TAG, "AHT20: %s; keeping the last reading", esp_err_to_name(err));
     }

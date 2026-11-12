@@ -52,3 +52,11 @@ int64_t timekeeping_drift_us(int64_t elapsed_us, int32_t drift_ppb);
  * Updates `*drift_ppb` and returns true if `span_ms >= TIMEKEEPING_SW_MIN_SPAN_S * 1000` and
  * the measured drift is within ±TIMEKEEPING_SW_DRIFT_MAX_PPB (jump guard). */
 bool timekeeping_sw_drift_measure(int32_t *drift_ppb, int64_t span_ms, int64_t error_ms);
+
+/* Thermal excursion detection for 136 kHz internal RC drift adaptation (centi-degrees Celsius). */
+#define TIMEKEEPING_TEMP_UNSET INT16_MIN
+#define TIMEKEEPING_THERMAL_DELTA_C100 500 /* 5.00 C */
+
+/* Returns true when neither temperature is TIMEKEEPING_TEMP_UNSET, threshold_c100 > 0,
+ * and |cur_temp_c100 - cal_temp_c100| >= threshold_c100. */
+bool timekeeping_temp_excursion(int16_t cal_temp_c100, int16_t cur_temp_c100, int16_t threshold_c100);

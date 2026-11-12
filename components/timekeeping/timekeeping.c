@@ -14,6 +14,7 @@
 static const char *TAG = "timekeeping";
 
 #define NVS_KEY_TRIM "rtc_trim"
+#define NVS_KEY_CAL_TEMP "rtc_cal_t"
 
 static bool s_valid;
 static RTC_DATA_ATTR rtc_trim_t s_trim;
@@ -21,6 +22,10 @@ static RTC_DATA_ATTR bool s_rtc_trim_loaded;
 static bool s_trim_up;
 static RTC_DATA_ATTR int64_t s_last_corr_us;
 static RTC_DATA_ATTR int64_t s_sw_corr_accum_us;
+static RTC_DATA_ATTR int16_t s_cal_temp_c100;
+static RTC_DATA_ATTR bool s_cal_temp_set;
+static RTC_DATA_ATTR int16_t s_cur_temp_c100;
+static RTC_DATA_ATTR bool s_cur_temp_set;
 
 esp_err_t timekeeping_init(const char *tz_posix)
 {
@@ -55,7 +60,11 @@ static void trim_save(void)
     timekeeping_trim_pack(&s_trim, rec);
     nvs_handle_t nvs;
     if (nvs_open("sys", NVS_READWRITE, &nvs) == ESP_OK) {
-        if (nvs_set_blob(nvs, NVS_KEY_TRIM, rec, sizeof(rec)) == ESP_OK) {
+        esp_err_t err = nvs_set_blob(nvs, NVS_KEY_TRIM, rec, sizeof(rec));
+        if (s_cal_temp_set && err == ESP_OK) {
+            err = nvs_set_i16(nvs, NVS_KEY_CAL_TEMP, s_cal_temp_c100);
+        }
+        if (err == ESP_OK) {
             nvs_commit(nvs);
         }
         nvs_close(nvs);
@@ -79,6 +88,12 @@ static void trim_load(void)
         size_t len = sizeof(rec);
         if (nvs_get_blob(nvs, NVS_KEY_TRIM, rec, &len) == ESP_OK && !timekeeping_trim_unpack(&s_trim, rec, len)) {
             timekeeping_trim_init(&s_trim);
+        }
+        int16_t cal_t = TIMEKEEPING_TEMP_UNSET;
+        if (!s_cal_temp_set && nvs_get_i16(nvs, NVS_KEY_CAL_TEMP, &cal_t) == ESP_OK &&
+            cal_t != TIMEKEEPING_TEMP_UNSET) {
+            s_cal_temp_c100 = cal_t;
+            s_cal_temp_set = true;
         }
         nvs_close(nvs);
     }
@@ -132,6 +147,10 @@ esp_err_t timekeeping_apply_true_time(int64_t true_utc_us, int64_t mono_us, int6
     s_last_corr_us = true_now;
     s_sw_corr_accum_us = 0;
     s_rtc_trim_loaded = true;
+    if (s_cur_temp_set) {
+        s_cal_temp_c100 = s_cur_temp_c100;
+        s_cal_temp_set = true;
+    }
     trim_save();
     s_valid = true;
     return ESP_OK;
@@ -182,4 +201,27 @@ esp_err_t timekeeping_set_utc(time_t utc)
     s_valid = true;
     ESP_LOGI(TAG, "time set to %lld", (long long)utc);
     return ESP_OK;
+}
+
+void timekeeping_set_ambient_c100(int16_t temp_c100)
+{
+    s_cur_temp_c100 = temp_c100;
+    s_cur_temp_set = true;
+}
+
+int16_t timekeeping_cal_temp_c100(void)
+{
+    trim_load();
+    return s_cal_temp_set ? s_cal_temp_c100 : TIMEKEEPING_TEMP_UNSET;
+}
+
+int16_t timekeeping_cur_temp_c100(void)
+{
+    return s_cur_temp_set ? s_cur_temp_c100 : TIMEKEEPING_TEMP_UNSET;
+}
+
+bool timekeeping_temp_excursion_active(void)
+{
+    return timekeeping_temp_excursion(timekeeping_cal_temp_c100(), timekeeping_cur_temp_c100(),
+                                      TIMEKEEPING_THERMAL_DELTA_C100);
 }
