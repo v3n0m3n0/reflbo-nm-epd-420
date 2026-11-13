@@ -26,7 +26,8 @@
 #define STATE_VERSION 5
 #define NVS_NAMESPACE "sys"
 #define NVS_KEY_IDLE  "idle"
-#define TEST_END_HOLD_MS 3000
+#define TEST_END_HOLD_MS 10000 /* extra margin for USB CDC re-enumeration after test */
+#define TEST_INTERCYCLE_HOLD_MS 5000 /* let Windows finish USB CDC enumeration between light test cycles */
 
 static const char *TAG = "power";
 
@@ -274,6 +275,8 @@ power_wake_t power_sleep_light(time_t until_utc)
     esp_sleep_enable_gpio_wakeup();
     esp_sleep_enable_timer_wakeup(sleep_us_until(until_utc));
     int64_t slept_from_us = esp_timer_get_time();
+    fflush(stdout);
+    fsync(fileno(stdout));
     esp_err_t err = esp_light_sleep_start();
     int64_t woke_us = esp_timer_get_time(); /* esp_timer counts light sleep too */
     for (size_t i = 0; i < sizeof(k_wake_pins) / sizeof(k_wake_pins[0]); i++) {
@@ -310,6 +313,9 @@ power_wake_t power_sleep_light(time_t until_utc)
     }
     count_wake(wake, (woke_us - slept_from_us) / 1000);
     finish_test();
+    if (s_rtc.test_cycles > 0) {
+        power_hold_awake_ms(TEST_INTERCYCLE_HOLD_MS);
+    }
     return wake;
 }
 

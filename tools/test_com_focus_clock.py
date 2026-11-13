@@ -17,6 +17,7 @@ import time
 
 try:
     import serial
+    from serial.tools import list_ports
 except ImportError:
     print("Error: pyserial is required. Install via pip install pyserial", file=sys.stderr)
     sys.exit(1)
@@ -362,10 +363,33 @@ class ReflboTester:
         )
 
     def test_t10_rtc_drift(self):
-        print("\n[T10] Checking `rtc drift` command...")
+        print("\n[T10] Checking `rtc drift`, `battery cal`, and `sync status`...")
         out = self.send_cmd("rtc drift")
         print(out.strip())
-        return "rtc drift:" in out.lower()
+        low = out.lower()
+        if "rtc drift:" not in low:
+            return False
+        if "unmeasured" not in low:
+            m = re.search(r"rtc drift:\s*([+-]?\d+)\s*ppb", low)
+            if not m or abs(int(m.group(1))) > 5000000:
+                print(f"[-] rtc drift out of range or unparseable: {out.strip()}")
+                return False
+
+        bat_cal = self.send_cmd("battery cal")
+        print(bat_cal.strip())
+        bat_low = bat_cal.lower()
+        if not any(k in bat_low for k in ("curve", "manual", "learned")) or "empty=" not in bat_low or "full=" not in bat_low:
+            print("[-] battery cal missing active method / empty= / full=")
+            return False
+
+        presets = self.send_cmd("preset list")
+        if re.search(r"^\*\s+focus\b", presets, re.MULTILINE):
+            sync_out = self.send_cmd("sync status")
+            print(sync_out.strip())
+            if "focus sntp: 2h thermal" not in sync_out.lower() and "focus sntp: 12h nominal" not in sync_out.lower():
+                print("[-] sync status missing Focus SNTP schedule")
+                return False
+        return True
 
     def test_t11_display_busy_diag(self):
         print("\n[T11] Checking `sensors` (AHT20) & `panel status`...")
@@ -416,18 +440,30 @@ class ReflboTester:
             print("[-] Did not receive 'sleep cycles follow' confirmation")
             return False
 
-        if mode == "deep":
-            self.close()
-            time.sleep(4.0)
+        self.close()
+        m_sec = re.search(r"rtc:\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:(\d{2})Z", before_rtc_raw)
+        secs_to_minute = max(1, min(60, 60 - int(m_sec.group(1)))) if m_sec else 60
+        initial_wait = secs_to_minute + max(0, cycles - 1) * 60 + 16
+        timeout_s = max(210.0, initial_wait + 100.0)
+        print(f"[*] Waiting {initial_wait}s without touching {self.port} so all {cycles} {mode} sleep cycles & USJ hold finish...")
+        time.sleep(initial_wait)
 
-        timeout_s = max(180, cycles * 75 + 45)
-        deadline = time.time() + timeout_s
+        deadline = wall_start + timeout_s
         after_stats = None
         after_stats_raw = ""
 
         try:
             while time.time() < deadline:
                 if not self.ser or not self.ser.is_open:
+                    port_upper = self.port.upper()
+                    while time.time() < deadline:
+                        ports = [p.device.upper() for p in list_ports.comports()]
+                        if port_upper in ports:
+                            break
+                        time.sleep(0.5)
+                    if time.time() >= deadline:
+                        break
+                    time.sleep(1.5)
                     if not self.connect():
                         time.sleep(2.0)
                         continue
@@ -450,8 +486,7 @@ class ReflboTester:
                     after_stats = parsed
                     break
 
-                if mode == "deep":
-                    self.close()
+                self.close()
                 time.sleep(3.0)
 
             if not after_stats:
@@ -521,7 +556,8 @@ def main():
     parser.add_argument("--no-set-rtc", action="store_true", help="Do not auto-set RTC if invalid/unset")
     parser.add_argument("--extended", action="store_true", help="Run extended diagnostic tests T6-T11")
     parser.add_argument("--sleep-cycles", type=int, default=0, help="Run automated sleep test for N cycles (default: 0)")
-    parser.add_argument("--sleep-mode", choices=["deep", "light"], default="deep", help="Sleep mode for --sleep-cycles (default: deep)")
+    parser.add_argument("--sleep-mode", choices=["deep", "light", "both"], default="deep", help="Sleep mode for --sleep-cycles (default: deep)")
+    parser.add_argument("--erase-coredump", action="store_true", help="Erase any existing coredump before running checks")
     args = parser.parse_args()
 
     tester = ReflboTester(port=args.port, baud=args.baud)
@@ -529,6 +565,13 @@ def main():
         sys.exit(1)
 
     try:
+        if args.erase_coredump:
+            erase_out = tester.send_cmd("coredump erase")
+            print(f"coredump erase:\n{erase_out.strip()}")
+            if "coredump: erased" not in erase_out.lower():
+                print("[-] Failed to erase coredump")
+                sys.exit(1)
+
         ok_ver = tester.test_version_and_presets()
         ok_pwr = tester.test_power_stats()
         ok_bat = tester.test_battery()
@@ -550,9 +593,18 @@ def main():
 
         all_ok = ok_ver and ok_pwr and ok_bat and ok_mon
         if args.sleep_cycles > 0:
-            ok_sleep = tester.test_sleep_cycles(args.sleep_cycles, mode=args.sleep_mode)
-            print(f"  Sleep Cycles:        {'PASS' if ok_sleep else 'FAIL'}")
+            modes = ["light", "deep"] if args.sleep_mode == "both" else [args.sleep_mode]
+            ok_sleep = True
+            for m in modes:
+                ok_m = tester.test_sleep_cycles(args.sleep_cycles, mode=m)
+                print(f"  Sleep Cycles ({m}): {'PASS' if ok_m else 'FAIL'}")
+                ok_sleep = ok_sleep and ok_m
             all_ok = all_ok and ok_sleep
+        cd_out = tester.send_cmd("coredump")
+        print(f"coredump:\n{cd_out.strip()}")
+        ok_cd = "coredump: none" in cd_out.lower()
+        print(f"  Coredump Check:      {'PASS' if ok_cd else 'FAIL'}")
+        all_ok = all_ok and ok_cd
         if args.extended:
             ok_t6 = tester.test_t6_focus_lora_sleep()
             ok_t7 = tester.test_t7_rtc_no_jump_on_restart()
