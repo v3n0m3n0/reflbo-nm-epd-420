@@ -146,28 +146,28 @@ static void test_the_drift_reads_as_seconds_a_day(void)
     TEST_ASSERT_EQUAL_INT(0, timekeeping_trim_drift_s10_per_day(&t));
 }
 
-static void test_sw_drift_us_3pct_and_12h_no_overflow(void)
+static void test_sw_drift_us_05pct_and_12h_no_overflow(void)
 {
     const int64_t twelve_h_us = 43200LL * 1000000LL;
-    /* +3% (30,000,000 ppb) over 12h = +1296 s = +1,296,000,000 us */
-    TEST_ASSERT_EQUAL_INT64(1296000000LL, timekeeping_drift_us(twelve_h_us, 30000000));
-    /* -3% (-30,000,000 ppb) over 12h = -1296 s = -1,296,000,000 us */
-    TEST_ASSERT_EQUAL_INT64(-1296000000LL, timekeeping_drift_us(twelve_h_us, -30000000));
+    /* +0.3% (3,000,000 ppb) over 12h = +129.6 s = +129,600,000 us */
+    TEST_ASSERT_EQUAL_INT64(129600000LL, timekeeping_drift_us(twelve_h_us, 3000000));
+    /* -0.3% (-3,000,000 ppb) over 12h = -129.6 s = -129,600,000 us */
+    TEST_ASSERT_EQUAL_INT64(-129600000LL, timekeeping_drift_us(twelve_h_us, -3000000));
     /* Zero and TRIM_NO_DRIFT */
     TEST_ASSERT_EQUAL_INT64(0, timekeeping_drift_us(twelve_h_us, 0));
     TEST_ASSERT_EQUAL_INT64(0, timekeeping_drift_us(twelve_h_us, TRIM_NO_DRIFT));
-    TEST_ASSERT_EQUAL_INT64(0, timekeeping_drift_us(0, 30000000));
+    TEST_ASSERT_EQUAL_INT64(0, timekeeping_drift_us(0, 3000000));
 }
 
-static void test_sw_drift_us_clamps_to_5pct(void)
+static void test_sw_drift_us_clamps_to_05pct(void)
 {
     const int64_t twelve_h_us = 43200LL * 1000000LL;
-    /* +/-5% (50,000,000 ppb) over 12h = +/-2160 s = +/-2,160,000,000 us */
-    TEST_ASSERT_EQUAL_INT64(2160000000LL, timekeeping_drift_us(twelve_h_us, 50000000));
-    TEST_ASSERT_EQUAL_INT64(-2160000000LL, timekeeping_drift_us(twelve_h_us, -50000000));
-    /* Beyond +/-5% is clamped to +/-50,000,000 ppb */
-    TEST_ASSERT_EQUAL_INT64(2160000000LL, timekeeping_drift_us(twelve_h_us, 80000000));
-    TEST_ASSERT_EQUAL_INT64(-2160000000LL, timekeeping_drift_us(twelve_h_us, -80000000));
+    /* +/-0.5% (5,000,000 ppb) over 12h = +/-216 s = +/-216,000,000 us */
+    TEST_ASSERT_EQUAL_INT64(216000000LL, timekeeping_drift_us(twelve_h_us, 5000000));
+    TEST_ASSERT_EQUAL_INT64(-216000000LL, timekeeping_drift_us(twelve_h_us, -5000000));
+    /* Beyond +/-0.5% is clamped to +/-5,000,000 ppb */
+    TEST_ASSERT_EQUAL_INT64(216000000LL, timekeeping_drift_us(twelve_h_us, 8000000));
+    TEST_ASSERT_EQUAL_INT64(-216000000LL, timekeeping_drift_us(twelve_h_us, -8000000));
 }
 
 static void test_sw_drift_measure_span_and_jump_guard(void)
@@ -175,15 +175,26 @@ static void test_sw_drift_measure_span_and_jump_guard(void)
     int32_t ppb = 0;
     /* Under 600s min span: rejected */
     TEST_ASSERT_FALSE(timekeeping_sw_drift_measure(&ppb, 599000LL, 1000LL));
-    /* +3% over 12h (43200s): +1296s = +1296000 ms */
-    TEST_ASSERT_TRUE(timekeeping_sw_drift_measure(&ppb, 43200LL * 1000LL, 1296000LL));
-    TEST_ASSERT_EQUAL_INT32(30000000, ppb);
-    /* -3% over 600s: -18s = -18000 ms */
-    TEST_ASSERT_TRUE(timekeeping_sw_drift_measure(&ppb, 600000LL, -18000LL));
-    TEST_ASSERT_EQUAL_INT32(-30000000, ppb);
-    /* Jump guard: > 5% (e.g. 6% over 600s = 36000 ms) is rejected */
-    TEST_ASSERT_FALSE(timekeeping_sw_drift_measure(&ppb, 600000LL, 36000LL));
-    TEST_ASSERT_EQUAL_INT32(-30000000, ppb);
+    /* +0.3% over 12h (43200s): +129.6s = +129600 ms */
+    TEST_ASSERT_TRUE(timekeeping_sw_drift_measure(&ppb, 43200LL * 1000LL, 129600LL));
+    TEST_ASSERT_EQUAL_INT32(3000000, ppb);
+    /* -0.3% over 600s: -1.8s = -1800 ms */
+    TEST_ASSERT_TRUE(timekeeping_sw_drift_measure(&ppb, 600000LL, -1800LL));
+    TEST_ASSERT_EQUAL_INT32(-3000000, ppb);
+    /* Jump guard: > 0.5% (e.g. 0.6% over 600s = 3600 ms) is rejected */
+    TEST_ASSERT_FALSE(timekeeping_sw_drift_measure(&ppb, 600000LL, 3600LL));
+    TEST_ASSERT_EQUAL_INT32(-3000000, ppb);
+}
+
+static void test_sw_drift_measure_rejects_observed_jump_accepts_2160294_ppb(void)
+{
+    int32_t ppb = 0;
+    /* Observed -14,264,494 ppb jump (e.g. -14264.494 ms over 1000 s) is rejected */
+    TEST_ASSERT_FALSE(timekeeping_sw_drift_measure(&ppb, 1000000LL, -14264LL));
+    TEST_ASSERT_EQUAL_INT32(0, ppb);
+    /* Observed +2,160,294 ppb (+2160.294 ms over 1000 s -> +2,160,000 ppb; exact 1,000,000 ms -> +2,160,294 ppb) */
+    TEST_ASSERT_TRUE(timekeeping_sw_drift_measure(&ppb, 1000000000LL, 2160294LL));
+    TEST_ASSERT_EQUAL_INT32(2160294, ppb);
 }
 
 static void test_temp_excursion(void)
@@ -220,9 +231,10 @@ int main(void)
     RUN_TEST(test_the_record_survives_packing);
     RUN_TEST(test_a_record_of_another_shape_is_refused);
     RUN_TEST(test_the_drift_reads_as_seconds_a_day);
-    RUN_TEST(test_sw_drift_us_3pct_and_12h_no_overflow);
-    RUN_TEST(test_sw_drift_us_clamps_to_5pct);
+    RUN_TEST(test_sw_drift_us_05pct_and_12h_no_overflow);
+    RUN_TEST(test_sw_drift_us_clamps_to_05pct);
     RUN_TEST(test_sw_drift_measure_span_and_jump_guard);
+    RUN_TEST(test_sw_drift_measure_rejects_observed_jump_accepts_2160294_ppb);
     RUN_TEST(test_temp_excursion);
     return UNITY_END();
 }
