@@ -98,25 +98,10 @@ void app_sync_schedule(void)
     }
 }
 
-#define FOCUS_NTP_INTERVAL_S         (12 * 3600)
-#define FOCUS_THERMAL_NTP_INTERVAL_S (2 * 3600)
-#define FOCUS_NTP_RETRY_S            3600
-
 time_t app_sync_due(void)
 {
     if (app_focus_mode_active()) {
-        if (st()->ok_at == 0) {
-            return 0;
-        }
-        uint32_t interval = timekeeping_temp_excursion_active()
-                                ? FOCUS_THERMAL_NTP_INTERVAL_S
-                                : FOCUS_NTP_INTERVAL_S;
-        time_t next = (time_t)st()->ok_at + interval;
-        if (st()->history.failed_at != 0 && st()->history.failed_at >= st()->ok_at) {
-            time_t retry = (time_t)st()->history.failed_at + FOCUS_NTP_RETRY_S;
-            return retry > next ? retry : next;
-        }
-        return next;
+        return sync_focus_next_due(st()->ok_at, st()->history.failed_at, timekeeping_temp_excursion_active());
     }
     return st()->due.at;
 }

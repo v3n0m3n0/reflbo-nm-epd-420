@@ -508,6 +508,26 @@ static void test_a_sync_never_fails_on_the_pc(void)
     TEST_ASSERT_EQUAL_INT(SYNC_STEP_ENERGY + 1, SYNC_STEP_PC); /* after the others */
 }
 
+static void test_focus_next_due(void)
+{
+    /* Never synced -> 0 */
+    TEST_ASSERT_EQUAL_INT64(0, sync_focus_next_due(0, 0, false));
+    TEST_ASSERT_EQUAL_INT64(0, sync_focus_next_due(0, 1700000000, true));
+
+    const uint32_t ok = 1700000000u;
+    /* Nominal 12h */
+    TEST_ASSERT_EQUAL_INT64((time_t)ok + 12 * 3600, sync_focus_next_due(ok, 0, false));
+    /* Thermal 2h */
+    TEST_ASSERT_EQUAL_INT64((time_t)ok + 2 * 3600, sync_focus_next_due(ok, 0, true));
+    /* Failure before ok_at is ignored */
+    TEST_ASSERT_EQUAL_INT64((time_t)ok + 12 * 3600, sync_focus_next_due(ok, (time_t)ok - 10, false));
+    /* Failure after ok_at but retry still earlier than next -> next wins */
+    TEST_ASSERT_EQUAL_INT64((time_t)ok + 12 * 3600, sync_focus_next_due(ok, (time_t)ok + 60, false));
+    /* Failure late enough that retry > next -> retry (failed_at + 1h) wins */
+    TEST_ASSERT_EQUAL_INT64((time_t)ok + 12 * 3600 + 3600, sync_focus_next_due(ok, (time_t)ok + 12 * 3600, false));
+    TEST_ASSERT_EQUAL_INT64((time_t)ok + 2 * 3600 + 3600, sync_focus_next_due(ok, (time_t)ok + 2 * 3600, true));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -550,5 +570,6 @@ int main(void)
     RUN_TEST(test_a_time_in_the_spring_forward_gap_runs_after_it);
     RUN_TEST(test_a_time_in_the_repeated_hour_runs_once);
     RUN_TEST(test_interval_slots_on_the_fall_back_day);
+    RUN_TEST(test_focus_next_due);
     return UNITY_END();
 }

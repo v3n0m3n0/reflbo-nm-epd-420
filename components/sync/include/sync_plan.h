@@ -112,3 +112,11 @@ bool sync_wifi_wanted(const sync_schedule_t *s, time_t t);
 time_t sync_radar_next(time_t after, uint32_t step_s);
 /* Settings text: "HH:MM" <-> minutes after midnight; -1 for anything else. */
 int sync_parse_hhmm(const char *text);
+
+#define SYNC_FOCUS_INTERVAL_S         (12 * 3600)
+#define SYNC_FOCUS_THERMAL_INTERVAL_S (2 * 3600)
+#define SYNC_FOCUS_RETRY_S            3600
+
+/* Next Focus SNTP sync due time (UTC): 0 if never synced (`ok_at == 0`), otherwise 12h nominal
+ * or 2h on thermal excursion, with 1h backoff after a failure at `failed_at >= ok_at`. */
+time_t sync_focus_next_due(uint32_t ok_at, time_t failed_at, bool thermal_excursion);

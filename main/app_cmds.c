@@ -398,7 +398,14 @@ static int sync_body(int argc, char **argv)
                        st->last_detail[i][0] != '\0' ? ": " : "", st->last_detail[i]);
             }
         }
-        print_time(st->due.retry ? "next (a retry)" : "next", st->due.at);
+        if (app_focus_mode_active()) {
+            time_t focus_due = app_sync_due();
+            printf("focus SNTP: %s\n",
+                   timekeeping_temp_excursion_active() ? "2h thermal (>=5C)" : "12h nominal");
+            print_time("focus next", focus_due);
+        } else {
+            print_time(st->due.retry ? "next (a retry)" : "next", st->due.at);
+        }
         return 0;
     }
     return usage(k_usage);

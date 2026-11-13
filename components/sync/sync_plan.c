@@ -242,3 +242,17 @@ int sync_first_failed(const uint8_t result[SYNC_STEP_COUNT])
     }
     return SYNC_STEP_COUNT;
 }
+
+time_t sync_focus_next_due(uint32_t ok_at, time_t failed_at, bool thermal_excursion)
+{
+    if (ok_at == 0) {
+        return 0;
+    }
+    time_t interval = thermal_excursion ? SYNC_FOCUS_THERMAL_INTERVAL_S : SYNC_FOCUS_INTERVAL_S;
+    time_t next = (time_t)ok_at + interval;
+    if (failed_at != 0 && failed_at >= (time_t)ok_at) {
+        time_t retry = failed_at + SYNC_FOCUS_RETRY_S;
+        return retry > next ? retry : next;
+    }
+    return next;
+}
