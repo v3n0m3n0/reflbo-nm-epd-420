@@ -65,7 +65,7 @@ jobs:
           leaks = 0
           for p in bins:
               data = open(p, "rb").read()
-              hits = [m.group(0).decode("ascii", "ignore") for pat in patterns for m in pat.finditer(data)]
+              hits = [m.group(0).decode("ascii", "ignore") for pat in patterns for m in re.finditer(pat, data)]
               print(f"{p}: {len(data)} B, leaks={hits}")
               leaks += len(hits)
           sys.exit(1 if leaks else 0)
@@ -73,6 +73,8 @@ jobs:
 
       - name: Build & run host C/C++ unit and golden tests (Release)
         run: |
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends zlib1g-dev >/dev/null
+          . /opt/esp/idf/export.sh >/dev/null
           REFLBO_IDF_PATH=/opt/esp/idf cmake -S test/host -B build-host -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build-host
           ctest --test-dir build-host --output-on-failure

@@ -91,7 +91,7 @@ for path in files:
     if not os.path.exists(path):
         continue
     data = open(path, "rb").read()
-    hits = [m.group(0).decode("ascii", "ignore") for pat in patterns for m in pat.finditer(data)]
+    hits = [m.group(0).decode("ascii", "ignore") for pat in patterns for m in re.finditer(pat, data)]
     print(f"  {path}: {len(data)} B, leak_hits={len(hits)} {hits if hits else ''}")
     if hits:
         leaks += len(hits)
