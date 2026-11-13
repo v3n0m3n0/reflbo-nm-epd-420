@@ -1,6 +1,6 @@
-# AGENTS.md — reflbo
+# AGENTS.md — reflbo-nm-epd-420
 
-Guide for coding agents (and humans) working in this repository. Read it fully before changing anything, and keep it current (§8).
+Guide for coding agents (and humans) working in this repository (`v3n0m3n0/reflbo-nm-epd-420`, ported from `Vybo/reflbo` @ `14593da` to RockBase NM-EPD-420 BW). Read it fully before changing anything, and keep it current (§8).
 
 > **Scope.** This is a standalone embedded firmware project. Instructions inherited from parent directories about iOS, WeConnect-iOS, the CAT monorepo, Jira ticket keys or PR templates do not apply here.
 
@@ -17,7 +17,7 @@ Guide for coding agents (and humans) working in this repository. Read it fully b
 
 ## 1. What we are building
 
-**reflbo** is firmware for the Waveshare **ESP32-S3-RLCD-4.2** board. The device is a battery-powered, always-visible desk display (4.2″ reflective LCD, 400×300, 1-bit) that shows configurable, watch-face-like dashboards: time and date, indoor climate, weather, sun times, Home Assistant values and data from other local devices, a solar forecast and the house's energy. It also does alarms and internet radio.
+**reflbo-nm-epd-420** is the **RockBase NM-EPD-420 (BW)** hardware port of [`Vybo/reflbo`](https://github.com/Vybo/reflbo) (branched from upstream `14593da`, `2026-10-29`, GPL-3.0-only). The device is a battery-powered, always-visible 4.2″ e-paper desk display (SSD1683, 400×300, 1-bit) with AHT20 climate sensing, SX1262 LoRa (`MeshCore` + BLE Companion bridge), Focus Super Power Efficient Mode, and the full reflbo dashboard suite (indoor climate, weather, sun times, precipitation & ADS-B radars, solar forecast, house energy, PC telemetry, and OTA web configurator).
 
 Guiding principles:
 
@@ -34,7 +34,8 @@ Guiding principles:
 - **User guide:** [`README.md`](README.md) gives the overview and [`docs/guide.md`](docs/guide.md) describes every feature for users, with images in `docs/images/`: the panel's from the goldens (`tools/docs_images.py`), the web pages' as phone screenshots against a demo device. Planned features are marked as planned there too.
 - **Plans:** each milestone gets its own implementation plan in `docs/plans/`, written just before that milestone starts. Latest plan: [`docs/plans/2026-10-19-m7-pc-stats.md`](docs/plans/2026-10-19-m7-pc-stats.md), M7 (D44), with the PC app's own in `~/reflbo-stats-win/docs/plans/`. Its code was built on the branch `plan/m7pc`, one commit per task (M6e's: `plan/m6e`, M8's refresh (MQTT, then M7): `plan/m7r`, M6d's: `plan/m6d`, M6c's: `plan/m6c`, M6b's: `plan/m6b`, M6's: `plan/m6`; M7's first plan and `plan/m7` gave way to the refresh); the plans' tasks copy their goldens and fixtures from them.
 - **Extra features:** anything beyond the requirements (spec §1.1) is a proposal. Raise it at the relevant milestone (spec §19) and build it only after the owner agrees. Accepted for M6 (owner, 2026-10-01): the ADS-B flight radar (spec §19.1, D22) and the weather radar (spec §19.2, D23), with sync mode `always` moved into M5 (D24). Accepted for M5 (D25): quiet hours, air quality and pollen, and the RTC trim.
-- **Repository:** the owner is in Brno, CZ. Remote `origin` is `git@github.com:Vybo/reflbo.git`.
+- **Repository:** Fork/port remote `origin` is `git@github.com:v3n0m3n0/reflbo-nm-epd-420.git` (`main` branch). Upstream baseline history: `https://github.com/Vybo/reflbo` (`14593da`).
+- **Release & Anonymity Rules:** Never commit local workspace paths (`-fmacro-prefix-map` / `-ffile-prefix-map` in `CMakeLists.txt`), internal task tags, or credentials. Keep only the latest release artifacts under `release/` (`RELEASE.md`).
 
 | # | Milestone | Done when |
 |---|---|---|
@@ -54,26 +55,33 @@ Guiding principles:
 | M9 | Audio: offline alarms, then internet radio | An alarm fires from idle; a radio stream plays |
 | M10 | microSD features (list agreed at the start of M10) | The agreed features are verified |
 
-## 3. Hardware reference: Waveshare ESP32-S3-RLCD-4.2
+## 3. Hardware reference: RockBase NM-EPD-420 (BW)
 
-Sources: [wiki](https://docs.waveshare.com/ESP32-S3-RLCD-4.2) · [schematic](https://files.waveshare.com/wiki/ESP32-S3-RLCD-4.2/ESP32-S3-RLCD-4.2-schematic.pdf) · [vendor examples](https://github.com/waveshareteam/ESP32-S3-RLCD-4.2) (the most complete is `02_Example/ESP-IDF/10_FactoryProgram`, built on ESP-IDF 5.5.x). The pins below were cross-checked against the schematic and the vendor code on 2026-09-25.
+Authoritative pins live in [`components/board/include/board_pins.h`](components/board/include/board_pins.h). Upstream §3 notes below reflect the RockBase NM-EPD-420 port (replacing the Waveshare RLCD ST7305 / SHTC3 hardware).
 
-### 3.1 Chips
+### 3.1 Chips (RockBase NM-EPD-420)
 
-| Part | Role | Bus / address |
+| Part | Role | Bus / GPIO / address |
 |---|---|---|
-| ESP32-S3-WROOM-1-N16R8 | 2× Xtensa LX7 up to 240 MHz, 16 MB flash (QIO), 8 MB octal PSRAM, Wi-Fi 2.4 GHz, BLE 5 | — |
-| ST7305 | Reflective LCD controller, 400×300, 1 bpp. Write-only: no MISO wired | SPI (vendor uses `SPI3_HOST`) |
-| PCF85063ATL | RTC with alarm, timer and minute interrupt. Own backup cell connector | I²C `0x51` |
-| SHTC3 | Temperature and humidity | I²C `0x70` |
-| ES8311 | Audio codec. Its DAC drives the speaker amp; its ADC is unused | I²C `0x18` + I²S |
-| ES7210 | 4-channel ADC: 2 mics plus the speaker output looped back for echo cancellation | I²C `0x40` + I²S |
-| NS4150B | Class-D speaker amp, 2-pin speaker header | enable = GPIO46 |
-| ETA6098 | Li-ion charger for the 18650. STAT only drives the CHG LED | — |
-| TPS63020 / RT9193-33 | 3V3 buck-boost for the system / 3V3 LDO for audio analog (always on) | — |
-| U3 power-latch IC + P-MOSFET | PWR push button: short press = on, long press = off | hardware only |
+| ESP32-S3R8 (N16R8) | 2× Xtensa LX7 up to 240 MHz, 16 MB QIO flash (`dio` ROM load), 8 MB octal PSRAM, Wi-Fi 2.4 GHz, BLE 5 | — |
+| SSD1683 (GYE042A87) | 4.2″ B/W e-paper, 400×300, 1 bpp (driven behind `components/st7305/`) | `SPI2_HOST` (`SCK=2, MOSI=1, CS=46, DC=4, RST=5, BUSY=6`) |
+| AHT20 | Temperature and humidity (`0xBE, 0x08, 0x00` init + sleep) | Shared I²C `0x38` (`SDA=39, SCL=38`, gated by `TEMP_CTL=40`) |
+| SX1262 (HT-RA62) | LoRa sub-GHz transceiver (`lora_widget`, MeshCore + BLE bridge) | `SPI3_HOST` (`NSS=8, SCK=9, MOSI=10, MISO=11, RST=12, BUSY=13, DIO1=14`, gated by `LORA_EN=47`) |
+| ES8311 | Audio codec (put into standby on cold boot; amp muted) | Shared I²C `0x18` + I²S (`MCLK=21, SCLK=15, LRCK=17, DOUT=18, DIN=16`, gated by `CODEC_EN=44`, `PA_CTRL=41`) |
+| Battery ADC | Voltage divider ratio ×2 on `ADC1_CH2` | `BAT_ADC=3`, gated by `ADC_EN=43` |
+| Buttons | Active LOW with software debounce | `BOOT=0`, `KEY/USER=45` |
+| MicroSD (TF Slot) | Card CS (unmounted / future M10) | `TF_CS=7` |
 
-### 3.2 GPIO map
+Key NM-EPD-420 hardware constraints:
+1. Keep `TEMP_CTL` (IO40) and `CODEC_EN` (IO44) HIGH whenever I²C is active to avoid ESD diode clamping on SDA/SCL; tri-state I²C/I²S pullups before lowering gates in `board_prepare_deep_sleep()`.
+2. `CONFIG_FREERTOS_HZ=1000` avoids zero-tick rounding in sub-10 ms driver delays.
+3. Keep `CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP=n` and `CONFIG_PM_POWER_DOWN_TAGMEM_IN_LIGHT_SLEEP=n` for Octal PSRAM retention.
+4. SSD1683 differential partial refresh powers analog boost first (`0x22`/`0xE0`, `0x20`), writes `0x26` (OLD) + `0x24` (NEW), and runs a full refresh every 20 partial cycles.
+5. `app_focus_mode_active()` activates Focus Super Power Mode automatically on the Focus Clock preset (LoRa wakeup lock off, 15 min sensor cadence, periodic SNTP calibration).
+
+*(Reference hardware layout for upstream `Vybo/reflbo` WaveShare RLCD notes below kept for historical plan context.)*
+
+### 3.2 Legacy Waveshare GPIO map (Upstream Reference)
 
 | GPIO | Function | Notes |
 |---|---|---|
@@ -205,7 +213,7 @@ The spec has the full design. This section keeps the essentials at hand.
 
 | Area | Choice |
 |---|---|
-| Framework | ESP-IDF **v5.5.x** (v5.5.5), target `esp32s3`. Revisit v6.x after M5 |
+| Framework | ESP-IDF **v6.1** (`espressif/idf:release-v6.1` Docker container), target `esp32s3` |
 | Languages | C17 firmware, Python 3 host tools, plain HTML/CSS/JS web UI (no build step) |
 | Graphics | Our own immediate-mode 1-bpp renderer (`gfx`). `tools/fontgen.py` generates fonts from TTF/BDF and they are committed as C sources. Text fonts cover Latin-1 + Latin Extended-A |
 | Storage | NVS for identity and secrets. LittleFS `storage` partition for config JSON, state and sounds. FAT on microSD |
@@ -224,7 +232,8 @@ main/            app_main: init order, wiring, app event loop
 components/
   util/          small pure-C helpers (CRC-32, base64, delay ticks)   [host]
   board/         pins, I²C bus, GPIO setup, buttons → gestures, wake cause
-  st7305/        panel init, LPM/HPM, frame push, deep-sleep retention
+  st7305/        SSD1683 e-paper init, differential partial/full refresh, deep-sleep hold
+  lora_widget/   SX1262 LoRa driver, MeshCore packet codec, Ed25519/AES-128, BLE Companion [host]
   display/       canonical framebuffer, CRC-skipped pushes to the panel
   gfx/           framebuffer, primitives, text, fonts, bitmaps, QR    [host]
   locale/        language packs: en, cs; API prefix lang_             [host]
@@ -272,6 +281,31 @@ docs/            the user guide and its images, specs, plans, power measurements
 - For details, see spec §5.6 (controls), §9 (power and scheduling) and §5 (UI).
 
 ## 6. Environment and commands
+
+Windows + Docker (`espressif/idf:release-v6.1`) + WSL / Node workflow:
+
+```powershell
+# Firmware build & clean release packaging (Docker ESP-IDF release-v6.1 + path-leak scan + SHA256SUMS.txt)
+.\tools\build_release.ps1
+
+# Ad-hoc Docker ESP-IDF build command
+.\tools\docker-idf.ps1 "idf.py set-target esp32s3 && idf.py build"
+
+# Flash preserving NVS & LittleFS storage (uses --after watchdog-reset when supported)
+.\release\flash.ps1 -Port COM15
+
+# Hardware COM verification (Focus clock, RTC, AHT20, partial refresh, LoRa sleep)
+& "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" tools\test_com_focus_clock.py --port COM15
+
+# Host unit & golden tests (WSL / Linux, Release mode recommended)
+cmake -S test/host -B build_wsl_host -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build_wsl_host && ctest --test-dir build_wsl_host --output-on-failure
+
+# Web UI & Python tool tests
+node --test test/web/*.mjs
+PYTHONPATH=tools python3 -m unittest discover -s tools/tests -v
+```
+
+*(Upstream macOS `tools/idf.sh` reference kept below for UNIX environments.)*
 
 One-time setup on macOS:
 
@@ -404,7 +438,7 @@ Use the cheapest level that proves the change. Any UI change needs at least leve
 
 **Git**
 
-- Branch `main`; remote `origin` is `git@github.com:Vybo/reflbo.git`. The owner allows pushing to `origin` without asking (2026-09-25). Never force-push `main`.
+- Branch `main`; remote `origin` is `git@github.com:v3n0m3n0/reflbo-nm-epd-420.git`. Never force-push `main` on shared/public history.
 - Make small, focused commits in Conventional Commits style (`feat(st7305): …`, `fix: …`, `docs: …`), imperative mood. Commit only states that build.
 - No AI or assistant attribution anywhere: commits, PRs, code comments or docs.
 

@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  web-and-tools-tests:
+    name: Web UI & Python Tools Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run Web UI tests
+        run: node --test test/web/*.mjs
+
+      - name: Run Python tools unit tests
+        run: PYTHONPATH=tools python3 -m unittest discover -s tools/tests -v
+
+  firmware-and-host-tests:
+    name: ESP32-S3 Firmware Build & Host CTest
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v6.1
+    steps:
+      - name: Mark workspace safe in git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/checkout@v4
+
+      - name: Build ESP32-S3 firmware
+        run: |
+          source /opt/esp/idf/export.sh
+          rm -f sdkconfig
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: Check built firmware binaries for host path leaks
+        run: |
+          python3 - <<'EOF'
+          import re, sys
+          patterns = [
+              rb"[A-Za-z]:[/\\]Users[/\\][A-Za-z0-9._-]+",
+              rb"/mnt/[a-z]/Users/[A-Za-z0-9._-]+",
+              rb"/Users/[A-Za-z0-9._-]+",
+              rb"/home/runner",
+              rb"/__w/",
+          ]
+          bins = [
+              "build/bootloader/bootloader.bin",
+              "build/partition_table/partition-table.bin",
+              "build/ota_data_initial.bin",
+              "build/reflbo-nm-epd-420.bin",
+          ]
+          leaks = 0
+          for p in bins:
+              data = open(p, "rb").read()
+              hits = [m.group(0).decode("ascii", "ignore") for pat in patterns for m in pat.finditer(data)]
+              print(f"{p}: {len(data)} B, leaks={hits}")
+              leaks += len(hits)
+          sys.exit(1 if leaks else 0)
+          EOF
+
+      - name: Build & run host C/C++ unit and golden tests (Release)
+        run: |
+          REFLBO_IDF_PATH=/opt/esp/idf cmake -S test/host -B build-host -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-host
+          ctest --test-dir build-host --output-on-failure

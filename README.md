@@ -1,83 +1,122 @@
 # reflbo-nm-epd-420
 
-Port oprogramowania **[reflbo (Vybo)](https://github.com/Vybo/reflbo)** dla platformy sprzętowej **RockBase NM-EPD-420** (ESP32-S3R8, 4.2″ e-papier SSD1683, moduł radiowy SX1262 LoRa, kodek audio ES8311, czujnik klimatu AHT20).
+**Ultra-low-power e-paper dashboard, LoRa MeshCore companion, and climate station firmware for the RockBase NM-EPD-420 (BW) (ESP32-S3R8 + SSD1683 4.2″ 400×300 E-Paper + SX1262 + AHT20).**
 
-Firmware zachowuje kompletny ekosystem dashboardów reflbo (zegar, kalendarz, klimat indoor, prognoza pogody Open-Meteo, radar deszczu, radar lotów ADSB, prognoza solarna, statystyki PC z HWiNFO, konfigurator Web), adaptując jednocześnie warstwę sprzętową do możliwości i specyfiki NM-EPD-420.
+**Latest Release:** [`v1.0.0`](docs/releases/v1.0.0.md) · [`RELEASE_NOTES.md`](RELEASE_NOTES.md) · [`release/README.md`](release/README.md)
 
 ---
 
-## 🛠️ Specyfikacja sprzętowa & Mapa pinów
+## Upstream Attribution & License
 
-Authoritative source: `components/board/include/board_pins.h` oraz `src/bsp/nm_display_420/config.h`.
+This project is an independent hardware port derived from Dan Vybiral's [**`Vybo/reflbo`**](https://github.com/Vybo/reflbo) at base commit [`14593da`](https://github.com/Vybo/reflbo/commit/14593da) (`2026-10-29`, `spec r56`).
 
-| Peryferium | Pin ESP32-S3 | Funkcja / Rejestr | Uwagi |
+- **License:** GNU General Public License, version 3 only (`GPL-3.0-only`). See [`LICENSE`](LICENSE), [`NOTICE`](NOTICE), and [`THIRD_PARTY.md`](THIRD_PARTY.md) (including the GPL §7 additional permission for Espressif ESP-IDF binary object libraries).
+- **Added Third-Party Code:** LoRa packet/companion protocol and cryptography components in `components/lora_widget/` incorporate code adapted from **MeshCore** (`MIT`), **orlp/ed25519** (`zlib`), and **tiny-AES-c** (`Public domain / Unlicense`).
+- **Corresponding Source:** Full source code for every release binary is published in this repository ([`https://github.com/v3n0m3n0/reflbo-nm-epd-420`](https://github.com/v3n0m3n0/reflbo-nm-epd-420)).
+
+---
+
+## Key Features
+
+- **4.2″ SSD1683 B/W E-Paper Engine (`400×300`, 1 bpp):** Native SPI driver behind the `st7305` display abstraction featuring fast differential partial refreshes (`0x26` OLD / `0x24` NEW RAM synchronization), automatic full-refresh anti-ghosting sweep every 20 partial updates, AHT20 ambient temperature lookup, and BUSY timeout protection (`panel status`).
+- **Watch-Face Dashboard & Custom Split Builder:** Fixed layouts (*Classic*, *Grid*, *Weather*, *Focus*, *Radar*, *Flights*, *Solar*, *Energy*) plus a user-configurable up-to-24-cell **Split** layout editor with live Web UI bitmap preview, custom slot titles, charts, bars, rings, gauges, and preset cycling schedules.
+- **SX1262 LoRa & MeshCore Companion Bridge:** Full SX1262 transceiver driver on `SPI3_HOST` with gated `LORA_EN` power control, MeshCore flood/direct packet codec, Ed25519 identity & AES-128 channel crypto, NimBLE GATT companion bridge, on-device LoRa dashboard cards, and USB CLI (`lora [status|reset|on|off|advert|discover|send|cli]`, `ver`).
+- **Focus Super Power Efficient Mode:** Switching to the **Focus clock** preset automatically activates Super Power Efficient mode—gating off LoRa wakeup locks and heavy background syncs, spacing AHT20 sampling to 15 minutes, updating the clock minute-by-minute via differential partial refreshes, and running periodic SNTP time/drift syncs.
+- **Indoor Climate & Battery Gauge:** AHT20 temperature/humidity sensor (`0xBE, 0x08, 0x00` init + post-read sleep), configurable calibration offsets, gated battery ADC divider (`ADC_EN` pulsed per measurement), and custom/learned discharge curve tracking.
+- **Connected Data Sources & Local Web UI:**
+  - **Weather & Air:** Open-Meteo forecasts, UV, AQI, pollen, and local astronomical sunrise/sunset.
+  - **Radars:** ČHMÚ / RainViewer precipitation radar and `adsb.fi` / `adsb.lol` live aircraft map.
+  - **Solar & Energy:** Open-Meteo PV model, Forecast.Solar, Solcast, and SolaX Cloud (Developer API & Token ID).
+  - **PC Telemetry:** WebSocket streaming from `reflbo-stats`.
+  - **Device Web Configurator:** Responsive HTML/JS portal over SoftAP or STA (`reflbo-XXXX.local`), with OTA updates and JSON backup/restore.
+
+---
+
+## RockBase NM-EPD-420 Hardware Pinout
+
+Authoritative pin definitions live in [`components/board/include/board_pins.h`](components/board/include/board_pins.h):
+
+| Subsystem | Pin / Interface | GPIO | Runtime Notes |
 |---|---|---|---|
-| **E-Paper SCK** | GPIO2 | SPI2 Clock | Szyna SPI wyświetlacza |
-| **E-Paper MOSI** | GPIO1 | SPI2 MOSI | Dane do SSD1683 |
-| **E-Paper CS** | GPIO46 | Chip Select | Active LOW |
-| **E-Paper DC** | GPIO4 | Data / Command | 0 = Command, 1 = Data |
-| **E-Paper RST** | GPIO5 | Hardware Reset | Active LOW |
-| **E-Paper BUSY** | GPIO6 | Busy Status | 1 = Busy, 0 = Ready |
-| **I²C SDA** | GPIO39 | Magistrala I²C | AHT20 (0x38), ES8311 (0x18) |
-| **I²C SCL** | GPIO38 | Magistrala I²C | Zewnętrzne rezystory pull-up 2.2kΩ |
-| **TEMP_CTL** | GPIO40 | Zasilanie AHT20 | **Musi być stale HIGH w runtime** |
-| **CODEC_EN** | GPIO44 | Zasilanie ES8311 | **Musi być stale HIGH w runtime** |
-| **PA_CTRL** | GPIO41 | Wzmacniacz audio | Active HIGH (LOW = wyciszony, 0 mA) |
-| **ADC_EN** | GPIO43 | Kluczowanie dzielnika baterii | HIGH = pomiar, LOW = eliminacja upływu prądu |
-| **BATT_ADC** | GPIO3 | Wejście analogowe (ADC1_CH2) | Dzielnik napięcia ×2 |
-| **LORA_EN** | GPIO47 | Zasilanie SX1262 | Active HIGH |
-| **LORA_NSS** | GPIO8 | LoRa SPI Chip Select | SPI3_HOST |
-| **LORA_SCK** | GPIO9 | LoRa SPI Clock | SPI3_HOST |
-| **LORA_MOSI** | GPIO10 | LoRa SPI MOSI | SPI3_HOST |
-| **LORA_MISO** | GPIO11 | LoRa SPI MISO | SPI3_HOST |
-| **LORA_RST** | GPIO12 | LoRa Reset | Active LOW |
-| **LORA_BUSY** | GPIO13 | LoRa Busy | 1 = Busy |
-| **LORA_DIO1** | GPIO14 | LoRa IRQ / Ext1 Wakeup | Źródło wybudzania z deep sleep |
-| **Przycisk USER** | GPIO45 | Przycisk nawigacji (KEY w reflbo) | Active LOW, pull-up włączony |
-| **Przycisk BOOT** | GPIO0 | Przycisk BOOT / akcji | Active LOW |
+| **E-Paper SSD1683 (400×300)** | SPI2 (`SCK` / `MOSI` / `CS` / `DC` / `RST` / `BUSY`) | `2` / `1` / `46` / `4` / `5` / `6` | Write-only panel; BUSY hardware polling |
+| **LoRa SX1262 (HT-RA62)** | SPI3 (`NSS` / `SCK` / `MOSI` / `MISO`) | `8` / `9` / `10` / `11` | Dedicated SPI bus |
+| **LoRa Control & IRQ** | `RST` / `BUSY` / `DIO1` / `LORA_EN` | `12` / `13` / `14` / `47` | `LORA_EN` active HIGH; `DIO1` ext1 wake capable |
+| **Shared I²C Bus** | `SDA` / `SCL` (AHT20 `0x38`, ES8311 `0x18`) | `39` / `38` | `TEMP_CTL` & `CODEC_EN` stay HIGH while active |
+| **Power Gates** | `TEMP_CTL` / `CODEC_EN` / `PA_CTRL` / `ADC_EN` | `40` / `44` / `41` / `43` | `PA_CTRL` kept LOW; `ADC_EN` HIGH only during reads |
+| **Battery ADC** | `BAT_ADC` (`ADC1_CH2`, 100k/100k ×2) | `3` | Sampled asynchronously via `ADC_EN` gate |
+| **Buttons** | `BOOT` / `KEY` (`USER`) | `0` / `45` | Active LOW with software debounce |
+| **I²S Audio (ES8311)** | `MCLK` / `SCLK` / `LRCK` / `DOUT` / `DIN` | `21` / `15` / `17` / `18` / `16` | ES8311 placed in I²C standby at cold boot |
+| **MicroSD (TF Slot)** | `TF_CS` | `7` | Chip select |
+
+### Hardware & Firmware Design Safeguards
+1. **1 kHz FreeRTOS Tick (`CONFIG_FREERTOS_HZ=1000`):** Prevents `pdMS_TO_TICKS(<10)` from rounding to zero ticks in display and I²C polling delays.
+2. **SSD1683 Differential Partial Refresh Sequence:** Powers on the analog boost (`0x22`/`0xE0`, `0x20`, BUSY wait) before writing `0x26` (previous frame) and `0x24` (new frame), syncing both RAM banks cleanly.
+3. **Octal PSRAM Light Sleep Retention:** Keeps CPU domain and tag memory powered (`CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP=n`, `CONFIG_PM_POWER_DOWN_TAGMEM_IN_LIGHT_SLEEP=n`) to prevent Octal PSRAM cache corruption across light sleep wakes.
+4. **Shared I²C ESD Diode Protection:** Holds `TEMP_CTL` (IO40) and `CODEC_EN` (IO44) HIGH whenever I²C is active, and cleanly resets I²C/I²S pullups in `board_prepare_deep_sleep()` before lowering power gates.
+5. **AHT20 Calibration Command:** Initializes AHT20 with `0xBE, 0x08, 0x00` and puts the sensor to sleep after sampling.
 
 ---
 
-## ⚡ Pułapki sprzętowe uwzględnione w implementacji
+## Flashing Prebuilt Release (`v1.0.0`)
 
-1. **FreeRTOS Tick Trap:** Wymuszone `CONFIG_FREERTOS_HZ=1000`. Przy domyślnym taktowaniu 100 Hz makro `pdMS_TO_TICKS(5)` ewaluuje do 0, co zamienia oczekiwanie na flagę BUSY w pętlę bez opóźnienia i przedwcześnie przerywa odświeżanie e-papieru.
-2. **SSD1683 Partial Refresh Power-On:** Przed wysłaniem sekwencji różnicowego odświeżania częściowego (`0xFC`) włączana jest pompa napięć analogowych (`0x22` + `0xE0`, `0x20`, `read_busy`), a po odświeżeniu nowy bufor jest synchronizowany do banku pamięci `0x26`.
-3. **Szybkie pełne odświeżanie:** Zastosowano syntetyczny profil temperaturowy LUT 90°C (`0x1A`, `0x64`, `0x22`, `0xD7`), redukujący czas pełnego odświeżenia do ok. 1.2 sekundy (zamiast standardowych 3–4 sekund).
-4. **Współdzielona szyna I²C:** Piny `CODEC_EN` (GPIO44) i `TEMP_CTL` (GPIO40) są stale podciągnięte do stanu wysokiego podczas pracy. Stan niski na którymkolwiek z nich powodowałby upływ prądu przez diody ESD do masy i ściągnięcie SDA/SCL do 0V.
-5. **Kalibracja AHT20:** Inicjalizacja AHT20 używa komendy `0xBE, 0x08, 0x00` (zamiast `0xE1` specyficznego dla AHT10).
-6. **Kluczowanie ADC baterii:** Zasilanie dzielnika napięcia na GPIO43 jest włączane tylko na czas pomiaru (z 20 ms czasem stabilizacji), po czym natychmiast wyłączane, chroniąc ogniwo przed pasożytniczym rozładowaniem w czasie uśpienia.
-7. **Pasywny monitor LoRa SX1262:** Zintegrowany widget nasłuchujący pakiety w standardzie MeshCore na paśmie EU868 (868.0 MHz, SF7, BW250kHz, CR4/5).
+Prebuilt binaries for the latest release live in [`release/`](release/) (see [`release/README.md`](release/README.md) for checksums and offsets). Historical release archives are published on **GitHub Releases**.
+
+### Quick Flash on Windows (Preserves NVS & LittleFS Config)
+```powershell
+.\release\flash.ps1 -Port COM15
+```
+Or run `.\release\flash.bat COM15`.
+
+### Unified Factory Flash (`0x0`, 16 MB QIO/DIO Image)
+```sh
+python -m esptool --chip esp32s3 --port COM15 --baud 921600 \
+  --before default-reset --after watchdog-reset write_flash \
+  --flash_mode dio --flash_size 16MB --flash_freq 80m \
+  0x0 release/reflbo-nm-epd-420-full-16MB-v1.0.0.bin
+```
+
+> **ESP32-S3 USB-Serial-JTAG Reset Note:** If the board entered ROM download mode via the `BOOT` button, a regular USB reset stays in download mode. The provided scripts automatically prefer `--after watchdog-reset` (requires `esptool >= v4.7`) so the chip re-samples strapping pins and boots the firmware immediately; otherwise, power-cycle using `PWR`.
 
 ---
 
-## 🚀 Budowanie i wgrywanie firmware
+## Building & Testing from Source
 
-### 1. Kompilacja w środowisku Docker (ESP-IDF v6.1)
-
-W katalogu projektu:
+### 1. Firmware Build & Release Packaging (Docker ESP-IDF `release-v6.1`)
 ```powershell
-.\tools\docker-idf.ps1
+# Interactive or one-shot build inside espressif/idf:release-v6.1
+.\tools\docker-idf.ps1 "idf.py set-target esp32s3 && idf.py build"
+
+# Full release pipeline: clean build + 0x0 merge + binary leak scan + release/ staging + SHA256SUMS.txt
+.\tools\build_release.ps1
 ```
-lub bezpośrednio:
+All build paths are scrubbed via `-fmacro-prefix-map` / `-ffile-prefix-map` in [`CMakeLists.txt`](CMakeLists.txt). Never edit `sdkconfig` directly—put defaults in [`sdkconfig.defaults`](sdkconfig.defaults) and local Wi-Fi overrides in the gitignored `sdkconfig.defaults.local`.
+
+### 2. Host CTest, Web UI & Python Tooling Suites
+```bash
+# Host C/C++ unit tests & golden render checks (Release mode recommended for pixel-grid speed)
+REFLBO_IDF_PATH=/opt/esp/idf cmake -S test/host -B build_host -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build_host
+ctest --test-dir build_host --output-on-failure
+
+# Web UI unit tests (no npm install needed)
+node --test test/web/*.mjs
+
+# Python host-tooling tests
+PYTHONPATH=tools python3 -m unittest discover -s tools/tests -v
+```
+
+### 3. Hardware Verification Console (`115200` baud USB-Serial-JTAG)
+Run automated Focus/display/sensor/RTC checks on a connected board (`COM15`):
 ```powershell
-docker run --rm -v "${PWD}:/project" -w /project espressif/idf:release-v6.1 idf.py build
+& "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" tools\test_com_focus_clock.py --port COM15
 ```
-
-### 2. Wgrywanie na urządzenie (Windows)
-
-```powershell
-.\tools\flash.ps1 -Port COM12
-```
-*Uwaga: Skrypt automatycznie wymusza reset kontrolera przez watchdog (`--after watchdog-reset`), co zapobiega zablokowaniu ESP32-S3 w bootloaderze ROM.*
-
-### 3. Monitorowanie portu szeregowego
-
-```powershell
-pio device monitor -b 115200 -p COM12
-```
+Key console commands: `version`, `panel status`, `sensors`, `battery`, `rtc get`, `power stats`, `sleep stats`, `lora status`, `screenshot`, `preset list`.
 
 ---
 
-## 📄 Licencja
-
-GPL-3.0-only. Wykorzystuje komponenty Open-Source zgodnie z [NOTICE](NOTICE) i [THIRD_PARTY.md](THIRD_PARTY.md).
+## Documentation
+- [**Release Notes (`RELEASE_NOTES.md`)**](RELEASE_NOTES.md) & [**`v1.0.0` Details**](docs/releases/v1.0.0.md)
+- [**Release Policy (`RELEASE.md`)**](RELEASE.md)
+- [**User Guide (`docs/guide.md`)**](docs/guide.md)
+- [**Power Measurements (`docs/power.md`)**](docs/power.md)
+- [**Developer & Architecture Guide (`AGENTS.md`)**](AGENTS.md)

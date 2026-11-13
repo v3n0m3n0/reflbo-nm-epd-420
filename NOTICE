@@ -27,3 +27,13 @@ as well as that of the covered work.
 
 Third-party components keep their own licences. Their authors and licences
 are listed in THIRD_PARTY.md.
+
+---
+
+RockBase NM-EPD-420 Port (`reflbo-nm-epd-420`)
+Copyright 2026 v3n0m3n0
+
+Derived from `Vybo/reflbo` (`https://github.com/Vybo/reflbo`, commit `14593da`,
+2026-10-29) under the GNU General Public License, version 3 only. Includes port
+drivers for RockBase NM-EPD-420 hardware (SSD1683 e-paper, AHT20 sensor, SX1262
+LoRa radio, MeshCore Companion protocol/BLE bridge, and Focus Super Power Mode).

@@ -2241,7 +2241,7 @@ void lora_widget_exec_cli(const char *cmd, lora_config_t *cfg_inout, bool *cfg_c
 
     /* Standard single-word / exact-match MeshCore CLI commands */
     if (strcasecmp(cmd, "ver") == 0) {
-        snprintf(reply, reply_sz, "MeshCore-NM-EPD-420-BW v1.18.0-mod-rev0.2\n");
+        snprintf(reply, reply_sz, "reflbo-nm-epd-420 v1.0.0 (MeshCore v1.18.0)\n");
         return;
     }
     if (strcasecmp(cmd, "board") == 0) {

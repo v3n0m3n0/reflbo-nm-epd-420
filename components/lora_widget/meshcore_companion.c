@@ -48,6 +48,19 @@ static inline size_t write_err(uint8_t *resp, size_t max, uint8_t err_code)
     return 2;
 }
 
+static inline void copy_cstr(char *dst, size_t dst_sz, const char *src)
+{
+    if (!dst || dst_sz == 0) return;
+    size_t n = 0;
+    if (src) {
+        while (n + 1 < dst_sz && src[n] != '\0') {
+            dst[n] = src[n];
+            n++;
+        }
+    }
+    dst[n] = '\0';
+}
+
 static inline size_t write_disabled(uint8_t *resp, size_t max)
 {
     if (max < 1) return 0;
@@ -62,7 +75,7 @@ void meshcore_companion_init(companion_context_t *ctx)
 
     /* Slot 0 is initialized as Public channel */
     ctx->channels[0].valid = true;
-    strncpy(ctx->channels[0].name, "Public", sizeof(ctx->channels[0].name) - 1);
+    copy_cstr(ctx->channels[0].name, sizeof(ctx->channels[0].name), "Public");
     memcpy(ctx->channels[0].secret, k_public_psk, 16);
 
     ctx->rx_delay_base_x1000 = 10000;
@@ -143,7 +156,7 @@ static size_t format_contact_frame(const companion_contact_t *c, uint8_t *out, s
     memcpy(&out[i], c->out_path, COMPANION_MAX_PATH_SIZE);
     i += COMPANION_MAX_PATH_SIZE;
     memset(&out[i], 0, COMPANION_NAME_SIZE);
-    strncpy((char *)&out[i], c->name, COMPANION_NAME_SIZE - 1);
+    copy_cstr((char *)&out[i], COMPANION_NAME_SIZE, c->name);
     i += COMPANION_NAME_SIZE;
     wr_le32(&out[i], c->last_advert_ts);
     i += 4;
@@ -245,13 +258,18 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
         wr_le32(&resp_out[i], cfg->ble_pin);
         i += 4;
         memset(&resp_out[i], 0, 12);
-        strncpy((char *)&resp_out[i], "7 Nov 2026", 11);
+        {
+            const char *bdate = __DATE__;
+            size_t dlen = strlen(bdate);
+            if (dlen > 11) dlen = 11;
+            memcpy(&resp_out[i], bdate, dlen);
+        }
         i += 12;
         memset(&resp_out[i], 0, 40);
-        strncpy((char *)&resp_out[i], "RockBase NM-EPD-420", 39);
+        copy_cstr((char *)&resp_out[i], 40, "RockBase NM-EPD-420");
         i += 40;
         memset(&resp_out[i], 0, 20);
-        strncpy((char *)&resp_out[i], "v1.18.0-mod-rev0.2", 19);
+        copy_cstr((char *)&resp_out[i], 20, "v1.18.0-reflbo-1.0");
         i += 20;
         resp_out[i++] = cfg->client_repeat ? 1 : 0;
         resp_out[i++] = cfg->path_hash_mode;
@@ -270,7 +288,7 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
         resp_out[i++] = idx;
         memset(&resp_out[i], 0, 32);
         if (ctx->channels[idx].valid) {
-            strncpy((char *)&resp_out[i], ctx->channels[idx].name, 31);
+            copy_cstr((char *)&resp_out[i], 32, ctx->channels[idx].name);
         }
         i += 32;
         memset(&resp_out[i], 0, 16);
@@ -442,8 +460,7 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
 
         if (!is_dup) {
             ctx->last_tx_msg_ts = msg_ts;
-            strncpy(ctx->last_tx_msg_text, text, sizeof(ctx->last_tx_msg_text) - 1);
-            ctx->last_tx_msg_text[sizeof(ctx->last_tx_msg_text) - 1] = '\0';
+            copy_cstr(ctx->last_tx_msg_text, sizeof(ctx->last_tx_msg_text), text);
             ctx->last_tx_seen_s = now_s;
             if (env->send_channel_txt) {
                 env->send_channel_txt(0, text);
@@ -476,8 +493,7 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
 
         if (!is_dup) {
             ctx->last_tx_msg_ts = msg_ts;
-            strncpy(ctx->last_tx_msg_text, text, sizeof(ctx->last_tx_msg_text) - 1);
-            ctx->last_tx_msg_text[sizeof(ctx->last_tx_msg_text) - 1] = '\0';
+            copy_cstr(ctx->last_tx_msg_text, sizeof(ctx->last_tx_msg_text), text);
             ctx->last_tx_seen_s = now_s;
             if (env->send_channel_txt) {
                 env->send_channel_txt(ch_idx, text);

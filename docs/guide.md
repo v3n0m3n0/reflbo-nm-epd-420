@@ -1,8 +1,8 @@
-# reflbo user guide
+# reflbo-nm-epd-420 user guide
 
-reflbo turns the Waveshare ESP32-S3-RLCD-4.2 into a battery-powered desk display. Its 4.2″ reflective screen is always on and shows dashboards like a watch face: the time, your room's climate, the weather, the sun, a rain radar, the aircraft overhead, your solar panels' forecast and the house's energy.
+**reflbo-nm-epd-420** ports [`Vybo/reflbo`](https://github.com/Vybo/reflbo) to the **RockBase NM-EPD-420 (BW)** hardware platform. Its 4.2″ 400×300 e-paper screen keeps showing your dashboard even with minimal holding current: the time, indoor climate (AHT20), weather, sun times, rain radar, aircraft overhead, solar forecasts, house energy, and SX1262 LoRa / MeshCore Companion telemetry.
 
-This guide covers what the firmware does today, version 0.1.0-dev (milestones M0 to M6d). [Coming next](#coming-next) lists what is designed or planned.
+This guide covers version **1.0.0** (upstream reflbo core plus RockBase NM-EPD-420 display, sensor, Focus power mode, and LoRa MeshCore features). [Coming next](#coming-next) lists what is planned for future releases.
 
 The images are the firmware's own output. The panel images are the host build's golden renders, which match the device pixel for pixel. The web pages ran against a demo device that draws its previews with the same renderer. On the device the screen is grey and reflective, lit by the room.
 
@@ -36,15 +36,16 @@ The images are the firmware's own output. The panel images are the host build's 
 
 | Part | What it does here |
 |---|---|
-| ESP32-S3, 16 MB flash, 8 MB PSRAM | Runs the firmware; Wi-Fi 2.4 GHz |
-| 4.2″ reflective LCD, 400×300, 1-bit (ST7305) | Always on, readable in daylight, no backlight |
-| SHTC3 | Room temperature and humidity |
-| PCF85063 | The clock, which also wakes the board |
-| 18650 cell holder and charger | Runs the board for days without a cable |
-| KEY, BOOT and PWR buttons | KEY and BOOT drive everything; PWR switches the board on and off in hardware |
-| Speaker, microphones, microSD slot | Not used yet: audio comes in M9, microSD in M10 |
+| ESP32-S3R8, 16 MB flash, 8 MB Octal PSRAM | Runs the firmware; Wi-Fi 2.4 GHz & BLE 5 |
+| 4.2″ B/W e-paper, 400×300, 1-bit (`SSD1683`) | Always visible without backlight; supports fast differential partial refreshes and anti-ghosting full refreshes |
+| AHT20 (`0x38`, gated by `TEMP_CTL` IO40) | Room temperature and humidity |
+| SX1262 LoRa (`HT-RA62`, `LORA_EN` IO47) | Sub-GHz MeshCore LoRa radio + NimBLE Companion bridge |
+| PCF85063 / internal sleep clock | Timekeeping and wake scheduling |
+| Li-Po battery & gated divider (`ADC_EN` IO43) | Runs for days without a cable; divider disabled outside reads |
+| KEY (`IO45`), BOOT (`IO0`), and PWR buttons | KEY and BOOT drive everything; PWR switches power hardware |
+| ES8311 audio codec, speaker amp, microSD slot | Put into low-power standby by default; audio/microSD playback planned |
 
-The firmware sleeps between updates. It wakes once a minute to redraw, every 5 minutes to read the sensors, and once a day to sync over Wi-Fi. Wi-Fi is off the rest of the time.
+The firmware sleeps between updates. It wakes once a minute to redraw via differential partial refresh, samples sensors at the configured cadence, and syncs over Wi-Fi on your schedule. Selecting the **Focus clock** preset automatically activates **Super Power Efficient Mode**—suspending LoRa wakeup locks and background syncs while spacing sensor reads to 15 minutes.
 
 ## First start
 
@@ -379,7 +380,7 @@ The device speaks English and Czech: the menu, the fields, weekdays, months and 
 
 ## Updates, backup and reset
 
-- **Firmware updates** go through the Firmware page: upload `reflbo.bin` from a build. The device checks the image, writes it beside the running one and restarts into it. If the new firmware doesn't run properly for its first minute, the device goes back to the previous one.
+- **Firmware updates** go through the Firmware page: upload `reflbo-nm-epd-420-v1.0.0.bin` from a release (or `build/reflbo-nm-epd-420.bin` from a source build). The device checks the image, writes it beside the running one and restarts into it. If the new firmware doesn't run properly for its first minute, the device rolls back to the previous one.
 - **Backup** downloads the settings and presets as one JSON file, without passwords or keys. Restore checks every file before it replaces anything. A second Forecast.Solar plane waits for its key, which a backup doesn't carry: the forecast uses the first plane until you set one.
 - **Factory reset**, in the menu or on the Backup page, erases the settings, presets, saved networks and the web password, then restarts with the first-run screen.
 
@@ -390,9 +391,10 @@ Everything that draws can be checked without looking at the device. The firmware
 ```sh
 tools/idf.sh exec python tools/screenshot.py -o captures/screen.png
 tools/idf.sh exec python tools/devlog.py --cmd "field set env.temp -5.5" --cmd "btn key short"
+python tools/test_com_focus_clock.py --port COM15
 ```
 
-[AGENTS.md](../AGENTS.md) has the build, the console commands and the hardware notes. The [design spec](specs/2026-09-25-firmware-design.md) has every decision, and the [plans](plans/) show how each milestone was built. `python3 tools/docs_images.py` makes the panel images in this guide from the golden renders.
+[AGENTS.md](../AGENTS.md) has the build, the console commands (including `lora`), and the RockBase NM-EPD-420 hardware notes. The upstream [design spec](specs/2026-09-25-firmware-design.md) and [plans](plans/) remain archived for architectural context. `python3 tools/docs_images.py` makes the panel images in this guide from the golden renders.
 
 ## Coming next
 

@@ -332,7 +332,7 @@ esp_err_t st7305_push(const uint8_t *canonical)
         s_partial_count = 1;
         s_full_count++;
     } else {
-        /* Differential partial refresh */
+        /* Differential partial refresh: power_on first, write 0x26 OLD and 0x24 NEW */
         ESP_RETURN_ON_ERROR(power_on(), TAG, "power_on");
 
         set_ram_area(0, 0, ST7305_WIDTH, ST7305_HEIGHT);

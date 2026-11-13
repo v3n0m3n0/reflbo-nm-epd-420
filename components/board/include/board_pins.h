@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * RockBase NM-EPD-420 Pin Map (Authoritative reference: src/bsp/nm_display_420/config.h)
+ * RockBase NM-EPD-420 Pin Map (Board hardware revision pinout)
  */
 
 /* Buttons */
@@ -13,8 +13,8 @@
 #define BOARD_PIN_I2C_SCL    38
 
 /* Power gates & controls */
-#define BOARD_PIN_TEMP_CTL   40  /* AHT20 power gate - MUST be HIGH during runtime */
-#define BOARD_PIN_CODEC_EN   44  /* ES8311 power gate - MUST be HIGH during runtime */
+#define BOARD_PIN_TEMP_CTL   40  /* AHT20 power gate - MUST stay HIGH while shared I2C is active */
+#define BOARD_PIN_CODEC_EN   44  /* ES8311 power gate - MUST stay HIGH while shared I2C is active */
 #define BOARD_PIN_PA_CTRL    41  /* Speaker amplifier enable - active HIGH (keep LOW when silent) */
 #define BOARD_PIN_ADC_EN     43  /* Battery ADC divider enable - active HIGH, 20ms settle time */
 #define BOARD_PIN_LORA_EN    47  /* SX1262 power gate - active HIGH */

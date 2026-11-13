@@ -50,3 +50,14 @@ The TPS63020 that makes the 3V3 rail has PS/SYNC tied high, which forces PWM and
 | — | — | M5: the default schedule | `times` 05:30, display every 1 min, sensors every 5 min; light sleep | Fnirsi FNB58 | 24 h | — | — | — | To be measured by the owner (M5 acceptance 4): the daily average |
 | — | — | M6: a radar frame per sync | 10 syncs on demand, 2 min apart, against M5's syncs without the radar | Fnirsi FNB58 | — | — | — | — | To be measured by the owner (M6 acceptance 6) |
 | — | — | M6: the flight radar in sync mode `always` | an hour with the Flights view, against an hour of `always` with the clock | Fnirsi FNB58 | 2 × 1 h | — | — | — | To be measured by the owner (M6 acceptance 6) |
+
+
+---
+
+## RockBase NM-EPD-420 Hardware Notes (`reflbo-nm-epd-420`)
+
+The **RockBase NM-EPD-420 (BW)** uses an **SSD1683** 4.2″ bistable e-paper display (400×300), **AHT20** temperature/humidity sensor (`TEMP_CTL` on GPIO40), **ES8311** audio codec (`CODEC_EN` on GPIO44, placed into standby at cold boot with `PA_CTRL` kept LOW), and an **SX1262** LoRa transceiver (`LORA_EN` on GPIO47). Unlike the original Waveshare RLCD board's forced-PWM TPS63020 rail, an e-paper panel consumes near-zero holding power between screen refreshes:
+
+- **Shared I²C Rail Leak Prevention:** During active runtime, `TEMP_CTL` and `CODEC_EN` stay HIGH so unpowered ESD protection diodes cannot clamp shared I²C lines to GND. Before deep sleep (`board_prepare_deep_sleep()`), both rails and I²C/I²S pullups are cleanly tri-stated/isolated.
+- **ADC Divider Gating:** Battery measurement enables `ADC_EN` only during sampling and pulls it LOW immediately afterward to eliminate continuous divider current.
+- **LoRa Rail & Focus Super Power Mode:** `LORA_EN` stays powered down whenever the LoRa radio is disabled in configuration. On quiet dashboard presets (e.g., Focus mode with LoRa OFF), extended sleep intervals and partial differential e-paper refreshes minimize wake frequency and active radio time (`sleep stats`, `power focus`).

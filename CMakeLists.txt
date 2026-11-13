@@ -9,13 +9,30 @@ endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(reflbo-nm-epd-420)
 
-# Scrub local workspace paths from compiled binaries.
+# Scrub local workspace and home paths from compiled __FILE__ / DWARF debug info.
 set(_reflbo_prefix_maps
     "-fmacro-prefix-map=${CMAKE_CURRENT_LIST_DIR}=/workspace"
     "-ffile-prefix-map=${CMAKE_CURRENT_LIST_DIR}=/workspace"
     "-fmacro-prefix-map=/project=/workspace"
     "-ffile-prefix-map=/project=/workspace"
 )
+if(DEFINED ENV{USERPROFILE} AND NOT "$ENV{USERPROFILE}" STREQUAL "")
+    file(TO_CMAKE_PATH "$ENV{USERPROFILE}" _reflbo_user_home)
+    string(TOLOWER "${_reflbo_user_home}" _reflbo_user_home_lower)
+    list(APPEND _reflbo_prefix_maps
+        "-fmacro-prefix-map=${_reflbo_user_home}=/home/builder"
+        "-ffile-prefix-map=${_reflbo_user_home}=/home/builder"
+        "-fmacro-prefix-map=${_reflbo_user_home_lower}=/home/builder"
+        "-ffile-prefix-map=${_reflbo_user_home_lower}=/home/builder"
+    )
+endif()
+if(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
+    file(TO_CMAKE_PATH "$ENV{HOME}" _reflbo_home)
+    list(APPEND _reflbo_prefix_maps
+        "-fmacro-prefix-map=${_reflbo_home}=/home/builder"
+        "-ffile-prefix-map=${_reflbo_home}=/home/builder"
+    )
+endif()
 add_compile_options(${_reflbo_prefix_maps})
 
 # Force esp_app_desc.c.obj to rebuild on incremental ESP-IDF builds so

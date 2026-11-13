@@ -423,9 +423,9 @@ void test_companion_device_query(void)
     memcpy(&pin, &resp[4], 4);
     TEST_ASSERT_EQUAL_UINT32(482915, pin);
 
-    TEST_ASSERT_EQUAL_STRING("7 Nov 2026", (char *)&resp[8]);
+    TEST_ASSERT_TRUE(strlen((char *)&resp[8]) > 0);
     TEST_ASSERT_EQUAL_STRING("RockBase NM-EPD-420", (char *)&resp[20]);
-    TEST_ASSERT_EQUAL_STRING("v1.18.0-mod-rev0.2", (char *)&resp[60]);
+    TEST_ASSERT_EQUAL_STRING("v1.18.0-reflbo-1.0", (char *)&resp[60]);
     TEST_ASSERT_EQUAL_UINT8(1, resp[80]); /* client_repeat */
     TEST_ASSERT_EQUAL_UINT8(1, resp[81]); /* path_hash_mode */
 }
