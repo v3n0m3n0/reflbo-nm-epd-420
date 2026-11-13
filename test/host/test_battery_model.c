@@ -324,6 +324,21 @@ static void test_cv_taper_above_full_mv_stays_charging_then_full_then_dischargin
     TEST_ASSERT_EQUAL(BATTERY_DISCHARGING, battery_gauge_state(&s_g, t));
 }
 
+static void test_manual_full_mv_reaches_100pct_and_full_state(void)
+{
+    const battery_cal_t cal = { .method = BATTERY_CAL_MANUAL, .empty_mv = 3270, .full_mv = 4170 };
+    battery_gauge_set_cal(&s_g, &cal);
+    uint32_t t = add_steady(1000, 4170, 7); /* 30 min steady at 4170 mV */
+    TEST_ASSERT_EQUAL_INT(100, battery_gauge_level(&s_g));
+    TEST_ASSERT_EQUAL_INT(BATTERY_FULL, battery_gauge_state(&s_g, t));
+    /* Drop > 10 mV returns BATTERY_DISCHARGING */
+    battery_gauge_add(&s_g, t + 300, 4150);
+    battery_gauge_add(&s_g, t + 600, 4150);
+    battery_gauge_add(&s_g, t + 900, 4150);
+    battery_gauge_add(&s_g, t + 1200, 4150);
+    TEST_ASSERT_EQUAL_INT(BATTERY_DISCHARGING, battery_gauge_state(&s_g, t + 1200));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -353,5 +368,6 @@ int main(void)
     RUN_TEST(test_a_learned_curve_must_rise_within_the_battery_range);
     RUN_TEST(test_the_gauge_shows_the_level_on_a_learned_curve);
     RUN_TEST(test_cv_taper_above_full_mv_stays_charging_then_full_then_discharging);
+    RUN_TEST(test_manual_full_mv_reaches_100pct_and_full_state);
     return UNITY_END();
 }

@@ -162,7 +162,7 @@ battery_state_t battery_gauge_state(const battery_gauge_t *g, uint32_t now_s)
     }
     int now_mv = battery_gauge_mv(g);
     int rise = now_mv - start->mv;
-    if (now_mv >= FULL_MV) {
+    if (curve_mv(&g->cal, now_mv) >= FULL_MV) {
         if (rise >= STEADY_MV) {
             return BATTERY_CHARGING;
         }

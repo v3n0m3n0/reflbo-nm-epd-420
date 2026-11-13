@@ -76,12 +76,25 @@ static void default_settings(settings_t *out)
     snprintf(out->tz_iana, sizeof(out->tz_iana), "%s", CONFIG_REFLBO_TZ_NAME);
 }
 
+static esp_err_t save_battery_cal_cb(const battery_cal_t *cal)
+{
+    s.settings.bat_cal = cal->method == BATTERY_CAL_MANUAL    ? SETTINGS_BAT_MANUAL
+                         : cal->method == BATTERY_CAL_LEARNED ? SETTINGS_BAT_LEARNED
+                                                              : SETTINGS_BAT_CURVE;
+    s.settings.bat_empty_mv = cal->empty_mv;
+    s.settings.bat_full_mv = cal->full_mv;
+    esp_err_t err = app_ui_save_settings();
+    app_ui_apply_settings();
+    return err;
+}
+
 void app_ui_defaults(void)
 {
     memset(&s, 0, sizeof(s));
     ds_init(&s.ds);
     default_settings(&s.settings);
     ui_presets_defaults(&s_presets);
+    sensors_set_battery_cal_save_cb(save_battery_cal_cb);
 }
 
 static bool parse_settings(const char *text, void *ctx)
@@ -122,6 +135,7 @@ static esp_err_t load_one(const char *path, char *buf, size_t buf_size, storage_
 
 void app_ui_load(void)
 {
+    sensors_set_battery_cal_save_cb(save_battery_cal_cb);
     settings_t settings_defaults;
     default_settings(&settings_defaults);
     EXT_RAM_BSS_ATTR static ui_presets_t presets_defaults; /* 2 KB with 24 cells (M6c): not on the app task's stack */

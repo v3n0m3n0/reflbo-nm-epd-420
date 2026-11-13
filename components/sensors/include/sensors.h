@@ -66,3 +66,7 @@ int sensors_battery_days_left10(time_t now);
 void sensors_shift_time(int64_t delta_s);
 void sensors_export(sensors_state_t *out);
 void sensors_import(const sensors_state_t *in);
+const battery_cal_t *sensors_battery_cal(void);
+typedef esp_err_t (*sensors_battery_cal_save_cb_t)(const battery_cal_t *cal);
+void sensors_set_battery_cal_save_cb(sensors_battery_cal_save_cb_t cb);
+esp_err_t sensors_save_battery_cal(const battery_cal_t *cal);

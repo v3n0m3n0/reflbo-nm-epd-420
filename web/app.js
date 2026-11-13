@@ -1624,11 +1624,22 @@ async function devicePage() {
     }));
   const fullV = h('input', { type: 'number', step: 0.01, min: 3.6, max: 4.4, value: bat.full_v ?? 4.2 });
   const emptyV = h('input', { type: 'number', step: 0.01, min: 3, max: 4, value: bat.empty_v ?? 3.27 });
+  const canUseCurV = Boolean(st.battery && st.battery.mv >= 4000 && st.battery.usb);
+  const useCurVButton = button('Use current voltage as 100%', () => {
+    if (!canUseCurV) return;
+    levelFrom.value = 'manual';
+    levelFrom.dispatchEvent(new Event('change'));
+    fullV.value = (Math.round(st.battery.mv / 10) / 100).toFixed(2);
+  });
+  if (!canUseCurV) {
+    useCurVButton.disabled = true;
+    useCurVButton.title = 'Connect USB with battery >= 4.00 V to use current voltage as 100%';
+  }
   const note = h('p');
   const batCard = card('Battery', field('Battery level from', levelFrom), field('Full, V', fullV), field('Empty, V', emptyV,
     'With your own voltages the level follows the Li-ion curve stretched between them. Read them on the ' +
     'Status page: full just after the charger stops, empty when the device shows its low-battery screen.'),
-  learnNote, actions(learnButton));
+  learnNote, actions(learnButton, useCurVButton));
   const form = h('div', {},
     card('Language and units', field('Language on the device', language), field('Temperature', unit)),
     card('Sensors', field('Temperature offset, °C', temp, 'Added to every reading. The board warms the sensor by ' +

@@ -313,3 +313,26 @@ void sensors_import(const sensors_state_t *in)
 {
     s_state = *in;
 }
+
+static sensors_battery_cal_save_cb_t s_cal_save_cb;
+
+const battery_cal_t *sensors_battery_cal(void)
+{
+    return &s_state.gauge.cal;
+}
+
+void sensors_set_battery_cal_save_cb(sensors_battery_cal_save_cb_t cb)
+{
+    s_cal_save_cb = cb;
+}
+
+esp_err_t sensors_save_battery_cal(const battery_cal_t *cal)
+{
+    if (cal == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_cal_save_cb == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return s_cal_save_cb(cal);
+}
