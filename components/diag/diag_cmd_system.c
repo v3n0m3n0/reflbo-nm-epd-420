@@ -1,10 +1,12 @@
 #include <inttypes.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "diag_internal.h"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_console.h"
+#include "esp_core_dump.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
 #include "esp_psram.h"
@@ -76,6 +78,35 @@ static int cmd_reboot(int argc, char **argv)
     return 0;
 }
 
+static int cmd_coredump(int argc, char **argv)
+{
+    if (argc == 1) {
+        size_t addr = 0, size = 0;
+        esp_err_t err = esp_core_dump_image_get(&addr, &size);
+        if (err == ESP_OK) {
+            printf("coredump: %u bytes at 0x%08x\n", (unsigned)size, (unsigned)addr);
+            return 0;
+        }
+        if (err == ESP_ERR_NOT_FOUND) {
+            printf("coredump: none\n");
+            return 0;
+        }
+        printf("coredump: error (%s)\n", esp_err_to_name(err));
+        return 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "erase") == 0) {
+        esp_err_t err = esp_core_dump_image_erase();
+        if (err == ESP_OK) {
+            printf("coredump: erased\n");
+            return 0;
+        }
+        printf("coredump erase: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("usage: coredump [erase]\n");
+    return 1;
+}
+
 esp_err_t diag_register_system_commands(void)
 {
     const esp_console_cmd_t cmds[] = {
@@ -83,6 +114,7 @@ esp_err_t diag_register_system_commands(void)
         { .command = "heap", .help = "Show free heap per memory type", .func = &cmd_heap },
         { .command = "reboot", .help = "Restart the chip", .func = &cmd_reboot },
         { .command = "tasks", .help = "List FreeRTOS tasks", .func = &cmd_tasks },
+        { .command = "coredump", .help = "Show or erase flash core dump: coredump [erase]", .func = &cmd_coredump },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         esp_err_t err = esp_console_cmd_register(&cmds[i]);

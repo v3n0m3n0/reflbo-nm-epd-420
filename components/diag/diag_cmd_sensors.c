@@ -54,8 +54,90 @@ static const char *battery_state_name(battery_state_t state)
     }
 }
 
+static const char *battery_cal_method_name(uint8_t method)
+{
+    switch (method) {
+    case BATTERY_CAL_MANUAL:
+        return "manual";
+    case BATTERY_CAL_LEARNED:
+        return "learned";
+    default:
+        return "curve";
+    }
+}
+
 static int battery_body(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "cal") == 0) {
+        if (argc == 2) {
+            const battery_cal_t *cal = sensors_battery_cal();
+            printf("battery cal: %s empty=%d mV full=%d mV\n", battery_cal_method_name(cal->method),
+                   cal->empty_mv, cal->full_mv);
+            return 0;
+        }
+        if (argc == 3 && strcmp(argv[2], "reset") == 0) {
+            battery_cal_t next = {
+                .method = BATTERY_CAL_CURVE,
+                .empty_mv = BATTERY_EMPTY_MV,
+                .full_mv = BATTERY_FULL_MV,
+            };
+            esp_err_t err = sensors_save_battery_cal(&next);
+            if (err != ESP_OK) {
+                printf("battery cal reset: %s\n", esp_err_to_name(err));
+                return 1;
+            }
+            printf("battery cal: reset to curve (empty=%d mV full=%d mV)\n", next.empty_mv, next.full_mv);
+            return 0;
+        }
+        if (argc == 4 && strcmp(argv[2], "full") == 0) {
+            const battery_cal_t *cur = sensors_battery_cal();
+            int empty_mv = (cur->empty_mv >= 2500 && cur->empty_mv <= 3800) ? cur->empty_mv : BATTERY_EMPTY_MV;
+            int mv = 0;
+            if (strcmp(argv[3], "now") == 0) {
+                time_t now = time(NULL);
+                esp_err_t err = sensors_sample_battery(now);
+                if (err != ESP_OK) {
+                    printf("battery: ADC read failed: %s\n", esp_err_to_name(err));
+                    return 1;
+                }
+                sensors_battery_t b = sensors_battery(now);
+                mv = b.smoothed_mv > 0 ? b.smoothed_mv : b.last_mv;
+                if (!b.valid || mv <= 0) {
+                    printf("battery cal full: no valid battery reading\n");
+                    return 1;
+                }
+            } else {
+                char *end = NULL;
+                long parsed = strtol(argv[3], &end, 10);
+                if (argv[3][0] == '\0' || end == NULL || *end != '\0') {
+                    printf("usage: battery cal [reset | full <now|mV>]\n");
+                    return 1;
+                }
+                mv = (int)parsed;
+            }
+            if (mv < 4000 || mv > 4400 || mv - empty_mv < BATTERY_CAL_SPAN_MIN) {
+                printf("battery cal full: %d mV out of range (4000..4400 mV, >= empty + %d mV)\n",
+                       mv, BATTERY_CAL_SPAN_MIN);
+                return 1;
+            }
+            battery_cal_t next = {
+                .method = BATTERY_CAL_MANUAL,
+                .empty_mv = (uint16_t)empty_mv,
+                .full_mv = (uint16_t)mv,
+            };
+            esp_err_t err = sensors_save_battery_cal(&next);
+            if (err != ESP_OK) {
+                printf("battery cal full: %s\n", esp_err_to_name(err));
+                return 1;
+            }
+            sensors_battery_t b = sensors_battery(time(NULL));
+            printf("battery cal: manual empty=%d mV full=%d mV (soc=%d%%)\n",
+                   next.empty_mv, next.full_mv, b.level);
+            return 0;
+        }
+        printf("usage: battery cal [reset | full <now|mV>]\n");
+        return 1;
+    }
     if (argc >= 2 && strcmp(argv[1], "learn") == 0) { /* D21: from the next full discharge */
         if (argc != 3 || (strcmp(argv[2], "start") != 0 && strcmp(argv[2], "stop") != 0)) {
             printf("usage: battery learn start|stop\n");
@@ -92,7 +174,7 @@ static int battery_body(int argc, char **argv)
 
 static int rtc_body(int argc, char **argv)
 {
-    static const char *const k_usage = "rtc get | rtc set <YYYY-MM-DDTHH:MM[:SS][Z|+HH:MM]>";
+    static const char *const k_usage = "rtc get | rtc set <YYYY-MM-DD HH:MM:SS> | rtc drift [reset]";
     if (argc == 2 && strcmp(argv[1], "get") == 0) {
         time_t utc;
         bool valid;
@@ -134,6 +216,15 @@ static int rtc_body(int argc, char **argv)
         format_local(utc, local, sizeof(local));
         printf("rtc: set, local %s\n", local);
         return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "drift") == 0 && strcmp(argv[2], "reset") == 0) {
+        esp_err_t err = timekeeping_reset_drift();
+        if (err == ESP_OK) {
+            printf("rtc drift: cleared\n");
+            return 0;
+        }
+        printf("rtc drift reset: %s\n", esp_err_to_name(err));
+        return 1;
     }
     if (argc == 2 && strcmp(argv[1], "drift") == 0) {
         const rtc_trim_t *trim = timekeeping_trim();
@@ -188,9 +279,10 @@ esp_err_t diag_register_sensor_commands(void)
 {
     const esp_console_cmd_t cmds[] = {
         { .command = "sensors", .help = "Read the AHT20 now", .func = &cmd_sensors },
-        { .command = "battery", .help = "Read the battery now and show the gauge; battery learn start|stop",
+        { .command = "battery",
+          .help = "Read the battery now; battery learn start|stop; battery cal [reset | full <now|mV>]",
           .func = &cmd_battery },
-        { .command = "rtc", .help = "rtc get | rtc set <ISO 8601 time; Z, +HH:MM or local> | rtc drift", .func = &cmd_rtc },
+        { .command = "rtc", .help = "rtc get | rtc set <YYYY-MM-DD HH:MM:SS> | rtc drift [reset]", .func = &cmd_rtc },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         esp_err_t err = esp_console_cmd_register(&cmds[i]);
