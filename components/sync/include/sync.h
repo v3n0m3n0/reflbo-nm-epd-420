@@ -78,6 +78,9 @@ typedef struct {
     sync_solar_req_t solar;
     sync_energy_req_t energy;
     sync_pc_req_t pc; /* M7: a full sync's only */
+    /* Optional callback run on the sync task right after SYNC_STEP_TIME (NTP OK),
+     * before HTTP steps start. Must not block (e.g., app_post to the app task). */
+    void (*on_time)(int64_t utc_us, int64_t mono_us);
 } sync_request_t;
 
 typedef struct {

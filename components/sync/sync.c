@@ -676,6 +676,9 @@ static void sync_task(void *arg)
         s_report.result[SYNC_STEP_WIFI] = SYNC_STEP_OK;
         s_step = SYNC_STEP_TIME; /* the steps are independent (spec §9.3): one failing skips nothing */
         step_time();
+        if (s_report.result[SYNC_STEP_TIME] == SYNC_STEP_OK && s_req.on_time != NULL) {
+            s_req.on_time(s_report.ntp_utc_us, s_report.ntp_mono_us);
+        }
         s_step = SYNC_STEP_WEATHER;
         step_weather();
         s_step = SYNC_STEP_AIR;

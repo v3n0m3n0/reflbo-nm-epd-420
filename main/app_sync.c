@@ -262,6 +262,66 @@ static void apply_refresh(sync_report_t *r)
     app_ui_render();
 }
 
+typedef struct {
+    int64_t utc_us;
+    int64_t mono_us;
+} early_time_msg_t;
+
+static early_time_msg_t s_early_time_msg;
+static int64_t s_applied_ntp_mono_us;
+static int64_t s_applied_moved_ms;
+
+/* Applies the NTP time once per measurement so early apply and final apply() never write RTC twice. */
+static esp_err_t apply_sync_time_once(int64_t utc_us, int64_t mono_us, int64_t *moved_ms, bool *already_applied)
+{
+    if (mono_us != 0 && s_applied_ntp_mono_us == mono_us) {
+        *moved_ms = s_applied_moved_ms;
+        if (already_applied != NULL) {
+            *already_applied = true;
+        }
+        return ESP_OK;
+    }
+    if (already_applied != NULL) {
+        *already_applied = false;
+    }
+    int64_t delta_ms = 0;
+    esp_err_t err = timekeeping_apply_true_time(utc_us, mono_us, &delta_ms);
+    if (err == ESP_OK) {
+        s_applied_ntp_mono_us = mono_us;
+        s_applied_moved_ms = delta_ms;
+    }
+    *moved_ms = delta_ms;
+    return err;
+}
+
+/* Applies and logs an NTP update on the app task; EV_CALL in app.c triggers app_clock_moved(). */
+static void apply_sync_time_and_log(int64_t utc_us, int64_t mono_us)
+{
+    int64_t moved_ms = 0;
+    bool already = false;
+    esp_err_t err = apply_sync_time_once(utc_us, mono_us, &moved_ms, &already);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "setting the time: %s", esp_err_to_name(err));
+    } else if (!already && (moved_ms > 1000 || moved_ms < -1000)) {
+        ESP_LOGI(TAG, "the clock moved %lld ms", (long long)moved_ms);
+    }
+}
+
+static void early_time_on_app(void *arg)
+{
+    const early_time_msg_t *m = arg;
+    apply_sync_time_and_log(m->utc_us, m->mono_us);
+}
+
+static void on_sync_time(int64_t utc_us, int64_t mono_us)
+{
+    s_early_time_msg.utc_us = utc_us;
+    s_early_time_msg.mono_us = mono_us;
+    if (app_post(early_time_on_app, &s_early_time_msg) != ESP_OK) {
+        ESP_LOGW(TAG, "app queue full; early NTP time deferred until sync ends");
+    }
+}
+
 /* The report, on the app task. The EV_CALL around it sees the clock move and calls app_clock_moved(). */
 static void apply(void *arg)
 {
@@ -277,13 +337,7 @@ static void apply(void *arg)
         return;
     }
     if (r->result[SYNC_STEP_TIME] == SYNC_STEP_OK) {
-        int64_t moved_ms = 0;
-        esp_err_t err = timekeeping_apply_true_time(r->ntp_utc_us, r->ntp_mono_us, &moved_ms);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "setting the time: %s", esp_err_to_name(err));
-        } else if (moved_ms > 1000 || moved_ms < -1000) {
-            ESP_LOGI(TAG, "the clock moved %lld ms", (long long)moved_ms);
-        }
+        apply_sync_time_and_log(r->ntp_utc_us, r->ntp_mono_us);
     }
     time_t now = time(NULL);
     if (r->result[SYNC_STEP_WEATHER] == SYNC_STEP_OK) {
@@ -344,7 +398,8 @@ static esp_err_t start(bool manual, sync_due_t due)
     uint32_t steps = app_focus_mode_active() ? 0 : set->sync_steps;
     EXT_RAM_BSS_ATTR static sync_request_t req; /* the radar's and the solar parts are large for the stack */
     req = (sync_request_t){ .kind = SYNC_KIND_SYNC, .steps = steps, .lat_e4 = set->lat_e4,
-                            .lon_e4 = set->lon_e4, .now = timekeeping_valid() ? (uint32_t)time(NULL) : 0 };
+                            .lon_e4 = set->lon_e4, .now = timekeeping_valid() ? (uint32_t)time(NULL) : 0,
+                            .on_time = on_sync_time };
     memcpy(req.ntp, set->ntp, sizeof(req.ntp));
     if (steps != 0) {
         app_radar_request(&req.radar);
@@ -359,6 +414,8 @@ static esp_err_t start(bool manual, sync_due_t due)
         s_manual = manual;
         s_started_by = due;
         s_started_mono = esp_timer_get_time();
+        s_applied_ntp_mono_us = 0;
+        s_applied_moved_ms = 0;
         ESP_LOGI(TAG, "sync starts%s", manual ? " (asked for)" : due.retry ? " (a retry)" : "");
         app_ui_render(); /* the status bar shows it running */
     }
