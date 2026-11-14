@@ -20,7 +20,7 @@ typedef struct {
     bool asleep; /* sleep-in: night sleep (spec §9.1) */
 } display_state_t;
 
-esp_err_t display_init(st7305_variant_t variant); /* cold start: white frame, then LPM */
+esp_err_t display_init(st7305_variant_t variant); /* cold start: allocates framebuffer and resets panel; first display_commit() does full refresh */
 /* Deep-sleep wake: the panel still shows the last frame; attach without reset or clear. */
 esp_err_t display_init_warm(const display_state_t *state);
 void display_export(display_state_t *out);

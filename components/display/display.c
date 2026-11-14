@@ -3,7 +3,6 @@
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "util_crc32.h"
 
 static const char *TAG = "display";
@@ -74,9 +73,6 @@ esp_err_t display_init(st7305_variant_t variant)
 {
     ESP_RETURN_ON_ERROR(alloc_fb(), TAG, "framebuffer");
     ESP_RETURN_ON_ERROR(st7305_init(variant), TAG, "panel init");
-    int64_t start = esp_timer_get_time();
-    ESP_RETURN_ON_ERROR(display_commit(true), TAG, "first frame");
-    ESP_LOGI(TAG, "first frame pushed in %lld us", (long long)(esp_timer_get_time() - start));
     return ESP_OK;
 }
 
