@@ -4,7 +4,7 @@ Every public release of **reflbo-nm-epd-420** follows these engineering, licensi
 
 ## 1. Versioning Policy
 - Independent Semantic Versioning (`vMAJOR.MINOR.PATCH`, e.g., `v1.0.0`).
-- Update `version.txt`, `components/lora_widget/lora_widget.c` (`ver`), `components/lora_widget/meshcore_companion.c` (`CMD_DEVICE_QUERY`), and `test/host/test_meshcore_proto.c` together before building.
+- Update `version.txt`, `components/lora_widget/meshcore_node.c` (`ver`), `components/lora_widget/meshcore_companion.c` (`CMD_DEVICE_QUERY`), `test/host/test_meshcore_proto.c`, and `test/host/test_meshcore_node.c` together before building.
 - Maintain clear attribution to upstream [`Vybo/reflbo`](https://github.com/Vybo/reflbo) (base commit `14593da`) and third-party libraries (`THIRD_PARTY.md`, `NOTICE`, `LICENSE` `GPL-3.0-only`).
 
 ## 2. Anonymity & Binary Cleanliness

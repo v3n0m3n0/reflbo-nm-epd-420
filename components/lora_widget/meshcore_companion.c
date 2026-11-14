@@ -284,7 +284,7 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
         copy_cstr((char *)&resp_out[i], 40, "RockBase NM-EPD-420");
         i += 40;
         memset(&resp_out[i], 0, 20);
-        copy_cstr((char *)&resp_out[i], 20, "v1.18.0-reflbo-1.0");
+        copy_cstr((char *)&resp_out[i], 20, "v1.18.0-reflbo-1.1");
         i += 20;
         resp_out[i++] = cfg->client_repeat ? 1 : 0;
         resp_out[i++] = cfg->path_hash_mode;

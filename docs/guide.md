@@ -2,7 +2,7 @@
 
 **reflbo-nm-epd-420** ports [`Vybo/reflbo`](https://github.com/Vybo/reflbo) to the **RockBase NM-EPD-420 (BW)** hardware platform. Its 4.2″ 400×300 e-paper screen keeps showing your dashboard even with minimal holding current: the time, indoor climate (AHT20), weather, sun times, rain radar, aircraft overhead, solar forecasts, house energy, and SX1262 LoRa / MeshCore Companion telemetry.
 
-This guide covers version **1.0.0** (upstream reflbo core plus RockBase NM-EPD-420 display, sensor, Focus power mode, and LoRa MeshCore features). [Coming next](#coming-next) lists what is planned for future releases.
+This guide covers version **1.1.0** (upstream reflbo core plus RockBase NM-EPD-420 display, sensor, Focus power mode, LoRa MeshCore, and DWD OpenData radar features). [Coming next](#coming-next) lists what is planned for future releases.
 
 The images are the firmware's own output. The panel images are the host build's golden renders, which match the device pixel for pixel. The web pages ran against a demo device that draws its previews with the same renderer. On the device the screen is grey and reflective, lit by the room.
 
@@ -201,13 +201,13 @@ Set the location on the web page, by name or by coordinates. The default is Brno
 
 ## Weather radar
 
-The Rain radar preset shows rain on a map, from the [Czech Hydrometeorological Institute](https://opendata.chmi.cz) (ČHMÚ) inside its area, Czechia and around, and from [RainViewer](https://www.rainviewer.com) elsewhere. Rain shows at three strengths, as dot patterns from sparse to solid. The map is built in: borders, coasts, towns and airports for the whole world.
+The Rain radar preset shows precipitation on a map, from the German Weather Service ([DWD OpenData WMS](https://opendata.dwd.de)) across Europe (`Radar_rv_product_1x1km_ger` 1×1 km 5-minute composite across Central Europe & Western Poland, and `ICON-EU` hourly totals across Europe), and from [RainViewer](https://www.rainviewer.com) globally outside DWD coverage. Rain shows at three strengths, as dot patterns from sparse to solid. The map is built in: borders, coasts, towns and airports for the whole world.
 
 A new frame comes with each sync. Its time and source show at the bottom left, inverted once the frame is older than 30 minutes. In sync mode Always on a frame comes every 5 minutes, and BOOT plays the last hour. Outside Always on, BOOT syncs for a fresh frame.
 
 The radar's centre and zoom are set on the web page's Radar page. The rain map also fits in medium and large slots of other layouts.
 
-<p><img src="images/panel/radar.png" width="400" alt="The rain radar over Czechia at 20:40 from ČHMÚ, with Praha, Brno's marker, Olomouc, Ostrava, Wien and Bratislava, and a legend of light, moderate and heavy rain"> <img src="images/panel/radar-loop.png" width="400" alt="The radar loop at 20:15, with a row of progress dots at the bottom right"></p>
+<p><img src="images/panel/radar.png" width="400" alt="The rain radar over Czechia at 20:40 from DWD, with Praha, Brno's marker, Olomouc, Ostrava, Wien and Bratislava, and a legend of light, moderate and heavy rain"> <img src="images/panel/radar-loop.png" width="400" alt="The radar loop at 20:15, with a row of progress dots at the bottom right"></p>
 <p><img src="images/panel/radar-rainviewer.png" width="400" alt="The rain radar over northern Germany from RainViewer, with Hamburg, Berlin and Amsterdam"></p>
 
 ## Flight radar
@@ -380,7 +380,7 @@ The device speaks English and Czech: the menu, the fields, weekdays, months and 
 
 ## Updates, backup and reset
 
-- **Firmware updates** go through the Firmware page: upload `reflbo-nm-epd-420-v1.0.0.bin` from a release (or `build/reflbo-nm-epd-420.bin` from a source build). The device checks the image, writes it beside the running one and restarts into it. If the new firmware doesn't run properly for its first minute, the device rolls back to the previous one.
+- **Firmware updates** go through the Firmware page: upload `reflbo-nm-epd-420-v1.1.0.bin` from a release (or `build/reflbo-nm-epd-420.bin` from a source build). The device checks the image, writes it beside the running one and restarts into it. If the new firmware doesn't run properly for its first minute, the device rolls back to the previous one.
 - **Backup** downloads the settings and presets as one JSON file, without passwords or keys. Restore checks every file before it replaces anything. A second Forecast.Solar plane waits for its key, which a backup doesn't carry: the forecast uses the first plane until you set one.
 - **Factory reset**, in the menu or on the Backup page, erases the settings, presets, saved networks and the web password, then restarts with the first-run screen.
 

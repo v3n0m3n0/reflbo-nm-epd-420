@@ -2,7 +2,7 @@
 
 **Ultra-low-power e-paper dashboard, LoRa MeshCore companion, and climate station firmware for the RockBase NM-EPD-420 (BW) (ESP32-S3R8 + SSD1683 4.2″ 400×300 E-Paper + SX1262 + AHT20).**
 
-**Latest Release:** [`v1.0.0`](docs/releases/v1.0.0.md) · [`RELEASE_NOTES.md`](RELEASE_NOTES.md) · [`release/README.md`](release/README.md)
+**Latest Release:** [`v1.1.0`](docs/releases/v1.1.0.md) · [`RELEASE_NOTES.md`](RELEASE_NOTES.md) · [`release/README.md`](release/README.md)
 
 ---
 
@@ -25,7 +25,7 @@ This project is an independent hardware port derived from Dan Vybiral's [**`Vybo
 - **Indoor Climate & Battery Gauge:** AHT20 temperature/humidity sensor (`0xBE, 0x08, 0x00` init + post-read sleep), configurable calibration offsets, gated battery ADC divider (`ADC_EN` pulsed per measurement), and custom/learned discharge curve tracking.
 - **Connected Data Sources & Local Web UI:**
   - **Weather & Air:** Open-Meteo forecasts, UV, AQI, pollen, and local astronomical sunrise/sunset.
-  - **Radars:** ČHMÚ / RainViewer precipitation radar and `adsb.fi` / `adsb.lol` live aircraft map.
+  - **Radars:** DWD OpenData WMS (`Radar_rv_product_1x1km_ger` 1×1 km + `ICON-EU`) over Europe with global RainViewer fallback, and `adsb.fi` / `adsb.lol` live aircraft map.
   - **Solar & Energy:** Open-Meteo PV model, Forecast.Solar, Solcast, and SolaX Cloud (Developer API & Token ID).
   - **PC Telemetry:** WebSocket streaming from `reflbo-stats`.
   - **Device Web Configurator:** Responsive HTML/JS portal over SoftAP or STA (`reflbo-XXXX.local`), with OTA updates and JSON backup/restore.
@@ -57,7 +57,7 @@ Authoritative pin definitions live in [`components/board/include/board_pins.h`](
 
 ---
 
-## Flashing Prebuilt Release (`v1.0.0`)
+## Flashing Prebuilt Release (`v1.1.0`)
 
 Prebuilt binaries for the latest release live in [`release/`](release/) (see [`release/README.md`](release/README.md) for checksums and offsets). Historical release archives are published on **GitHub Releases**.
 
@@ -72,7 +72,7 @@ Or run `.\release\flash.bat COM15`.
 python -m esptool --chip esp32s3 --port COM15 --baud 921600 \
   --before default-reset --after watchdog-reset write_flash \
   --flash_mode dio --flash_size 16MB --flash_freq 80m \
-  0x0 release/reflbo-nm-epd-420-full-16MB-v1.0.0.bin
+  0x0 release/reflbo-nm-epd-420-full-16MB-v1.1.0.bin
 ```
 
 > **ESP32-S3 USB-Serial-JTAG Reset Note:** If the board entered ROM download mode via the `BOOT` button, a regular USB reset stays in download mode. The provided scripts automatically prefer `--after watchdog-reset` (requires `esptool >= v4.7`) so the chip re-samples strapping pins and boots the firmware immediately; otherwise, power-cycle using `PWR`.
@@ -115,7 +115,7 @@ Key console commands: `version`, `panel status`, `sensors`, `battery`, `rtc get`
 ---
 
 ## Documentation
-- [**Release Notes (`RELEASE_NOTES.md`)**](RELEASE_NOTES.md) & [**`v1.0.0` Details**](docs/releases/v1.0.0.md)
+- [**Release Notes (`RELEASE_NOTES.md`)**](RELEASE_NOTES.md) & [**`v1.1.0` Details**](docs/releases/v1.1.0.md) ([`v1.0.0`](docs/releases/v1.0.0.md))
 - [**Release Policy (`RELEASE.md`)**](RELEASE.md)
 - [**User Guide (`docs/guide.md`)**](docs/guide.md)
 - [**Power Measurements (`docs/power.md`)**](docs/power.md)

@@ -501,7 +501,7 @@ void meshcore_node_exec_cli(meshcore_node_state_t *st, lora_config_t *current_cf
 
     /* Exact single/multi-word commands */
     if (strcasecmp(cmd, "ver") == 0) {
-        snprintf(reply, reply_sz, "reflbo-nm-epd-420 v1.0.0 (MeshCore v1.18.0)\n");
+        snprintf(reply, reply_sz, "reflbo-nm-epd-420 v1.1.0 (MeshCore v1.18.0)\n");
         return;
     }
     if (strcasecmp(cmd, "board") == 0) {

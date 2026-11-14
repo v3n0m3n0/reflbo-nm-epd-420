@@ -271,6 +271,7 @@ static void test_cli_commands_and_validation(void)
     TEST_ASSERT_FALSE(changed);
 
     meshcore_node_exec_cli(&st, &cur, &stats, &env, "ver", &cfg_inout, &changed, reply, sizeof(reply));
+    TEST_ASSERT_NOT_NULL(strstr(reply, "v1.1.0"));
     TEST_ASSERT_NOT_NULL(strstr(reply, "MeshCore v1.18.0"));
 
     meshcore_node_exec_cli(&st, &cur, &stats, &env, "get freq", &cfg_inout, &changed, reply, sizeof(reply));

@@ -449,7 +449,7 @@ void test_companion_device_query(void)
 
     TEST_ASSERT_TRUE(strlen((char *)&resp[8]) > 0);
     TEST_ASSERT_EQUAL_STRING("RockBase NM-EPD-420", (char *)&resp[20]);
-    TEST_ASSERT_EQUAL_STRING("v1.18.0-reflbo-1.0", (char *)&resp[60]);
+    TEST_ASSERT_EQUAL_STRING("v1.18.0-reflbo-1.1", (char *)&resp[60]);
     TEST_ASSERT_EQUAL_UINT8(1, resp[80]); /* client_repeat */
     TEST_ASSERT_EQUAL_UINT8(1, resp[81]); /* path_hash_mode */
 }
