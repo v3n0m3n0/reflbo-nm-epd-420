@@ -477,7 +477,7 @@ static int radar_body(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "status") == 0) {
         app_radar_status_t r;
         app_radar_status(&r);
-        printf("weather: %s, %u frame%s kept%s\n", r.source == RADAR_SOURCE_CHMU ? "ChMU" : "RainViewer", r.frames,
+        printf("weather: %s, %u frame%s kept%s\n", r.source == RADAR_SOURCE_DWD ? "DWD" : "RainViewer", r.frames,
                r.frames == 1 ? "" : "s", app_radar_demo_active() ? " (demo mode on)" : "");
         print_time("  newest", (time_t)r.frame_at);
         print_time("  fetched", r.fetched_at);

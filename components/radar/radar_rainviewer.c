@@ -28,9 +28,19 @@ static const struct {
     { 0xffd200, 2 }, { 0xffe000, 2 }, { 0xffee00, 2 }, { 0xffffff, 3 },
 };
 
-static radar_level_t level_of_rgb(uint32_t rgb)
+static int abs_diff(int a, int b)
 {
-    int lo = 0, hi = (int)(sizeof(k_colours) / sizeof(k_colours[0])) - 1;
+    return a > b ? a - b : b - a;
+}
+
+static radar_level_t level_of_rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+{
+    if (a < 80) {
+        return RADAR_NONE;
+    }
+    uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+    int n = (int)(sizeof(k_colours) / sizeof(k_colours[0]));
+    int lo = 0, hi = n - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
         if (k_colours[mid].rgb == rgb) {
@@ -42,7 +52,43 @@ static radar_level_t level_of_rgb(uint32_t rgb)
             hi = mid - 1;
         }
     }
-    return RADAR_NONE; /* under 20 dBZ, or no colour of the table */
+
+    /* Nearest colour in k_colours[] within +/-20 per channel (excluding white hail peak 0xffffff
+     * so faint white/grey cloud edges don't promote to HEAVY). */
+    int best_d = 21;
+    radar_level_t best_lvl = RADAR_NONE;
+    for (int i = 0; i < n; i++) {
+        uint32_t c = k_colours[i].rgb;
+        if (c == 0xffffff) {
+            continue;
+        }
+        int dr = abs_diff((int)r, (int)((c >> 16) & 0xff));
+        int dg = abs_diff((int)g, (int)((c >> 8) & 0xff));
+        int db = abs_diff((int)b, (int)(c & 0xff));
+        int d = dr > dg ? dr : dg;
+        if (db > d) {
+            d = db;
+        }
+        if (d < best_d) {
+            best_d = d;
+            best_lvl = (radar_level_t)k_colours[i].level;
+            if (d == 0) {
+                break;
+            }
+        }
+    }
+    if (best_lvl != RADAR_NONE) {
+        return best_lvl;
+    }
+
+    /* Fallback for < 20 dBZ light rain/clouds and intermediate blues/yellows/reds. */
+    if (r >= 170 && (int)r > (int)g + 35) {
+        return RADAR_HEAVY;
+    }
+    if ((r >= 170 && g >= 100 && b <= 90) || (b >= 120 && r <= 30 && g <= 90)) {
+        return RADAR_MODERATE;
+    }
+    return RADAR_LIGHT;
 }
 
 bool radar_rv_parse_index(const char *json, size_t len, radar_rv_index_t *out)
@@ -114,8 +160,22 @@ bool radar_rv_frame_alloc(radar_frame_t *f, const radar_rv_tiles_t *t, uint32_t 
 
 bool radar_frame_covers(const radar_frame_t *f, const map_view_t *v)
 {
-    if (f->source == RADAR_SOURCE_CHMU) {
-        return true;
+    if (f == NULL || f->levels == NULL || f->scale <= 0.0 || v == NULL || v->w <= 0 || v->h <= 0) {
+        return false;
+    }
+    if (f->source == RADAR_SOURCE_DWD) {
+        double vx0, vy0, vx1, vy1;
+        map_pixel_to_mercator(v, 0, v->h, &vx0, &vy0);
+        map_pixel_to_mercator(v, v->w, 0, &vx1, &vy1);
+        double v_scale = (vx1 - vx0) / (double)v->w;
+        double ratio = f->scale / v_scale;
+        if (ratio > 2.2 || ratio < (1.0 / 2.2)) {
+            return false;
+        }
+        double fx1 = f->mx0 + (double)f->w * f->scale;
+        double fy0 = f->my0 - (double)f->h * f->scale;
+        double tol = 2.0 * f->scale;
+        return vx0 >= f->mx0 - tol && vx1 <= fx1 + tol && vy0 >= fy0 - tol && vy1 <= f->my0 + tol;
     }
     radar_rv_tiles_t t;
     radar_rv_tiles(v, &t);
@@ -140,11 +200,9 @@ static void on_tile_row(void *ctx, int y, const uint8_t *row, const png_info_t *
     }
     for (int x = 0; x < info->width; x++) {
         const uint8_t *px = row + 4 * x;
-        if (px[3] >= 250) {
-            radar_level_t level = level_of_rgb((uint32_t)px[0] << 16 | (uint32_t)px[1] << 8 | px[2]);
-            if (level != RADAR_NONE) {
-                radar_frame_set(c->f, c->ox + x, c->oy + y, level);
-            }
+        radar_level_t level = level_of_rgba(px[0], px[1], px[2], px[3]);
+        if (level != RADAR_NONE) {
+            radar_frame_set(c->f, c->ox + x, c->oy + y, level);
         }
     }
 }

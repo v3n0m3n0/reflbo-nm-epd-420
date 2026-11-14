@@ -343,12 +343,13 @@ static void test_quiet_hours_ignored_when_clock_is_uncalibrated_or_epoch_1970(vo
 
 static void test_radar_refreshes_follow_the_frames(void)
 {
-    /* spec §9.3: ČHMÚ every 5 min, RainViewer every 10, a minute after each step for the frame to appear */
+    /* spec §9.3: DWD RV every 5 min, RainViewer every 10, ICON-EU every 60, 1 min past each step */
     TEST_ASSERT_EQUAL_INT64(oct1(12, 1), sync_radar_next(oct1(12, 0), 300));
     TEST_ASSERT_EQUAL_INT64(oct1(12, 6), sync_radar_next(oct1(12, 1), 300)); /* strictly after */
     TEST_ASSERT_EQUAL_INT64(oct1(12, 6), sync_radar_next(oct1(12, 4) + 59, 300));
     TEST_ASSERT_EQUAL_INT64(oct1(12, 11), sync_radar_next(oct1(12, 1), 600));
     TEST_ASSERT_EQUAL_INT64(oct1(12, 1), sync_radar_next(oct1(11, 51) + 1, 600));
+    TEST_ASSERT_EQUAL_INT64(oct1(13, 1), sync_radar_next(oct1(12, 1), 3600));
 }
 
 static void test_hhmm_text(void)

@@ -26,7 +26,7 @@ void ui_fill(const char *pattern, const char *value, char *out, size_t size)
     snprintf(out, size, "%.*s%s%s", (int)(at - pattern), pattern, value, at + 2);
 }
 
-/* "20:40 · ČHMÚ", or once the frame is old "17:40 · 3 h ago"; `brief`: the time alone. */
+/* "20:40 · DWD", or once the frame is old "17:40 · 3 h ago"; `brief`: the time alone. */
 static void caption_text(const ui_context_t *ctx, const radar_frame_t *f, bool brief, char *out, size_t size)
 {
     char at[16];
@@ -39,7 +39,7 @@ static void caption_text(const ui_context_t *ctx, const radar_frame_t *f, bool b
         ui_fill(lang_str(ctx->lang, LS_AGO), age, ago, sizeof(ago));
         snprintf(out, size, "%s \xC2\xB7 %s", at, ago);
     } else {
-        snprintf(out, size, "%s \xC2\xB7 %s", at, f->source == RADAR_SOURCE_CHMU ? "\xC4\x8CHM\xC3\x9A" : "RainViewer");
+        snprintf(out, size, "%s \xC2\xB7 %s", at, f->source == RADAR_SOURCE_DWD ? "DWD" : "RainViewer");
     }
 }
 

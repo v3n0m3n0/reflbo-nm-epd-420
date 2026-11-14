@@ -395,8 +395,15 @@ static void apply(const ui_menu_intent_t *in)
         case UI_MI_STEP_SOLAR:
         case UI_MI_STEP_ENERGY:
         case UI_MI_STEP_PC: { /* a step that is off makes no requests, its refreshes in `always` included */
+            uint8_t prev = set->sync_steps;
             uint8_t bit = (uint8_t)(1u << (in->item - UI_MI_STEP_WEATHER));
             set->sync_steps = (uint8_t)(in->value ? set->sync_steps | bit : set->sync_steps & ~bit);
+            if ((prev ^ set->sync_steps) & SETTINGS_STEP_RADAR) {
+                app_radar_invalidate();
+                if (set->sync_steps & SETTINGS_STEP_RADAR) {
+                    app_sync_radar_due_now();
+                }
+            }
             save_settings = true;
             break;
         }

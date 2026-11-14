@@ -113,7 +113,7 @@ static esp_err_t request_once(fetch_session_t *s, const char *url, const char *c
     }
     buf[*len] = '\0';
     if (err != ESP_OK || !esp_http_client_is_persistent_connection(client)) {
-        fetch_close(s); /* a connection in an unknown state, or one the server closes (ČHMÚ's), isn't reused */
+        fetch_close(s); /* a connection in an unknown state, or one the server closes, isn't reused */
     }
     if (err == ESP_OK && *status != 200) {
         err = ESP_FAIL;

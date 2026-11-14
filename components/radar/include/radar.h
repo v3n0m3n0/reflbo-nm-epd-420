@@ -10,26 +10,27 @@
 #include "png.h"
 
 /*
- * The weather radar (spec §11.2): ČHMÚ's composite where it covers the view, RainViewer's tiles
- * elsewhere, both decoded once into a frame of three rain levels and drawn into any view. Pure C,
- * host-buildable; the fetching is in the sync task.
+ * The weather radar (spec §11.2): DWD WMS (Radar_rv 1x1 km over central Europe, ICON-EU
+ * across Europe) where it covers the view, with RainViewer's tiles elsewhere or as fallback, both
+ * decoded once into a frame of three rain levels and drawn into any view. Pure C, host-buildable;
+ * the fetching is in the sync task.
  */
 
 typedef enum {
     RADAR_NONE,
-    RADAR_LIGHT,    /* from about 20 dBZ */
-    RADAR_MODERATE, /* from about 35 dBZ (ČHMÚ: 36) */
-    RADAR_HEAVY,    /* from about 45 dBZ (ČHMÚ: 44) */
+    RADAR_LIGHT,    /* from about 20 dBZ (or DWD >= 0.1 mm/h / RainViewer light) */
+    RADAR_MODERATE, /* from about 35 dBZ (or DWD >= 2.0 mm/h) */
+    RADAR_HEAVY,    /* from about 45 dBZ (or DWD >= 10.0 mm/h) */
 } radar_level_t;
 
 typedef enum {
-    RADAR_SOURCE_CHMU,
+    RADAR_SOURCE_DWD,
     RADAR_SOURCE_RAINVIEWER,
 } radar_source_t;
 
 /* A frame: rain levels on a grid of web-Mercator pixels. */
 typedef struct {
-    uint32_t time;   /* UTC seconds: the end of ČHMÚ's 5 minutes, RainViewer's frame time */
+    uint32_t time;   /* UTC seconds: the end of DWD's step, or RainViewer's frame time */
     uint8_t source;  /* radar_source_t */
     uint16_t w, h;   /* grid pixels */
     double mx0, my0; /* web Mercator metres of the grid's top-left corner */
@@ -43,27 +44,34 @@ void radar_frame_free(radar_frame_t *f, const png_mem_t *mem);
 radar_level_t radar_frame_level(const radar_frame_t *f, int x, int y); /* RADAR_NONE outside */
 void radar_frame_set(radar_frame_t *f, int x, int y, radar_level_t level);
 
-/* ---- ČHMÚ's composite of maximum reflectivity (CC BY 4.0) ---- */
+/* ---- DWD OpenData WMS (Deutscher Wetterdienst) ---- */
 
-#define RADAR_CHMU_URL "https://opendata.chmi.cz/meteorology/weather/radar/composite/maxz/png/"
-#define RADAR_CHMU_STEP_S 300
-/* Its data area, from the HDF5 composite's corners (ODIM `where`): 598 x 378 pixels of 1555.7 m. */
-#define RADAR_CHMU_W 598
-#define RADAR_CHMU_H 378
-#define RADAR_CHMU_SCALE 1555.7
-#define RADAR_CHMU_MX0 1254222.15 /* 11.266869 E */
-#define RADAR_CHMU_MY0 6702777.85 /* 51.458369 N */
-#define RADAR_CHMU_PNG_TOP 82     /* the PNG's rows above the data: title and side projection */
+#define RADAR_DWD_WMS_URL "https://maps.dwd.de/geoserver/dwd/wms"
+#define RADAR_DWD_RV_LAYER "dwd:Radar_rv_product_1x1km_ger"
+#define RADAR_DWD_ICONEU_LAYER "dwd:Icon-eu_reg00625_fd_sl_TOTPREC01H"
+#define RADAR_DWD_RV_STEP_S 300
+#define RADAR_DWD_ICONEU_STEP_S 3600
 
-/* The file name of the frame that ends at `t` (UTC), "pacz2gmaps3.z_max3d.20260924.1120.0.png". */
-void radar_chmu_name(time_t t, char *out, size_t size);
-/* The newest frame to ask for at `now`: the latest 5-minute step at least 5 minutes old. */
-time_t radar_chmu_newest(time_t now);
-/* The point lies inside ČHMÚ's data area. */
-bool radar_chmu_covers(double lat, double lon);
-/* ČHMÚ's PNG into `out`: its data area, each palette colour to its level by ČHMÚ's colour scale. */
-png_err_t radar_chmu_decode(const uint8_t *png, size_t len, const png_mem_t *mem, uint32_t time,
-                            radar_frame_t *out);
+typedef enum {
+    RADAR_DWD_LAYER_RV,
+    RADAR_DWD_LAYER_ICONEU,
+} radar_dwd_layer_t;
+
+/* The point lies inside DWD ICON-EU European domain. */
+bool radar_dwd_covers(double lat, double lon);
+/* Best DWD WMS layer for `view`: 1x1 km Radar_rv in central Europe, ICON-EU elsewhere. */
+radar_dwd_layer_t radar_dwd_layer_for_view(const map_view_t *view);
+/* Step interval in seconds for the DWD layer serving `(lat, lon)` at `zoom`. */
+uint32_t radar_dwd_step_s(double lat, double lon, double zoom);
+/* The newest completed step timestamp at `now` (delay 300 s for RV, 0 s for ICON-EU). */
+time_t radar_dwd_newest(time_t now, uint32_t step_s);
+/* Build the WMS 1.3.0 GetMap URL for `view` (CRS=EPSG:3857) at `step_time` (0 omits TIME=). */
+void radar_dwd_url(const map_view_t *view, radar_dwd_layer_t layer, time_t step_time, char *out,
+                   size_t size);
+/* Decode a DWD WMS PNG (matching `view->w` x `view->h`) into `out`. */
+png_err_t radar_dwd_decode(const uint8_t *png, size_t len, const png_mem_t *mem,
+                           const map_view_t *view, radar_dwd_layer_t layer, uint32_t frame_time,
+                           radar_frame_t *out);
 
 /* ---- RainViewer (personal and educational use) ---- */
 
@@ -103,8 +111,8 @@ bool radar_rv_frame_alloc(radar_frame_t *f, const radar_rv_tiles_t *t, uint32_t 
 /* One tile's PNG into the frame at tile (x, y) of the world. */
 png_err_t radar_rv_decode_tile(const uint8_t *png, size_t len, const png_mem_t *mem, const radar_rv_tiles_t *t,
                                int x, int y, radar_frame_t *f);
-/* The frame has the rain for all of the view: ČHMÚ's for any (beyond its grid the edge shows),
- * RainViewer's when it holds the tiles the view needs, at the view's tile zoom. */
+/* The frame has the rain for all of the view: DWD's when the frame's Mercator bbox covers the
+ * view at a compatible scale, RainViewer's when it holds the tiles at the view's tile zoom. */
 bool radar_frame_covers(const radar_frame_t *f, const map_view_t *v);
 
 /* A frame as /fs/state/radar.bin keeps it (spec §11.2, D28), so a power-off or a deep sleep keeps
@@ -132,7 +140,7 @@ bool radar_inks(radar_level_t level, int x, int y);
 
 /* ---- the frames kept ---- */
 
-#define RADAR_LOOP_FRAMES 12 /* the last hour at ČHMÚ's 5 minutes (D28) */
+#define RADAR_LOOP_FRAMES 12 /* the last hour at DWD RV's 5 minutes (D28) */
 
 typedef struct {
     radar_frame_t frames[RADAR_LOOP_FRAMES]; /* oldest first */

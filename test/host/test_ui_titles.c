@@ -34,7 +34,7 @@ static ui_context_t full_context(void)
 {
     ui_context_t ctx = fixture_context();
     fixture_solar_ctx(&ctx, true, true);
-    ctx.radar = fixture_radar(fixture_chmu(ctx.now - 8 * 60));
+    ctx.radar = fixture_radar(fixture_dwd(ctx.now - 8 * 60));
     return ctx;
 }
 

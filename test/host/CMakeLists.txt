@@ -79,7 +79,7 @@ target_link_libraries(map PUBLIC gfx util m)
 
 # radar: the decoders, the frame store and the drawing build on the host; the fetching does not.
 add_library(radar_logic STATIC ${REPO_ROOT}/components/radar/radar_frame.c
-            ${REPO_ROOT}/components/radar/radar_chmu.c ${REPO_ROOT}/components/radar/radar_rainviewer.c
+            ${REPO_ROOT}/components/radar/radar_dwd.c ${REPO_ROOT}/components/radar/radar_rainviewer.c
             ${REPO_ROOT}/components/radar/radar_store.c)
 target_include_directories(radar_logic PUBLIC ${REPO_ROOT}/components/radar/include)
 target_compile_options(radar_logic PRIVATE ${REFLBO_WARNINGS})

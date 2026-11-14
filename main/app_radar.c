@@ -46,28 +46,43 @@ static void ready(void)
 static uint8_t source_now(void)
 {
     const settings_t *set = app_settings();
-    return radar_chmu_covers(set->wx_lat_e4 / 1e4, set->wx_lon_e4 / 1e4) ? RADAR_SOURCE_CHMU : RADAR_SOURCE_RAINVIEWER;
+    return radar_dwd_covers(set->wx_lat_e4 / 1e4, set->wx_lon_e4 / 1e4) ? RADAR_SOURCE_DWD
+                                                                        : RADAR_SOURCE_RAINVIEWER;
 }
 
-/* One frame, or in sync mode `always` the loop's hour (D28): 12 of ČHMÚ's, 6 of RainViewer's. */
+/* One frame, or in sync mode `always` the loop's hour (D28): 12 of DWD RV, 6 of ICON-EU/RainViewer. */
 static int keep_count(void)
 {
-    if (app_settings()->sync_mode != SETTINGS_SYNC_ALWAYS) {
+    const settings_t *set = app_settings();
+    if (set->sync_mode != SETTINGS_SYNC_ALWAYS) {
         return 1;
     }
-    return source_now() == RADAR_SOURCE_CHMU ? RADAR_LOOP_FRAMES : 3600 / RADAR_RV_STEP_S;
+    if (source_now() != RADAR_SOURCE_DWD) {
+        return 3600 / RADAR_RV_STEP_S;
+    }
+    map_view_t v;
+    map_view_init(&v, set->wx_lat_e4, set->wx_lon_e4, set->wx_zoom_q / 4.0, RADAR_VIEW_W,
+                  RADAR_VIEW_H);
+    return radar_dwd_layer_for_view(&v) == RADAR_DWD_LAYER_RV ? RADAR_LOOP_FRAMES : 6;
 }
 
 uint32_t app_radar_step_s(void)
 {
-    return source_now() == RADAR_SOURCE_CHMU ? RADAR_CHMU_STEP_S : RADAR_RV_STEP_S;
+    const settings_t *set = app_settings();
+    if (source_now() == RADAR_SOURCE_DWD) {
+        return radar_dwd_step_s(set->wx_lat_e4 / 1e4, set->wx_lon_e4 / 1e4,
+                                set->wx_zoom_q / 4.0);
+    }
+    return RADAR_RV_STEP_S;
 }
 
-/* A frame with the rain for the view as it is now: the Radar layout's map, which holds any slot's. */
+/* A frame with the rain for the view as it is now: accepts DWD or RainViewer fallback whenever
+ * the stored grid covers the current view. */
 static bool fits(const radar_frame_t *f)
 {
     const settings_t *set = app_settings();
-    if (f->source != source_now()) {
+    bool dwd = source_now() == RADAR_SOURCE_DWD;
+    if (f->source != RADAR_SOURCE_RAINVIEWER && !(f->source == RADAR_SOURCE_DWD && dwd)) {
         return false;
     }
     map_view_t v;
@@ -190,6 +205,17 @@ void app_radar_apply(radar_fetch_result_t *res, uint8_t result, const char *deta
     }
 }
 
+void app_radar_invalidate(void)
+{
+    ready();
+    s_loop_count = 0;
+    radar_store_clear(&s_store);
+    s_saved_at = 0;
+    s_loaded = false;
+    remove(FRAME_PATH);
+    memset(&s_status, 0, sizeof(s_status));
+}
+
 void app_radar_status(app_radar_status_t *out)
 {
     tidy();
@@ -197,7 +223,7 @@ void app_radar_status(app_radar_status_t *out)
     out->frames = s_demo ? 1 : (uint8_t)s_store.count;
     const radar_frame_t *f = s_demo ? &s_demo_frame : radar_store_newest(&s_store);
     out->frame_at = f != NULL ? f->time : 0;
-    out->source = source_now();
+    out->source = f != NULL ? f->source : source_now();
 }
 
 void app_radar_demo(bool on)

@@ -67,37 +67,27 @@ static void on_row(void *ctx, int y, const uint8_t *row, const png_info_t *info)
     }
 }
 
-static void test_a_chmu_frame_decodes_with_its_palette(void)
+static void test_a_dwd_rv_frame_decodes_as_rgba(void)
 {
     size_t len;
-    uint8_t *data = load("chmi_rain.png", &len);
+    uint8_t *data = load("dwd_rv_rain.png", &len);
     png_info_t info;
     static stats_t s;
     memset(&s, 0, sizeof(s));
-    s.probe_x = 300;
-    s.probe_y = 300;
+    s.probe_x = 225;
+    s.probe_y = 0;
     TEST_ASSERT_EQUAL_INT(PNG_OK, png_decode(data, len, NULL, &info, on_row, &s));
-    TEST_ASSERT_EQUAL_UINT16(680, info.width);
-    TEST_ASSERT_EQUAL_UINT16(460, info.height);
-    TEST_ASSERT_EQUAL_UINT8(PNG_PALETTE, info.type);
+    TEST_ASSERT_EQUAL_UINT16(400, info.width);
+    TEST_ASSERT_EQUAL_UINT16(279, info.height);
+    TEST_ASSERT_EQUAL_UINT8(PNG_RGBA, info.type);
     TEST_ASSERT_EQUAL_UINT8(8, info.depth);
-    TEST_ASSERT_EQUAL_UINT16(256, info.palette_size);
-    static const uint8_t k_green[4] = { 0, 160, 0, 255 }; /* 20 dBZ on ČHMÚ's scale */
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(k_green, info.palette[191], 4);
-    TEST_ASSERT_EQUAL_UINT8(0, info.palette[0][3]); /* tRNS: no echo is transparent */
-    TEST_ASSERT_EQUAL_INT(460, s.rows);
-    TEST_ASSERT_EQUAL_INT32(195187, s.count[0]);
-    TEST_ASSERT_EQUAL_INT32(15079, s.count[191]);
-    TEST_ASSERT_EQUAL_INT32(2, s.count[182]);
-    TEST_ASSERT_EQUAL_INT32(4911, s.count[145]);
-    TEST_ASSERT_EQUAL_UINT8(194, s.probe[0]);
-    free(data);
-
-    data = load("chmi_dry.png", &len); /* 3 KB: a dry night */
-    memset(&s, 0, sizeof(s));
-    TEST_ASSERT_EQUAL_INT(PNG_OK, png_decode(data, len, NULL, &info, on_row, &s));
-    TEST_ASSERT_EQUAL_INT32(304736, s.count[0]);
-    TEST_ASSERT_EQUAL_INT32(5833, s.count[145]);
+    TEST_ASSERT_EQUAL_INT(279, s.rows);
+    TEST_ASSERT_EQUAL_INT32(35734, s.opaque);
+    TEST_ASSERT_EQUAL_INT32(5236042, s.alpha_sum);
+    TEST_ASSERT_EQUAL_INT(225, s.first_x);
+    TEST_ASSERT_EQUAL_INT(0, s.first_y);
+    static const uint8_t k_magenta[4] = { 251, 0, 255, 255 };
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(k_magenta, s.probe, 4);
     free(data);
 }
 
@@ -227,6 +217,40 @@ static void test_every_filter_type_is_undone(void)
     TEST_ASSERT_EQUAL_UINT8(255, info.palette[2][3]); /* no tRNS: every entry opaque */
 }
 
+static void test_an_8bit_palette_with_trns_decodes(void)
+{
+    static const uint8_t k_sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+    static const uint8_t k_plte[4 * 3] = { 0, 0, 0, 10, 20, 30, 40, 50, 60, 255, 255, 255 };
+    static const uint8_t k_trns[2] = { 0, 128 };
+    static const uint8_t k_raw[2 * 5] = { 0, 0, 1, 2, 3, 0, 3, 2, 1, 0 };
+    uint8_t img[512];
+    memcpy(img, k_sig, 8);
+    size_t n = 8;
+    uint8_t ihdr[13] = { 0, 0, 0, 4, 0, 0, 0, 2, 8, PNG_PALETTE, 0, 0, 0 };
+    n += put_chunk(img + n, "IHDR", ihdr, 13);
+    n += put_chunk(img + n, "PLTE", k_plte, sizeof(k_plte));
+    n += put_chunk(img + n, "tRNS", k_trns, sizeof(k_trns));
+    uint8_t z[128];
+    uLongf zn = sizeof(z);
+    TEST_ASSERT_EQUAL_INT(Z_OK, compress(z, &zn, k_raw, sizeof(k_raw)));
+    n += put_chunk(img + n, "IDAT", z, (uint32_t)zn);
+    n += put_chunk(img + n, "IEND", NULL, 0);
+
+    png_info_t info;
+    static stats_t s;
+    memset(&s, 0, sizeof(s));
+    s.probe_x = 1;
+    s.probe_y = 0;
+    TEST_ASSERT_EQUAL_INT(PNG_OK, png_decode(img, n, NULL, &info, on_row, &s));
+    TEST_ASSERT_EQUAL_UINT16(4, info.palette_size);
+    TEST_ASSERT_EQUAL_UINT8(0, info.palette[0][3]);
+    TEST_ASSERT_EQUAL_UINT8(128, info.palette[1][3]);
+    TEST_ASSERT_EQUAL_UINT8(255, info.palette[2][3]);
+    TEST_ASSERT_EQUAL_INT32(2, s.count[0]);
+    TEST_ASSERT_EQUAL_INT32(2, s.count[1]);
+    TEST_ASSERT_EQUAL_UINT8(1, s.probe[0]);
+}
+
 static void ignore_row(void *ctx, int y, const uint8_t *row, const png_info_t *info)
 {
     (void)y;
@@ -291,7 +315,7 @@ static void counting_free(void *p)
 
 static void test_memory_comes_from_the_hooks_and_goes_back(void)
 {
-    static const char *const k_files[] = { "chmi_dry.png", "dwd_iconeu_rain.png" };
+    static const char *const k_files[] = { "dwd_rv_rain.png", "dwd_iconeu_rain.png" };
     const png_mem_t mem = { counting_alloc, counting_free };
     png_info_t info;
     int rows = 0;
@@ -449,9 +473,10 @@ static void test_a_dwd_iconeu_frame_decodes_4bit_palette(void)
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_a_chmu_frame_decodes_with_its_palette);
+    RUN_TEST(test_a_dwd_rv_frame_decodes_as_rgba);
     RUN_TEST(test_a_rainviewer_tile_decodes_as_rgba);
     RUN_TEST(test_every_filter_type_is_undone);
+    RUN_TEST(test_an_8bit_palette_with_trns_decodes);
     RUN_TEST(test_broken_and_unsupported_files_are_refused);
     RUN_TEST(test_memory_comes_from_the_hooks_and_goes_back);
     RUN_TEST(test_sub_byte_palette_depths_unpack_to_indices);

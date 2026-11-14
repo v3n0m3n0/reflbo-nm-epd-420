@@ -40,7 +40,7 @@ static void test_world_pixels_match_the_tiles(void)
     TEST_ASSERT_EQUAL_INT(43, (int)(y / MAP_TILE_PX));
 }
 
-static void test_mercator_metres_match_chmus_grid(void)
+static void test_mercator_metres_match_epsg3857_bounds(void)
 {
     double mx, my;
     map_mercator(48.047275, 11.266869, &mx, &my);
@@ -103,7 +103,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_the_centre_lands_mid_view_and_round_trips);
     RUN_TEST(test_world_pixels_match_the_tiles);
-    RUN_TEST(test_mercator_metres_match_chmus_grid);
+    RUN_TEST(test_mercator_metres_match_epsg3857_bounds);
     RUN_TEST(test_the_scale_and_the_range_zoom);
     RUN_TEST(test_distance_and_bearing);
     RUN_TEST(test_the_bounds_hold_the_corners);

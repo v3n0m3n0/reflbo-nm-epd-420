@@ -167,6 +167,7 @@ void app_ui_restore_forecast(void);
 void app_sync_schedule(void);    /* the next automatic sync, after a sync, a settings change or a clock move */
 time_t app_sync_due(void);       /* for the wake scheduler; 0 = none */
 void app_sync_tick(void);        /* starts a sync that is due; quiet hours in sync mode `always` */
+void app_sync_radar_due_now(void); /* reset radar refresh timer and fetch now when connected */
 esp_err_t app_sync_now(void);    /* on demand: ESP_ERR_NOT_FOUND with no network saved */
 /* The Solar page's Check now (M6d): the Solar and Energy steps alone, outside the syncs' history and retries;
  * ESP_ERR_NOT_FOUND with no network saved, ESP_ERR_INVALID_STATE while a sync runs or with only the device's own
@@ -240,7 +241,8 @@ void app_radar_apply(radar_fetch_result_t *res, uint8_t result, const char *deta
  * the newest frame read from its file, each once a boot or a wake, so other presets touch neither. */
 void app_radar_prepare(const ui_preset_t *p);
 const ui_radar_t *app_radar_ui(void); /* the radars as a render draws them now */
-uint32_t app_radar_step_s(void);      /* the source's frame step: 300 s for ČHMÚ, 600 for RainViewer */
+uint32_t app_radar_step_s(void);      /* the source's frame step: 300 s (DWD RV), 3600 (ICON-EU), 600 (RainViewer) */
+void app_radar_invalidate(void);      /* drop cached radar frames and status after view/settings change */
 void app_radar_status(app_radar_status_t *out);
 void app_radar_demo(bool on); /* `radar demo on|off` */
 bool app_radar_demo_active(void);

@@ -733,13 +733,13 @@ async function radarPage() {
   const wxImg = h('img', { class: 'screen', alt: 'The Radar layout' });
   const w = now.weather || {};
   const wxCard = card('Weather radar', wxImg, facts([
-    ['Source', w.source === 'rainviewer' ? 'RainViewer, as the centre is outside ČHMÚ\'s area' : 'ČHMÚ'],
+    ['Source', w.source === 'rainviewer' ? 'RainViewer (outside DWD coverage or fallback)' : 'DWD'],
     ['Newest frame', w.frame_at ? when(w.frame_at) : 'none yet'],
     ['Frames kept', `${w.frames ?? 0}${always ? ', the last hour for the loop' : ''}`],
     w.error ? ['Last fetch', `failed: ${w.error}`] : null,
   ]),
   h('p', { class: 'muted small', text: 'A frame comes with each sync, and every 5 minutes in sync mode Always on ' +
-    '(RainViewer: 10). Rain for a new centre or zoom comes with the next one. In sync mode Always on, BOOT on the ' +
+    '(DWD ICON-EU: 60 min; RainViewer: 10 min). Rain for a new centre or zoom fetches a fresh frame. In sync mode Always on, BOOT on the ' +
     'Radar layout plays the last hour; otherwise BOOT there syncs for a fresh frame.' }),
   wxCentre.els, field('Zoom', zoom), wxNote,
   actions(button('Save weather radar', () => busy(wxCard, wxNote, async () => {
@@ -747,8 +747,9 @@ async function radarPage() {
     toast('Weather radar saved');
     await radarPreview(wxImg, 'radar');
   }), 'primary')),
-  h('p', { class: 'muted small' }, 'Rain: ', link('https://opendata.chmi.cz', 'Data: ČHMÚ, opendata.chmi.cz'),
-    ', CC BY 4.0; outside its area ', link('https://www.rainviewer.com', 'RainViewer'), '.'));
+  h('p', { class: 'muted small' }, 'Rain: ', link('https://opendata.dwd.de', 'DWD OpenData WMS'),
+    ' (Radar_rv 1x1 km / ICON-EU); outside DWD coverage or fallback: ',
+    link('https://www.rainviewer.com', 'RainViewer'), '.'));
 
   const flNote = h('p');
   const flCentre = centreEditor('fl-centre', s, fl, flNote);
@@ -786,7 +787,7 @@ async function radarPage() {
       link('https://adsb.lol', 'adsb.lol'), '.'));
   const mapCredit = h('p', { class: 'muted small' }, 'Map: borders and towns from ',
     link('https://www.naturalearthdata.com', 'Natural Earth'), ', airports from ',
-    link('https://ourairports.com', 'OurAirports'), '; more towns in ČHMÚ\'s area from ',
+    link('https://ourairports.com', 'OurAirports'), '; more towns in central Europe from ',
     link('https://www.geonames.org', 'GeoNames'), ', CC BY 4.0.');
   main.replaceChildren(h('h1', { text: 'Radar' }), wxCard, flCard, mapCredit);
   await Promise.all([radarPreview(wxImg, 'radar'), radarPreview(flImg, 'flights')]).catch(() => {});

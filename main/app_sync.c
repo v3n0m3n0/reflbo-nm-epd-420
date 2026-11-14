@@ -623,6 +623,39 @@ static void refresh_tick(time_t now)
     }
 }
 
+void app_sync_radar_due_now(void)
+{
+    s_radar_next = 0;
+    const settings_t *set = app_settings();
+    if (!(set->sync_steps & SETTINGS_STEP_RADAR) || app_focus_mode_active() ||
+        app_state()->critical || app_ui_night() || !app_net_ready() || s_active) {
+        return;
+    }
+    netmgr_status_t ns;
+    netmgr_status(&ns);
+    if (ns.state != NETMGR_STATION || ns.ip[0] == '\0') {
+        return;
+    }
+    time_t now = time(NULL);
+    if (now <= 0) {
+        now = 1;
+    }
+    if (app_sync_lan_ui()) {
+        refresh_tick(now);
+        return;
+    }
+    EXT_RAM_BSS_ATTR static sync_request_t req;
+    req = (sync_request_t){ .kind = SYNC_KIND_REFRESH, .steps = set->sync_steps,
+                            .refresh_radar = true, .now = timekeeping_valid() ? (uint32_t)now : 0 };
+    app_radar_request(&req.radar);
+    if (sync_start(&req, done) == ESP_OK) {
+        s_active = true;
+        s_refresh = true;
+        s_manual = false;
+        ESP_LOGI(TAG, "refresh: radar");
+    }
+}
+
 void app_sync_tick(void)
 {
     time_t now = time(NULL);

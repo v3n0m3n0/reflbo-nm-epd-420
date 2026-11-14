@@ -488,7 +488,7 @@ const radarStatus = (radar) => ({ device: {}, time: { valid: true }, battery: {}
 function radarDevice(settings, patches, previews) {
   return {
     'GET /api/settings': () => reply(200, settings),
-    'GET /api/status': () => reply(200, radarStatus({ weather: { source: 'chmu', frames: 1, frame_at: 1790880000 },
+    'GET /api/status': () => reply(200, radarStatus({ weather: { source: 'dwd', frames: 1, frame_at: 1790880000 },
                                                       flights: { on: false, aircraft: 0, failed: false } })),
     'PATCH /api/settings': (init) => { patches.push(JSON.parse(init.body)); return reply(200, settings); },
     'POST /api/preview.bmp': (init) => { previews.push(JSON.parse(init.body)); return reply(200, 'BM', 'image/bmp'); },
@@ -561,7 +561,7 @@ test('the flight radar says it runs only in sync mode Always on', async () => {
 
 test('the flight radar says why its last poll failed and when routes come back', async () => {
   const device = radarDevice({ ...RADAR_SETTINGS, sync: { mode: 'always' } }, [], []);
-  device['GET /api/status'] = () => reply(200, radarStatus({ weather: { source: 'chmu', frames: 1, frame_at: 1790880000 },
+  device['GET /api/status'] = () => reply(200, radarStatus({ weather: { source: 'dwd', frames: 1, frame_at: 1790880000 },
     flights: { on: true, aircraft: 0, failed: true, error: 'HTTP 429', routes_paused_until: 1790883600 } }));
   const { ctx, main } = await load(device);
   await ctx.radarPage();
@@ -576,7 +576,7 @@ test('the Radar page previews both radars and credits their sources', async () =
   await settle();
   assert.deepEqual(previews.map((d) => d.presets[0].layout).sort(), ['flights', 'radar']);
   const all = text(main);
-  for (const credit of ['ČHMÚ', 'CC BY 4.0', 'RainViewer', 'adsb.fi', 'adsb.lol', 'GeoNames']) assert.ok(all.includes(credit), credit);
+  for (const credit of ['DWD', 'CC BY 4.0', 'RainViewer', 'adsb.fi', 'adsb.lol', 'GeoNames']) assert.ok(all.includes(credit), credit);
   assert.match(all, /Newest frame/);
 });
 

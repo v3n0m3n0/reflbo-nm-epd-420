@@ -967,11 +967,22 @@ esp_err_t app_ui_replace_settings(const char *json, char *err, size_t err_size)
         snprintf(err, err_size, "settings.json is larger than %u bytes", (unsigned)sizeof(s_settings_base) - 1);
         return ESP_ERR_INVALID_SIZE;
     }
+    bool radar_changed = parsed.lat_e4 != s.settings.lat_e4 || parsed.lon_e4 != s.settings.lon_e4 ||
+                         parsed.wx_lat_e4 != s.settings.wx_lat_e4 ||
+                         parsed.wx_lon_e4 != s.settings.wx_lon_e4 ||
+                         parsed.wx_zoom_q != s.settings.wx_zoom_q ||
+                         ((parsed.sync_steps ^ s.settings.sync_steps) & SETTINGS_STEP_RADAR) != 0;
     settings_replaced(&parsed, &s.settings); /* a page that turns `always` on: BOOT double returns */
     s.settings = parsed;
     memcpy(s_settings_base, json, n + 1); /* keys this firmware doesn't know stay, as in the file */
     esp_err_t e = app_ui_save_settings();
+    if (radar_changed) {
+        app_radar_invalidate();
+    }
     settings_changed();
+    if (radar_changed && (s.settings.sync_steps & SETTINGS_STEP_RADAR)) {
+        app_sync_radar_due_now();
+    }
     return e;
 }
 

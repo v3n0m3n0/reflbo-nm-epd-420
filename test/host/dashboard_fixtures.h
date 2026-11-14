@@ -314,25 +314,25 @@ static inline bool fixture_dashboard(const char *name, ui_context_t *ctx, ui_pre
         ctx->lang = lang_get("cs");
         fixture_forecast(&s_fix_ds, FIX_NOW - 3600);
         fixture_rain_now(&s_fix_ds);
-    } else if (strcmp(name, "radar") == 0) { /* M6: the Rain radar preset, ČHMÚ's frame 8 min old */
+    } else if (strcmp(name, "radar") == 0) { /* M6: the Rain radar preset, DWD's frame 8 min old */
         *preset = fixture_preset("rain");
-        ctx->radar = fixture_radar(fixture_chmu(FIX_NOW - 8 * 60));
+        ctx->radar = fixture_radar(fixture_dwd(FIX_NOW - 8 * 60));
     } else if (strcmp(name, "radar_stale") == 0) { /* 3 h old: the time inverted, with its age */
         *preset = fixture_preset("rain");
-        ctx->radar = fixture_radar(fixture_chmu(FIX_NOW - 3 * 3600 - 8 * 60));
+        ctx->radar = fixture_radar(fixture_dwd(FIX_NOW - 3 * 3600 - 8 * 60));
     } else if (strcmp(name, "radar_stale_cs") == 0) {
         fixture_dashboard("radar_stale", ctx, preset);
         ctx->lang = lang_get("cs");
     } else if (strcmp(name, "radar_loop") == 0) { /* the loop's seventh frame of twelve (D28) */
         *preset = fixture_preset("rain");
-        ui_radar_t *radar = fixture_radar(fixture_chmu(FIX_NOW - 33 * 60));
+        ui_radar_t *radar = fixture_radar(fixture_dwd(FIX_NOW - 33 * 60));
         radar->loop_at = 6;
         radar->loop_count = 12;
         ctx->radar = radar;
     } else if (strcmp(name, "radar_none") == 0) { /* before the first frame */
         *preset = fixture_preset("rain");
         ctx->radar = fixture_radar(NULL);
-    } else if (strcmp(name, "radar_rainviewer") == 0) { /* outside ČHMÚ: Berlin from RainViewer at zoom 5 */
+    } else if (strcmp(name, "radar_rainviewer") == 0) { /* RainViewer frame over Berlin at zoom 5 */
         *preset = fixture_preset("rain");
         ui_radar_t *radar = fixture_radar(fixture_rainviewer(FIX_NOW - 14 * 60));
         radar->wx_lat_e4 = 525200;
@@ -343,7 +343,7 @@ static inline bool fixture_dashboard(const char *name, ui_context_t *ctx, ui_pre
         *preset = fixture_preset("indoor");
         preset->slots[0] = UI_FIELD_RAIN_MAP;
         preset->slots[4] = UI_FIELD_RAIN_MAP;
-        ui_radar_t *radar = fixture_radar(fixture_chmu(FIX_NOW - 3 * 3600 - 8 * 60));
+        ui_radar_t *radar = fixture_radar(fixture_dwd(FIX_NOW - 3 * 3600 - 8 * 60));
         radar->wx_lat_e4 = 506000; /* the rain north of Praha */
         radar->wx_lon_e4 = 139000;
         ctx->radar = radar;
@@ -351,7 +351,7 @@ static inline bool fixture_dashboard(const char *name, ui_context_t *ctx, ui_pre
         *preset = fixture_preset("weather");
         preset->slots[0] = UI_FIELD_RAIN_MAP;
         fixture_forecast(&s_fix_ds, FIX_NOW - 3600);
-        ctx->radar = fixture_radar(fixture_chmu(FIX_NOW - 8 * 60));
+        ctx->radar = fixture_radar(fixture_dwd(FIX_NOW - 8 * 60));
     } else if (strcmp(name, "flights") == 0) { /* M6: the Flights preset at 50 km, the nearest's route known */
         *preset = fixture_preset("flights");
         ctx->radar = fixture_flights(50, fixture_aircraft(50), fixture_route(), ctx->now);

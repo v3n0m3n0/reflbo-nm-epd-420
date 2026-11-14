@@ -7,8 +7,8 @@
 #include "radar.h"
 #include "unity.h"
 
-/* The weather radar (spec §11.2). The level counts come from Pillow and numpy over the same files,
- * with ČHMÚ's colour scale (scl/scl-dbz-mmh.png) and RainViewer's Universal Blue table. */
+/* The weather radar (spec §11.2). The level counts come from DWD WMS (Radar_rv 1x1 km RGBA
+ * and ICON-EU 4-bit palette) and RainViewer's Universal Blue / < 20 dBZ RGBA table. */
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -41,61 +41,202 @@ static void count_levels(const radar_frame_t *f, long out[4])
 
 #define T_20260924_1120 1790248800 /* 2026-09-24 11:20 UTC */
 
-static void test_chmu_names_and_the_newest_step(void)
+static uint32_t test_crc32(uint32_t crc, const uint8_t *buf, size_t n)
 {
-    char name[64];
-    radar_chmu_name(T_20260924_1120, name, sizeof(name));
-    TEST_ASSERT_EQUAL_STRING("pacz2gmaps3.z_max3d.20260924.1120.0.png", name);
-    TEST_ASSERT_EQUAL_INT64(T_20260924_1120, radar_chmu_newest(T_20260924_1120 + 7 * 60 + 30)); /* 11:27:30 */
-    TEST_ASSERT_EQUAL_INT64(T_20260924_1120, radar_chmu_newest(T_20260924_1120 + 5 * 60));      /* 11:25:00 */
-    TEST_ASSERT_EQUAL_INT64(T_20260924_1120 - 300, radar_chmu_newest(T_20260924_1120 + 4 * 60 + 59));
+    crc = ~crc;
+    for (size_t i = 0; i < n; i++) {
+        crc ^= buf[i];
+        for (int b = 0; b < 8; b++) {
+            crc = (crc >> 1) ^ (0xedb88320u & (uint32_t)(-(int32_t)(crc & 1u)));
+        }
+    }
+    return ~crc;
 }
 
-static void test_chmu_covers_czechia_and_its_rim(void)
+static size_t put_png_chunk(uint8_t *out, const char type[4], const uint8_t *body, uint32_t n)
 {
-    TEST_ASSERT_TRUE(radar_chmu_covers(49.1951, 16.6068));  /* Brno */
-    TEST_ASSERT_TRUE(radar_chmu_covers(48.3069, 14.2858));  /* Linz */
-    TEST_ASSERT_TRUE(radar_chmu_covers(48.1372, 11.5756));  /* München */
-    TEST_ASSERT_FALSE(radar_chmu_covers(52.5200, 13.4050)); /* Berlin, north of it */
-    TEST_ASSERT_FALSE(radar_chmu_covers(47.4979, 19.0402)); /* Budapest, south of it */
-    TEST_ASSERT_FALSE(radar_chmu_covers(49.8397, 24.0297)); /* Lviv, east of it */
+    out[0] = (uint8_t)(n >> 24);
+    out[1] = (uint8_t)(n >> 16);
+    out[2] = (uint8_t)(n >> 8);
+    out[3] = (uint8_t)n;
+    memcpy(out + 4, type, 4);
+    if (n > 0) {
+        memcpy(out + 8, body, n);
+    }
+    uint32_t crc = test_crc32(test_crc32(0, (const uint8_t *)type, 4), body, n);
+    out[8 + n] = (uint8_t)(crc >> 24);
+    out[9 + n] = (uint8_t)(crc >> 16);
+    out[10 + n] = (uint8_t)(crc >> 8);
+    out[11 + n] = (uint8_t)crc;
+    return 12 + n;
 }
 
-static void test_a_rainy_chmu_frame_decodes_to_its_levels(void)
+/* Minimal valid uncompressed 8-bit RGBA PNG (w x 1 row) for unit-testing pixel decoders. */
+static size_t make_rgba_row_png(uint8_t *out, uint16_t w, const uint8_t *rgba)
+{
+    static const uint8_t k_sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+    memcpy(out, k_sig, 8);
+    size_t n = 8;
+    uint8_t ihdr[13] = { 0, 0, (uint8_t)(w >> 8), (uint8_t)w, 0, 0, 0, 1, 8, PNG_RGBA, 0, 0, 0 };
+    n += put_png_chunk(out + n, "IHDR", ihdr, 13);
+
+    uint32_t raw_len = 1 + (uint32_t)w * 4;
+    uint8_t raw[256];
+    raw[0] = 0; /* filter None */
+    memcpy(raw + 1, rgba, (size_t)w * 4);
+    uint32_t s1 = 1, s2 = 0;
+    for (uint32_t i = 0; i < raw_len; i++) {
+        s1 = (s1 + raw[i]) % 65521u;
+        s2 = (s2 + s1) % 65521u;
+    }
+    uint32_t adler = (s2 << 16) | s1;
+
+    uint8_t idat[300];
+    idat[0] = 0x78;
+    idat[1] = 0x01;
+    idat[2] = 0x01; /* BFINAL=1, BTYPE=00 (stored) */
+    idat[3] = (uint8_t)raw_len;
+    idat[4] = (uint8_t)(raw_len >> 8);
+    idat[5] = (uint8_t)~idat[3];
+    idat[6] = (uint8_t)~idat[4];
+    memcpy(idat + 7, raw, raw_len);
+    size_t zlen = 7 + raw_len;
+    idat[zlen++] = (uint8_t)(adler >> 24);
+    idat[zlen++] = (uint8_t)(adler >> 16);
+    idat[zlen++] = (uint8_t)(adler >> 8);
+    idat[zlen++] = (uint8_t)adler;
+
+    n += put_png_chunk(out + n, "IDAT", idat, (uint32_t)zlen);
+    n += put_png_chunk(out + n, "IEND", NULL, 0);
+    return n;
+}
+
+static void test_dwd_covers_layers_steps_and_urls(void)
+{
+    TEST_ASSERT_TRUE(radar_dwd_covers(50.0755, 14.4378));  /* Prague */
+    TEST_ASSERT_TRUE(radar_dwd_covers(52.2297, 21.0122));  /* Warsaw */
+    TEST_ASSERT_TRUE(radar_dwd_covers(40.4168, -3.7038));  /* Madrid */
+    TEST_ASSERT_TRUE(radar_dwd_covers(60.1699, 24.9384));  /* Helsinki */
+    TEST_ASSERT_FALSE(radar_dwd_covers(40.7128, -74.0060)); /* New York */
+    TEST_ASSERT_FALSE(radar_dwd_covers(35.6762, 139.6503)); /* Tokyo */
+
+    map_view_t prague, warsaw, wide;
+    map_view_init(&prague, 500755, 144378, 6.5, 400, 279);
+    TEST_ASSERT_EQUAL_INT(RADAR_DWD_LAYER_RV, radar_dwd_layer_for_view(&prague));
+    TEST_ASSERT_EQUAL_UINT32(300, radar_dwd_step_s(50.0755, 14.4378, 6.5));
+    TEST_ASSERT_EQUAL_UINT32(300, radar_dwd_step_s(52.4064, 16.9252, 8.0)); /* Poznan zoomed in */
+
+    map_view_init(&warsaw, 522297, 210122, 6.5, 400, 279);
+    TEST_ASSERT_EQUAL_INT(RADAR_DWD_LAYER_ICONEU, radar_dwd_layer_for_view(&warsaw));
+    TEST_ASSERT_EQUAL_UINT32(3600, radar_dwd_step_s(52.2297, 21.0122, 6.5));
+
+    map_view_init(&wide, 500755, 144378, 3.5, 400, 279); /* > 1600 km across */
+    TEST_ASSERT_EQUAL_INT(RADAR_DWD_LAYER_ICONEU, radar_dwd_layer_for_view(&wide));
+    TEST_ASSERT_EQUAL_UINT32(3600, radar_dwd_step_s(50.0755, 14.4378, 3.5));
+
+    /* Newest step rounding: 300 s delay for RV, current full hour for ICON-EU */
+    TEST_ASSERT_EQUAL_INT64(T_20260924_1120, radar_dwd_newest(T_20260924_1120 + 7 * 60 + 30, 300));
+    TEST_ASSERT_EQUAL_INT64(T_20260924_1120, radar_dwd_newest(T_20260924_1120 + 5 * 60, 300));
+    TEST_ASSERT_EQUAL_INT64(T_20260924_1120 - 300, radar_dwd_newest(T_20260924_1120 + 4 * 60 + 59, 300));
+    TEST_ASSERT_EQUAL_INT64(1790247600, radar_dwd_newest(T_20260924_1120 + 1800, 3600)); /* 11:00 */
+
+    char url[384];
+    radar_dwd_url(&prague, RADAR_DWD_LAYER_RV, T_20260924_1120, url, sizeof(url));
+    TEST_ASSERT_TRUE(strlen(url) < sizeof(url) - 1);
+    TEST_ASSERT_NOT_NULL(strstr(url, RADAR_DWD_RV_LAYER));
+    TEST_ASSERT_NOT_NULL(strstr(url, "CRS=EPSG:3857"));
+    TEST_ASSERT_NOT_NULL(strstr(url, "WIDTH=400&HEIGHT=279"));
+    TEST_ASSERT_NOT_NULL(strstr(url, "FORMAT_OPTIONS=antialias:none"));
+    TEST_ASSERT_NOT_NULL(strstr(url, "TIME=2026-09-24T11:20:00Z"));
+
+    radar_dwd_url(&warsaw, RADAR_DWD_LAYER_ICONEU, 0, url, sizeof(url));
+    TEST_ASSERT_NOT_NULL(strstr(url, RADAR_DWD_ICONEU_LAYER));
+    TEST_ASSERT_NULL(strstr(url, "FORMAT_OPTIONS"));
+    TEST_ASSERT_NULL(strstr(url, "TIME="));
+}
+
+static void test_dwd_frames_decode_rv_and_iconeu(void)
 {
     size_t len;
-    uint8_t *png = load("png/chmi_rain.png", &len);
+    uint8_t *png = load("png/dwd_rv_rain.png", &len);
+    map_view_t v;
+    map_view_init(&v, 499000, 153000, 5.5, 400, 279);
     radar_frame_t f;
-    TEST_ASSERT_EQUAL_INT(PNG_OK, radar_chmu_decode(png, len, NULL, T_20260924_1120, &f));
-    TEST_ASSERT_EQUAL_UINT16(RADAR_CHMU_W, f.w);
-    TEST_ASSERT_EQUAL_UINT16(RADAR_CHMU_H, f.h);
-    TEST_ASSERT_EQUAL_UINT8(RADAR_SOURCE_CHMU, f.source);
+    TEST_ASSERT_EQUAL_INT(PNG_OK,
+                          radar_dwd_decode(png, len, NULL, &v, RADAR_DWD_LAYER_RV, T_20260924_1120, &f));
+    TEST_ASSERT_EQUAL_UINT16(400, f.w);
+    TEST_ASSERT_EQUAL_UINT16(279, f.h);
+    TEST_ASSERT_EQUAL_UINT8(RADAR_SOURCE_DWD, f.source);
     TEST_ASSERT_EQUAL_UINT32(T_20260924_1120, f.time);
     long n[4];
     count_levels(&f, n);
-    TEST_ASSERT_EQUAL_INT32(192493, n[RADAR_NONE]);
-    TEST_ASSERT_EQUAL_INT32(30113, n[RADAR_LIGHT]);
-    TEST_ASSERT_EQUAL_INT32(3152, n[RADAR_MODERATE]);
-    TEST_ASSERT_EQUAL_INT32(286, n[RADAR_HEAVY]);
-    TEST_ASSERT_EQUAL_INT(RADAR_HEAVY, radar_frame_level(&f, 152, 67)); /* the first heavy pixel, 50.87 N 13.40 E */
+    TEST_ASSERT_EQUAL_INT32(98054, n[RADAR_NONE]);
+    TEST_ASSERT_EQUAL_INT32(13477, n[RADAR_LIGHT]);
+    TEST_ASSERT_EQUAL_INT32(69, n[RADAR_MODERATE]);
+    TEST_ASSERT_EQUAL_INT32(0, n[RADAR_HEAVY]);
+    TEST_ASSERT_EQUAL_INT(RADAR_NONE, radar_frame_level(&f, 225, 0));  /* magenta perimeter (251,0,255) */
+    TEST_ASSERT_EQUAL_INT(RADAR_LIGHT, radar_frame_level(&f, 76, 21)); /* cyan rain (51,255,255) */
     radar_frame_free(&f, NULL);
     free(png);
 
-    png = load("png/chmi_dry.png", &len);
-    TEST_ASSERT_EQUAL_INT(PNG_OK, radar_chmu_decode(png, len, NULL, T_20260924_1120, &f));
+    /* ICON-EU 4-bit palette including (192,192,192,255) -> RADAR_LIGHT */
+    png = load("png/dwd_iconeu_rain.png", &len);
+    map_view_init(&v, 500755, 144378, 5.0, 400, 279);
+    TEST_ASSERT_EQUAL_INT(
+        PNG_OK, radar_dwd_decode(png, len, NULL, &v, RADAR_DWD_LAYER_ICONEU, T_20260924_1120, &f));
     count_levels(&f, n);
-    TEST_ASSERT_EQUAL_INT32(RADAR_CHMU_W * RADAR_CHMU_H, n[RADAR_NONE]); /* the black overlay lines are no rain */
+    TEST_ASSERT_EQUAL_INT32(104678, n[RADAR_NONE]);
+    TEST_ASSERT_EQUAL_INT32(6871, n[RADAR_LIGHT]);
+    TEST_ASSERT_EQUAL_INT32(51, n[RADAR_MODERATE]);
+    TEST_ASSERT_EQUAL_INT32(0, n[RADAR_HEAVY]);
     radar_frame_free(&f, NULL);
     free(png);
+
+    /* Synthetic RV swatches: perimeter, nodata, light, moderate, heavy + size check */
+    static const uint8_t k_rgba[8 * 4] = {
+        251, 0,   255, 255, /* magenta range perimeter -> NONE */
+        126, 126, 126, 77,  /* semi-transparent nodata -> NONE */
+        51,  255, 255, 255, /* LIGHT */
+        1,   153, 52,  255, /* LIGHT */
+        204, 230, 1,   255, /* MODERATE */
+        255, 196, 1,   255, /* MODERATE */
+        254, 0,   0,   255, /* HEAVY */
+        0,   0,   254, 255, /* HEAVY */
+    };
+    uint8_t synth[512];
+    size_t slen = make_rgba_row_png(synth, 8, k_rgba);
+    map_view_t v8, v7;
+    map_view_init(&v8, 500755, 144378, 6.5, 8, 1);
+    TEST_ASSERT_EQUAL_INT(
+        PNG_OK, radar_dwd_decode(synth, slen, NULL, &v8, RADAR_DWD_LAYER_RV, T_20260924_1120, &f));
+    TEST_ASSERT_EQUAL_INT(RADAR_NONE, radar_frame_level(&f, 0, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_NONE, radar_frame_level(&f, 1, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_LIGHT, radar_frame_level(&f, 2, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_LIGHT, radar_frame_level(&f, 3, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_MODERATE, radar_frame_level(&f, 4, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_MODERATE, radar_frame_level(&f, 5, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_HEAVY, radar_frame_level(&f, 6, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_HEAVY, radar_frame_level(&f, 7, 0));
+    radar_frame_free(&f, NULL);
+
+    map_view_init(&v7, 500755, 144378, 6.5, 7, 1);
+    TEST_ASSERT_EQUAL_INT(
+        PNG_ERR_FORMAT, radar_dwd_decode(synth, slen, NULL, &v7, RADAR_DWD_LAYER_RV, T_20260924_1120, &f));
 }
 
-/* A frame on ČHMÚ's grid with one square of the given level around a place. */
+/* A frame on the (49.9 N, 15.3 E z=5.5 400x279) DWD grid with one square around a place. */
 static void square_at(radar_frame_t *f, double lat, double lon, int half, radar_level_t level)
 {
-    TEST_ASSERT_TRUE(radar_frame_alloc(f, RADAR_CHMU_W, RADAR_CHMU_H, NULL));
-    f->mx0 = RADAR_CHMU_MX0;
-    f->my0 = RADAR_CHMU_MY0;
-    f->scale = RADAR_CHMU_SCALE;
+    map_view_t fv;
+    map_view_init(&fv, 499000, 153000, 5.5, 400, 279);
+    TEST_ASSERT_TRUE(radar_frame_alloc(f, (uint16_t)fv.w, (uint16_t)fv.h, NULL));
+    double minx, miny, maxx, maxy;
+    map_pixel_to_mercator(&fv, 0, fv.h, &minx, &miny);
+    map_pixel_to_mercator(&fv, fv.w, 0, &maxx, &maxy);
+    f->source = RADAR_SOURCE_DWD;
+    f->mx0 = minx;
+    f->my0 = maxy;
+    f->scale = (maxx - minx) / (double)fv.w;
     double mx, my;
     map_mercator(lat, lon, &mx, &my);
     int gx = (int)((mx - f->mx0) / f->scale), gy = (int)((f->my0 - my) / f->scale);
@@ -150,10 +291,10 @@ static void test_outside_the_data_the_edge_is_dotted(void)
     radar_frame_t f;
     square_at(&f, 49.1951, 16.6068, 2, RADAR_HEAVY);
     map_view_t v;
-    map_view_init(&v, 479000, 166068, 6.5, 400, 280); /* centred south of ČHMÚ's data: its south edge crosses */
+    map_view_init(&v, 470000, 153000, 6.5, 400, 280); /* centred just south of f's bottom edge */
     radar_render(&fb, (gfx_rect_t){ 0, 20, 400, 280 }, &v, &f);
     double x, y;
-    map_project(&v, 48.047275, 16.6068, &x, &y); /* the south edge of the data */
+    map_project(&v, 47.026648, 15.3000, &x, &y); /* the south edge of f */
     int row = 20 + (int)lround(y);
     int dots = ink(&fb, (gfx_rect_t){ 0, (int16_t)(row - 1), 400, 3 });
     TEST_ASSERT_TRUE_MESSAGE(dots > 100 && dots < 300, "a dotted line, every other pixel");
@@ -209,12 +350,32 @@ static void test_a_rainviewer_tile_decodes_by_its_colour_table(void)
     TEST_ASSERT_EQUAL_INT(PNG_OK, radar_rv_decode_tile(png, len, NULL, &t, 4, 2, &f));
     long n[4];
     count_levels(&f, n);
-    TEST_ASSERT_EQUAL_INT32(61155, n[RADAR_NONE]);
-    TEST_ASSERT_EQUAL_INT32(3706, n[RADAR_LIGHT]);
+    TEST_ASSERT_EQUAL_INT32(57811, n[RADAR_NONE]);
+    TEST_ASSERT_EQUAL_INT32(7050, n[RADAR_LIGHT]);
     TEST_ASSERT_EQUAL_INT32(629, n[RADAR_MODERATE]);
     TEST_ASSERT_EQUAL_INT32(46, n[RADAR_HEAVY]);
     radar_frame_free(&f, NULL);
     free(png);
+
+    /* Light < 20 dBZ echoes and semi-transparent alpha >= 80 decode cleanly; alpha < 80 stays NONE. */
+    static const uint8_t k_rv_rgba[5 * 4] = {
+        210, 196, 139, 160, /* < 20 dBZ tan cloud -> LIGHT */
+        54,  186, 229, 255, /* intermediate cyan/blue -> LIGHT */
+        210, 196, 139, 79,  /* trace alpha < 80 -> NONE */
+        255, 165, 0,   200, /* orange -> MODERATE */
+        230, 20,  60,  220, /* red -> HEAVY */
+    };
+    uint8_t rv_png[512];
+    size_t rv_len = make_rgba_row_png(rv_png, 5, k_rv_rgba);
+    radar_rv_tiles_t t1 = { .z = 3, .x0 = 4, .y0 = 2, .nx = 1, .ny = 1 };
+    TEST_ASSERT_TRUE(radar_rv_frame_alloc(&f, &t1, 1790889000, NULL));
+    TEST_ASSERT_EQUAL_INT(PNG_OK, radar_rv_decode_tile(rv_png, rv_len, NULL, &t1, 4, 2, &f));
+    TEST_ASSERT_EQUAL_INT(RADAR_LIGHT, radar_frame_level(&f, 0, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_LIGHT, radar_frame_level(&f, 1, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_NONE, radar_frame_level(&f, 2, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_MODERATE, radar_frame_level(&f, 3, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_HEAVY, radar_frame_level(&f, 4, 0));
+    radar_frame_free(&f, NULL);
 }
 
 static void test_a_frame_covers_the_views_it_has_the_rain_for(void)
@@ -233,8 +394,21 @@ static void test_a_frame_covers_the_views_it_has_the_rain_for(void)
     map_view_init(&paris, 488566, 23522, 6.5, RADAR_VIEW_W, RADAR_VIEW_H);
     TEST_ASSERT_FALSE(radar_frame_covers(&f, &paris));
     radar_frame_free(&f, NULL);
-    radar_frame_t chmu = { .source = RADAR_SOURCE_CHMU };
-    TEST_ASSERT_TRUE(radar_frame_covers(&chmu, &deeper)); /* one grid for every view: its edge shows */
+
+    /* DWD frames cover matching/smaller inset views at compatible zoom, not distant/deep-zoom views. */
+    radar_frame_t dwd;
+    square_at(&dwd, 49.9, 15.3, 1, RADAR_LIGHT);
+    map_view_t fix, brno, nboh, way_in;
+    map_view_init(&fix, 499000, 153000, 5.5, 400, 279);
+    TEST_ASSERT_TRUE(radar_frame_covers(&dwd, &fix));
+    map_view_init(&brno, 491951, 166068, 6.5, 400, 279);
+    TEST_ASSERT_TRUE(radar_frame_covers(&dwd, &brno));
+    map_view_init(&nboh, 506000, 139000, 6.5, 130, 130);
+    TEST_ASSERT_TRUE(radar_frame_covers(&dwd, &nboh));
+    TEST_ASSERT_FALSE(radar_frame_covers(&dwd, &paris));
+    map_view_init(&way_in, 499000, 153000, 8.0, 400, 279); /* > 2.2x finer scale */
+    TEST_ASSERT_FALSE(radar_frame_covers(&dwd, &way_in));
+    radar_frame_free(&dwd, NULL);
 }
 
 static int s_live;
@@ -351,9 +525,8 @@ static void test_a_frame_survives_its_file_and_a_damaged_file_is_refused(void)
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_chmu_names_and_the_newest_step);
-    RUN_TEST(test_chmu_covers_czechia_and_its_rim);
-    RUN_TEST(test_a_rainy_chmu_frame_decodes_to_its_levels);
+    RUN_TEST(test_dwd_covers_layers_steps_and_urls);
+    RUN_TEST(test_dwd_frames_decode_rv_and_iconeu);
     RUN_TEST(test_rain_lands_where_it_falls_in_any_view);
     RUN_TEST(test_outside_the_data_the_edge_is_dotted);
     RUN_TEST(test_the_rainviewer_index_names_its_frames);

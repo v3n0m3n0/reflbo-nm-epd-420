@@ -10,9 +10,9 @@
 #include "radar.h"
 #include "ui_radar.h"
 
-/* The radars' inputs for the golden renders (dashboard_fixtures.h): the built-in map, ČHMÚ's rainy
- * frame of 2026-09-24 11:20 UTC and RainViewer's tile of zoom 3 (test_radar.c's fixtures), each
- * loaded once; and adsb.fi's reply and adsb.lol's route of test_adsb.c. REFLBO_MAP_BIN,
+/* The radars' inputs for the golden renders (dashboard_fixtures.h): the built-in map, DWD's rainy
+ * Radar_rv frame (49.9 N 15.3 E zoom 5.5, 400x279) and RainViewer's tile of zoom 3 (test_radar.c's
+ * fixtures), each loaded once; and adsb.fi's reply and adsb.lol's route of test_adsb.c. REFLBO_MAP_BIN,
  * REFLBO_PNG_FIXTURES and REFLBO_ADSB_FIXTURES come from CMake. */
 
 static inline uint8_t *fixture_bytes(const char *path, size_t *len)
@@ -45,15 +45,19 @@ static inline const map_data_t *fixture_map(void)
     return state > 0 ? &map : NULL;
 }
 
-/* ČHMÚ's frame, stamped `time` (UTC). */
-static inline const radar_frame_t *fixture_chmu(time_t time)
+/* DWD Radar_rv frame, stamped `time` (UTC). */
+static inline const radar_frame_t *fixture_dwd(time_t time)
 {
     static radar_frame_t f;
     static int state;
     if (state == 0) {
         size_t len = 0;
-        uint8_t *png = fixture_bytes(REFLBO_PNG_FIXTURES "/chmi_rain.png", &len);
-        state = png != NULL && radar_chmu_decode(png, len, NULL, 0, &f) == PNG_OK ? 1 : -1;
+        uint8_t *png = fixture_bytes(REFLBO_PNG_FIXTURES "/dwd_rv_rain.png", &len);
+        map_view_t v;
+        map_view_init(&v, 499000, 153000, 5.5, 400, 279);
+        state = png != NULL && radar_dwd_decode(png, len, NULL, &v, RADAR_DWD_LAYER_RV, 0, &f) == PNG_OK
+                    ? 1
+                    : -1;
         free(png);
     }
     f.time = (uint32_t)time;

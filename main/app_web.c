@@ -215,7 +215,7 @@ static void get_status(uint8_t *out, size_t size, webui_reply_t *reply)
     app_radar_status(&rs);
     cJSON *radar = cJSON_AddObjectToObject(o, "radar");
     cJSON *weather = cJSON_AddObjectToObject(radar, "weather");
-    cJSON_AddStringToObject(weather, "source", rs.source == RADAR_SOURCE_CHMU ? "chmu" : "rainviewer");
+    cJSON_AddStringToObject(weather, "source", rs.source == RADAR_SOURCE_DWD ? "dwd" : "rainviewer");
     cJSON_AddNumberToObject(weather, "frames", rs.frames);
     if (rs.frame_at != 0) {
         cJSON_AddNumberToObject(weather, "frame_at", rs.frame_at);

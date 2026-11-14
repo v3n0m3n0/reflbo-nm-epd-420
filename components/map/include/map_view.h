@@ -30,7 +30,7 @@ double map_zoom_for_range(int32_t lat_e4, double range_m, int px);
 
 /* World pixels of a point at `zoom`. */
 void map_world_px(double lat, double lon, double zoom, double *x, double *y);
-/* Web Mercator metres of a point (EPSG:3857), as ČHMÚ's grid and the projection strings use them. */
+/* Web Mercator metres of a point (EPSG:3857), as DWD WMS and projection strings use them. */
 void map_mercator(double lat, double lon, double *mx, double *my);
 
 /* Screen pixels of a point, from the view's top-left; it may fall outside the view. */
