@@ -2,9 +2,11 @@
 
 #include "board_pins.h"
 #include "driver/gpio.h"
+#include "driver/spi_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #define I2C_TIMEOUT_MS 50 /* at least two 10 ms ticks */
@@ -118,6 +120,89 @@ esp_err_t board_init(bool cold)
 i2c_master_bus_handle_t board_i2c(void)
 {
     return s_i2c;
+}
+
+static portMUX_TYPE s_spi3_spinlock = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t s_spi3_mutex = NULL;
+static bool s_spi3_inited = false;
+
+esp_err_t board_spi3_init(void)
+{
+    if (s_spi3_mutex == NULL) {
+        SemaphoreHandle_t m = xSemaphoreCreateMutex();
+        if (m == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+        taskENTER_CRITICAL(&s_spi3_spinlock);
+        if (s_spi3_mutex == NULL) {
+            s_spi3_mutex = m;
+            m = NULL;
+        }
+        taskEXIT_CRITICAL(&s_spi3_spinlock);
+        if (m != NULL) {
+            vSemaphoreDelete(m);
+        }
+    }
+
+    if (s_spi3_inited) {
+        return ESP_OK;
+    }
+
+    if (xSemaphoreTake(s_spi3_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t ret = ESP_OK;
+    if (!s_spi3_inited) {
+        /* Pre-drive shared-bus CS lines HIGH before enabling outputs so neither SX1262 nor TF
+         * card sees a floating/low glitch when SPI3_HOST initializes. */
+        gpio_set_level(BOARD_PIN_TF_CS, 1);
+        gpio_set_level(BOARD_PIN_LORA_NSS, 1);
+        const gpio_config_t cs_cfg = {
+            .pin_bit_mask = (1ULL << BOARD_PIN_TF_CS) | (1ULL << BOARD_PIN_LORA_NSS),
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&cs_cfg);
+        gpio_set_level(BOARD_PIN_TF_CS, 1);
+        gpio_set_level(BOARD_PIN_LORA_NSS, 1);
+
+        const spi_bus_config_t buscfg = {
+            .miso_io_num = BOARD_PIN_LORA_MISO,
+            .mosi_io_num = BOARD_PIN_LORA_MOSI,
+            .sclk_io_num = BOARD_PIN_LORA_SCK,
+            .quadwp_io_num = -1,
+            .quadhd_io_num = -1,
+            .max_transfer_sz = 512,
+        };
+        ret = spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO);
+        if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE) {
+            s_spi3_inited = true;
+            ret = ESP_OK;
+        } else {
+            ESP_LOGE("board", "spi_bus_initialize(SPI3) failed: %s", esp_err_to_name(ret));
+        }
+    }
+
+    xSemaphoreGive(s_spi3_mutex);
+    return ret;
+}
+
+bool board_spi3_lock(uint32_t timeout_ms)
+{
+    if (!s_spi3_inited && board_spi3_init() != ESP_OK) {
+        return false;
+    }
+    return xSemaphoreTake(s_spi3_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
+void board_spi3_unlock(void)
+{
+    if (s_spi3_mutex != NULL) {
+        xSemaphoreGive(s_spi3_mutex);
+    }
 }
 
 void board_prepare_deep_sleep(void)

@@ -5,6 +5,7 @@
 #include "cJSON.h"
 #include "context_fixtures.h"
 #include "ui_catalog.h"
+#include "ui_lora.h"
 #include "ui_pc.h"
 #include "ui_visual.h"
 #include "ui_split.h"
@@ -260,6 +261,62 @@ static void test_layouts_publish_the_visuals_rules(void)
     TEST_ASSERT_EQUAL_INT(UI_SPAN_MAX_S, num(spans, "max_s"));
 }
 
+static void test_fields_publish_lora_catalogue_and_live_values(void)
+{
+    ui_context_t ctx = fixture_context();
+    ui_lora_t lora = { 0 };
+    lora.enabled = true;
+    lora.packet_count = 2;
+    lora.last_rssi_dbm = -72;
+    lora.last_snr_q4 = -1;
+    lora.total_node_count = 5;
+    lora.total_msg_count = 4;
+    lora.msg_count = 1;
+    strcpy(lora.msgs[0].text, "Hi mesh!");
+    ctx.lora = &lora;
+
+    TEST_ASSERT_TRUE(ui_catalog_fields_json(&ctx, s_out, sizeof(s_out)) > 0);
+    s_root = cJSON_Parse(s_out);
+    const cJSON *fields = cJSON_GetObjectItemCaseSensitive(s_root, "fields");
+
+    const cJSON *nodes = by_id(fields, "lora.nodes");
+    TEST_ASSERT_NOT_NULL(nodes);
+    TEST_ASSERT_EQUAL_STRING("LoRa nodes", str(nodes, "label"));
+    TEST_ASSERT_EQUAL_STRING("number", str(nodes, "kind"));
+    TEST_ASSERT_EQUAL_STRING("fresh", str(nodes, "state"));
+    TEST_ASSERT_EQUAL_STRING("5", str(nodes, "value"));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(nodes, "numeric")));
+
+    const cJSON *rssi = by_id(fields, "lora.rssi");
+    TEST_ASSERT_NOT_NULL(rssi);
+    TEST_ASSERT_EQUAL_INT(-130, num(rssi, "min"));
+    TEST_ASSERT_EQUAL_INT(-30, num(rssi, "max"));
+    TEST_ASSERT_EQUAL_STRING("-72 dBm", str(rssi, "value"));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rssi, "numeric")));
+
+    const cJSON *snr = by_id(fields, "lora.snr");
+    TEST_ASSERT_NOT_NULL(snr);
+    TEST_ASSERT_EQUAL_INT(-20, num(snr, "min"));
+    TEST_ASSERT_EQUAL_INT(15, num(snr, "max"));
+    TEST_ASSERT_EQUAL_STRING("-0.2 dB", str(snr, "value"));
+
+    const cJSON *last_msg = by_id(fields, "lora.last_msg");
+    TEST_ASSERT_NOT_NULL(last_msg);
+    TEST_ASSERT_EQUAL_STRING("text", str(last_msg, "kind"));
+    TEST_ASSERT_EQUAL_STRING("Hi mesh!", str(last_msg, "value"));
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(last_msg, "numeric"));
+
+    cJSON_Delete(s_root);
+    ctx.lora = NULL;
+    TEST_ASSERT_TRUE(ui_catalog_fields_json(&ctx, s_out, sizeof(s_out)) > 0);
+    s_root = cJSON_Parse(s_out);
+    fields = cJSON_GetObjectItemCaseSensitive(s_root, "fields");
+    rssi = by_id(fields, "lora.rssi");
+    TEST_ASSERT_EQUAL_STRING("missing", str(rssi, "state"));
+    TEST_ASSERT_EQUAL_INT(-130, num(rssi, "min"));
+    TEST_ASSERT_EQUAL_INT(-30, num(rssi, "max"));
+}
+
 static void test_a_buffer_too_small_gives_nothing(void)
 {
     TEST_ASSERT_EQUAL_UINT(0, ui_catalog_layouts_json(s_out, 64));
@@ -275,6 +332,7 @@ int main(void)
     RUN_TEST(test_fields_carry_their_kind_label_and_current_value);
     RUN_TEST(test_fields_say_which_are_numbers_and_list_the_pcs_readings);
     RUN_TEST(test_layouts_publish_the_visuals_rules);
+    RUN_TEST(test_fields_publish_lora_catalogue_and_live_values);
     RUN_TEST(test_a_buffer_too_small_gives_nothing);
     return UNITY_END();
 }

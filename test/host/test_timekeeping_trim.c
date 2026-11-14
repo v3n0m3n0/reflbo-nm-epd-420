@@ -216,6 +216,22 @@ static void test_temp_excursion(void)
     TEST_ASSERT_TRUE(timekeeping_temp_excursion(2500, 1900, 500));
 }
 
+static void test_sleep_us_compensates_positive_and_negative_drift(void)
+{
+    /* Observed board drift +2,160,294 ppb over 60 s -> +129,618 us rounded + 2,000 us margin */
+    TEST_ASSERT_EQUAL_UINT64(60131618ULL, timekeeping_trim_sleep_us(60000000LL, 2160294));
+    /* Negative drift -2,000,000 ppb over 60 s -> -120,000 us + 2,000 us margin */
+    TEST_ASSERT_EQUAL_UINT64(59882000ULL, timekeeping_trim_sleep_us(60000000LL, -2000000));
+    /* Zero and TRIM_NO_DRIFT -> +2,000 us margin only */
+    TEST_ASSERT_EQUAL_UINT64(60002000ULL, timekeeping_trim_sleep_us(60000000LL, 0));
+    TEST_ASSERT_EQUAL_UINT64(60002000ULL, timekeeping_trim_sleep_us(60000000LL, TRIM_NO_DRIFT));
+    /* Clamped to +5,000,000 ppb -> +300,000 us + 2,000 us margin */
+    TEST_ASSERT_EQUAL_UINT64(60302000ULL, timekeeping_trim_sleep_us(60000000LL, 8000000));
+    /* Short/past target durations clamped to minimum 1,000 us */
+    TEST_ASSERT_EQUAL_UINT64(1000ULL, timekeeping_trim_sleep_us(500LL, 2160294));
+    TEST_ASSERT_EQUAL_UINT64(1000ULL, timekeeping_trim_sleep_us(-100LL, 2160294));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -236,5 +252,6 @@ int main(void)
     RUN_TEST(test_sw_drift_measure_span_and_jump_guard);
     RUN_TEST(test_sw_drift_measure_rejects_observed_jump_accepts_2160294_ppb);
     RUN_TEST(test_temp_excursion);
+    RUN_TEST(test_sleep_us_compensates_positive_and_negative_drift);
     return UNITY_END();
 }

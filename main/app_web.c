@@ -302,6 +302,7 @@ static void get_status(uint8_t *out, size_t size, webui_reply_t *reply)
     cJSON_AddBoolToObject(lora, "initialized", ls.initialized);
     cJSON_AddNumberToObject(lora, "ble_pin", ls.ble_pin);
     cJSON_AddBoolToObject(lora, "ble_connected", ls.ble_connected);
+    cJSON_AddBoolToObject(lora, "legacy_identity", ls.legacy_identity);
     cJSON_AddStringToObject(lora, "node_name", ls.node_name);
     cJSON_AddStringToObject(lora, "pub_key", ls.pub_key_hex);
     cJSON_AddNumberToObject(lora, "freq_khz", ls.freq_khz);
@@ -630,6 +631,14 @@ static void get_settings(uint8_t *out, size_t size, webui_reply_t *reply)
     cJSON_AddBoolToObject(keys, "solax_sn", app_secret_set(SETTINGS_SECRET_SOLAX_SN));
     cJSON_AddBoolToObject(keys, "solax_client_id", app_secret_set(SETTINGS_SECRET_SOLAX_CLIENT_ID));
     cJSON_AddBoolToObject(keys, "solax_client_secret", app_secret_set(SETTINGS_SECRET_SOLAX_CLIENT_SECRET));
+    bool psk_set = app_secret_set(SETTINGS_SECRET_LORA_PSK);
+    cJSON *lora = cJSON_GetObjectItemCaseSensitive(o, "lora");
+    if (cJSON_IsObject(lora)) {
+        keys = cJSON_AddObjectToObject(lora, "keys");
+        cJSON_AddBoolToObject(keys, "psk", psk_set);
+        cJSON_AddBoolToObject(keys, "channel_psk", psk_set);
+        cJSON_AddBoolToObject(lora, "is_public_psk", !psk_set);
+    }
     reply_cjson(reply, out, size, o);
 }
 
@@ -649,8 +658,12 @@ static void patch_settings(const char *body, uint8_t *out, size_t size, webui_re
                                                          : app_secret_set(SETTINGS_SECRET_FS_KEY);
     ok = ok && settings_check_solar(&next, fs_key, err, sizeof(err)) &&
          app_ui_patch_settings(clean, err, sizeof(err)) == ESP_OK;
+    bool lora_psk_given = secrets.given[SETTINGS_SECRET_LORA_PSK];
     esp_err_t saved = ok ? app_secrets_apply(&secrets) : ESP_OK;
     memset(&secrets, 0, sizeof(secrets)); /* the keys stay in NVS alone */
+    if (ok && saved == ESP_OK && lora_psk_given) {
+        app_lora_apply();
+    }
     if (!ok) {
         reply_error(reply, out, size, 400, err);
     } else if (saved != ESP_OK) {
@@ -688,9 +701,12 @@ static void restore(const char *body, uint8_t *out, size_t size, webui_reply_t *
     EXT_RAM_BSS_ATTR static settings_secrets_t dropped;
     EXT_RAM_BSS_ATTR static settings_t next;
     bool settings_ok = true;
+    bool lora_psk_dropped = false;
     if (settings != NULL) { /* a key a bundle carries never reaches the file (spec §14.4) */
         settings_ok = settings_take_secrets(settings, clean, sizeof(clean), &dropped, why, sizeof(why)) > 0 &&
                       settings_from_json(clean, app_settings(), &next, why, sizeof(why));
+        lora_psk_dropped = settings_ok && dropped.given[SETTINGS_SECRET_LORA_PSK] &&
+                           dropped.value[SETTINGS_SECRET_LORA_PSK][0] != '\0';
         memset(&dropped, 0, sizeof(dropped));
         settings = clean;
     }
@@ -724,6 +740,11 @@ static void restore(const char *body, uint8_t *out, size_t size, webui_reply_t *
         char note[sizeof(why) + 56]; /* the reason and the 52 characters after it */
         snprintf(note, sizeof(note), "%s: the forecast uses the first plane until one is set", why);
         cJSON_AddItemToArray(notes, cJSON_CreateString(note));
+    }
+    if (settings != NULL &&
+        (lora_psk_dropped || strcmp(next.lora.channel_name, "Public") != 0) &&
+        !app_secret_set(SETTINGS_SECRET_LORA_PSK)) {
+        cJSON_AddItemToArray(notes, cJSON_CreateString("Enter your LoRa channel PSK on the LoRa page."));
     }
     reply_cjson(reply, out, size, o);
 }
@@ -858,14 +879,8 @@ void app_web_api(const char *method, const char *path, const char *query, const 
         if (cmd_len == 0) {
             reply_error(reply, out, size, 400, "missing companion command");
         } else {
-            app_ui_state_t *s = app_state();
-            bool changed = false;
             uint8_t resp[COMPANION_MAX_FRAME_SIZE];
-            size_t resp_len = lora_widget_handle_companion_cmd(cmd_buf, cmd_len, &s->settings.lora, &changed, resp, sizeof(resp));
-            if (changed) {
-                app_lora_apply();
-                app_ui_save_settings();
-            }
+            size_t resp_len = app_lora_handle_companion(cmd_buf, cmd_len, resp, sizeof(resp));
             cJSON *res = cJSON_CreateObject();
             cJSON_AddBoolToObject(res, "ok", true);
             cJSON_AddNumberToObject(res, "resp_len", (double)resp_len);
@@ -884,6 +899,19 @@ void app_web_api(const char *method, const char *path, const char *query, const 
                 cJSON_AddNumberToObject(res, "storage_total_kb", (double)total_kb);
             }
             reply_cjson(reply, out, size, res);
+        }
+    } else if (strcmp(path, "/api/lora/rekey") == 0 && strcmp(method, "POST") == 0) {
+        esp_err_t err = app_lora_rekey();
+        if (err == ESP_OK) {
+            lora_stats_t ls = lora_widget_get_stats();
+            cJSON *res = cJSON_CreateObject();
+            cJSON_AddBoolToObject(res, "ok", true);
+            cJSON_AddStringToObject(res, "pub_key", ls.pub_key_hex);
+            cJSON_AddNumberToObject(res, "ble_pin", ls.ble_pin);
+            cJSON_AddBoolToObject(res, "legacy_identity", ls.legacy_identity);
+            reply_cjson(reply, out, size, res);
+        } else {
+            reply_error(reply, out, size, 500, "failed to rotate LoRa identity");
         }
     } else if (strcmp(path, "/api/lora/advert") == 0 && strcmp(method, "POST") == 0) {
         bool flood = true;
@@ -932,15 +960,10 @@ void app_web_api(const char *method, const char *path, const char *query, const 
             cJSON_Delete(in);
             reply_error(reply, out, size, 400, "missing cmd");
         } else {
-            app_ui_state_t *s = app_state();
-            bool changed = false;
-            char reply_buf[512] = { 0 };
-            lora_widget_exec_cli(cmd->valuestring, &s->settings.lora, &changed, reply_buf, sizeof(reply_buf));
+            EXT_RAM_BSS_ATTR static char reply_buf[1536];
+            reply_buf[0] = '\0';
+            app_lora_exec_cli(cmd->valuestring, reply_buf, sizeof(reply_buf));
             cJSON_Delete(in);
-            if (changed) {
-                app_lora_apply();
-                app_ui_save_settings();
-            }
             cJSON *res = cJSON_CreateObject();
             cJSON_AddBoolToObject(res, "ok", true);
             cJSON_AddStringToObject(res, "reply", reply_buf);

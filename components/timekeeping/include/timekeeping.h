@@ -27,8 +27,11 @@ const rtc_trim_t *timekeeping_trim(void);
  * 2.6 s. `*moved_ms`: how far the system clock moved. */
 esp_err_t timekeeping_apply_true_time(int64_t true_utc_us, int64_t mono_us, int64_t *moved_ms);
 /* Applies software drift compensation to system time based on elapsed time since the last
- * correction/sync (survives deep sleep in RTC RAM). No-op if |drift| < 50 ms or drift unknown. */
+ * correction/sync (survives deep sleep in RTC RAM). No-op if |drift| < 1 ms or drift unknown. */
 esp_err_t timekeeping_drift_correct(void);
+/* Corrects accumulated drift and converts target wake time `until_utc` into drift-compensated
+ * RTC slow-clock microseconds for esp_sleep_enable_timer_wakeup(). */
+uint64_t timekeeping_sleep_us_until(time_t until_utc);
 /* Resets learned software drift and calibration temperature in memory and NVS. */
 esp_err_t timekeeping_reset_drift(void);
 

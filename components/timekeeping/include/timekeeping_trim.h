@@ -48,6 +48,10 @@ int timekeeping_trim_drift_s10_per_day(const rtc_trim_t *t);
  * Returns 0 if `elapsed_us <= 0` or `drift_ppb == TRIM_NO_DRIFT`. Overflow-safe 64-bit math. */
 int64_t timekeeping_drift_us(int64_t elapsed_us, int32_t drift_ppb);
 
+/* Converts a target real-time sleep duration `left_us` into RTC slow-clock microseconds,
+ * compensating for `drift_ppb` and adding a 2 ms wakeup margin past the second boundary. */
+uint64_t timekeeping_trim_sleep_us(int64_t left_us, int32_t drift_ppb);
+
 /* Measures software drift in ppb across `span_ms` given `error_ms` (positive = clock ahead).
  * Updates `*drift_ppb` and returns true if `span_ms >= TIMEKEEPING_SW_MIN_SPAN_S * 1000` and
  * the measured drift is within ±TIMEKEEPING_SW_DRIFT_MAX_PPB (jump guard). */

@@ -208,6 +208,7 @@ typedef enum {
     SETTINGS_SECRET_SOLAX_CLIENT_ID,     /* energy.solax_client_id: the Developer API's application (D37) */
     SETTINGS_SECRET_SOLAX_CLIENT_SECRET, /* energy.solax_client_secret */
     SETTINGS_SECRET_PC_TOKEN,            /* pc.token: the PC app's, kept as typed (spec §12a.1, M7) */
+    SETTINGS_SECRET_LORA_PSK,            /* lora.channel_psk: custom Base64 channel PSK */
     SETTINGS_SECRET_COUNT,
 } settings_secret_t;
 #define SETTINGS_SECRET_LEN 64

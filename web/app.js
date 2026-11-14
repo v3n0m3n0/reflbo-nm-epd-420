@@ -822,8 +822,15 @@ function secretInput(label, isSet, hint) {
   const input = h('input', { type: 'password', autocomplete: 'new-password', 'data-1p-ignore': '', 'data-lpignore': 'true',
                              placeholder: isSet ? 'set: type to replace it' : '' });
   const note = h('p', { class: 'muted small', text: isSet ? 'A key is set.' : 'None is set.' });
-  const s = { input, isSet, cleared: false };
+  const s = { input, note, isSet, cleared: false };
   s.value = () => (input.value ? input.value : s.cleared ? null : undefined);
+  s.saved = (nowSet) => {
+    s.isSet = !!nowSet;
+    s.cleared = false;
+    input.value = '';
+    input.placeholder = s.isSet ? 'set: type to replace it' : '';
+    note.textContent = s.isSet ? 'A key is set.' : 'None is set.';
+  };
   s.el = [field(label, input, hint), note,
           isSet ? actions(button('Clear the key', () => { s.cleared = true; input.value = ''; note.textContent = 'It goes when you save.'; }))
                 : null];
@@ -958,8 +965,8 @@ async function solarPage() {
 
 const HWINFO_STATES = { ok: 'running', 'not running': 'not running', 'shm off': 'running, its Shared Memory Support off',
                         stale: 'not updating', unknown: '—' };
-/* The panel's frame time (ms) at the refresh rate on the Device page: a reading faster than it can't show. */
-const frameMs = (settings) => Math.round(1000 / ((settings.display || {}).lpm_hz || 1));
+/* Fixed physical e-paper frame time (~1 s): faster intervals don't show intermediate values. */
+const PANEL_FRAME_MS = 1000;
 const msLabel = (ms) => (ms < 1000 ? `${ms} ms` : `${+(ms / 1000).toFixed(2)} s`);
 
 async function pcPage() {
@@ -971,13 +978,11 @@ async function pcPage() {
   const conn = { port: set.port ?? 47123, interval: set.interval_ms ?? 1000 };
   const port = numberInput(conn, 'port', 1, 65535, 1);
   const interval = numberInput(conn, 'interval', 250, 10000, 50);
-  const frame = frameMs(s);
   const warning = h('p', { class: 'bad small' });
   const warn = () => {
     const ms = Number(conn.interval);
-    warning.hidden = !(ms < frame);
-    warning.textContent = `Shorter than the panel's frame time (${msLabel(frame)} at ${(s.display || {}).lpm_hz || 1} Hz, ` +
-      'on the Device page): the values in between don\'t show.';
+    warning.hidden = !(ms < PANEL_FRAME_MS);
+    warning.textContent = "Shorter than the panel's frame time (1 s): the values in between don't show.";
   };
   interval.addEventListener('input', warn);
   warn();
@@ -1077,7 +1082,13 @@ function nodeTypeName(t) {
   }
 }
 
+let loraPollTimer = null;
+
 async function loraPage() {
+  if (loraPollTimer !== null) {
+    clearTimeout(loraPollTimer);
+    loraPollTimer = null;
+  }
   const [s, initialSt] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/status')]);
   let st = initialSt;
   const lora = s.lora || {};
@@ -1123,6 +1134,7 @@ async function loraPage() {
 
     summary.replaceChildren(facts([
       ['State', loraState(l)],
+      l.legacy_identity ? ['Identity', h('span', { class: 'bad' }, 'Legacy MAC-derived identity (reset recommended)')] : null,
       ['Companion BLE', bleBadge],
       ['Node', l.node_name || '—'],
       ['Public key', pubKeyKid],
@@ -1155,6 +1167,19 @@ async function loraPage() {
   toggleBtn.id = 'lora-toggle-btn';
   toggleBtn.setAttribute('id', 'lora-toggle-btn');
 
+  const rekeyBtn = button('Reset identity', () => {
+    if (!confirm('Generate a new random Ed25519 identity and default BLE PIN? Existing MeshCore contacts will need to re-discover this node.')) return;
+    busy(nowCard, nowNote, async () => {
+      await api('POST', '/api/lora/rekey', {});
+      const fresh = await api('GET', '/api/status');
+      st = fresh;
+      showNow(fresh);
+      toast('Identity reset');
+    });
+  });
+  rekeyBtn.id = 'btn-lora-rekey';
+  rekeyBtn.setAttribute('id', 'btn-lora-rekey');
+
   const nowCard = card('Now', summary, nowNote, actions(
     toggleBtn,
     button('Refresh', () => busy(nowCard, nowNote, async () => {
@@ -1185,6 +1210,15 @@ async function loraPage() {
       st = fresh;
       showNow(fresh);
       showNodes(fresh);
+      setTimeout(async () => {
+        if (location.hash !== '#lora') return;
+        try {
+          const f2 = await api('GET', '/api/status');
+          st = f2;
+          showNow(f2);
+          showNodes(f2);
+        } catch (_) {}
+      }, 1500);
     })),
     button('Reset counter', () => busy(nowCard, nowNote, async () => {
       await api('POST', '/api/lora/reset', {});
@@ -1193,6 +1227,7 @@ async function loraPage() {
       showNow(fresh);
       toast('Counter reset');
     })),
+    rekeyBtn,
   ));
 
   /* Card 2: Group channel chat */
@@ -1339,8 +1374,20 @@ async function loraPage() {
   shareLoc.name = 'share_loc';
   const channelName = h('input', { type: 'text', name: 'channel_name', maxLength: '23', value: lora.channel_name || 'Public' });
   channelName.name = 'channel_name';
-  const channelPsk = h('input', { type: 'text', name: 'channel_psk', maxLength: '47', value: lora.channel_psk || 'izOH6cXN6mrJ5e26oRXNcg==' });
-  channelPsk.name = 'channel_psk';
+  const hasCustomPsk = !!(lora.keys && (lora.keys.psk || lora.keys.channel_psk)) ||
+    (typeof lora.channel_psk === 'string' && lora.channel_psk !== '' && lora.channel_psk !== 'izOH6cXN6mrJ5e26oRXNcg==');
+  const channelPsk = secretInput('Channel PSK (Base64)', hasCustomPsk,
+    'AES-128 key in Base64. Leave empty or clear to use the default Public channel key.');
+  channelPsk.input.name = 'channel_psk';
+  channelPsk.input.maxLength = '47';
+  const usePublicBtn = button('Use Public PSK', () => {
+    channelName.value = 'Public';
+    channelPsk.cleared = true;
+    channelPsk.input.value = '';
+    channelPsk.note.textContent = 'Public channel default PSK will be used when you save.';
+  }, 'small');
+  usePublicBtn.id = 'btn-lora-public-psk';
+  usePublicBtn.setAttribute('id', 'btn-lora-public-psk');
 
   const freqKhz = lora.freq_khz || 868000;
   const freq = h('input', { type: 'number', name: 'freq_mhz', min: '430', max: '928', step: '0.001',
@@ -1348,7 +1395,7 @@ async function loraPage() {
   freq.name = 'freq_mhz';
   const sf = choose(LORA_SF, String(lora.sf || 7));
   sf.name = 'sf';
-  const bwInit = lora.bw_hz ? (lora.bw_hz % 1000 === 0 ? String(lora.bw_hz / 1000) : String(lora.bw_hz / 1000)) : String(lora.bw_khz || 250);
+  const bwInit = lora.bw_hz ? (lora.bw_hz % 1000 === 0 ? String(lora.bw_hz / 1000) : String(+(lora.bw_hz / 1000).toFixed(2))) : String(lora.bw_khz || 250);
   const bw = choose(LORA_BW, bwInit);
   bw.name = 'bw_khz';
   const cr = choose(LORA_CR, String(lora.cr || 5));
@@ -1405,7 +1452,8 @@ async function loraPage() {
     field('BLE Companion PIN', blePinRow, '6-digit PIN (100000–999999) for companion app pairing. Leave blank or 0 for auto-generated PIN.'),
     h('label', { class: 'check' }, shareLoc, 'Share location in adverts'),
     field('Channel name', channelName, 'Up to 23 characters.'),
-    field('Channel PSK (Base64)', channelPsk, 'AES-128 key in Base64 (default: Public channel).'),
+    channelPsk.el,
+    actions(usePublicBtn),
     field('Frequency (MHz)', freq, '430.000 to 928.000 MHz.'),
     field('Spreading factor', sf),
     field('Bandwidth', bw),
@@ -1444,30 +1492,39 @@ async function loraPage() {
         }
       }
 
+      const loraPatch = {
+        enabled: enabled.checked,
+        ble_pin: pinNum,
+        freq_khz: Math.round(f * 1000),
+        sf: Number(sf.value),
+        bw_khz: bwKhzNum,
+        bw_hz: bwHzNum,
+        cr: Number(cr.value),
+        tx_power_dbm: isNaN(txPwr) ? 22 : txPwr,
+        sync_word: sw,
+        rx_boosted: rxBoosted.checked,
+        cad_enabled: cadEnabled.checked,
+        client_repeat: clientRepeat.checked,
+        path_hash_mode: Number(pathHash.value),
+        airtime_factor: afNum,
+        airtime_factor_x10: afX10,
+        wake_on_rx: wakeOnRx.checked,
+        share_loc: shareLoc.checked,
+        node_name: nodeName.value.trim() || 'NM-EPD-420',
+        channel_name: channelName.value.trim() || 'Public',
+      };
+      const pskVal = channelPsk.value();
+      if (pskVal !== undefined) {
+        loraPatch.channel_psk = typeof pskVal === 'string' ? pskVal.trim() : pskVal;
+      }
+
       await api('PATCH', '/api/settings', {
-        lora: {
-          enabled: enabled.checked,
-          ble_pin: pinNum,
-          freq_khz: Math.round(f * 1000),
-          sf: Number(sf.value),
-          bw_khz: bwKhzNum,
-          bw_hz: bwHzNum,
-          cr: Number(cr.value),
-          tx_power_dbm: isNaN(txPwr) ? 22 : txPwr,
-          sync_word: sw,
-          rx_boosted: rxBoosted.checked,
-          cad_enabled: cadEnabled.checked,
-          client_repeat: clientRepeat.checked,
-          path_hash_mode: Number(pathHash.value),
-          airtime_factor: afNum,
-          airtime_factor_x10: afX10,
-          wake_on_rx: wakeOnRx.checked,
-          share_loc: shareLoc.checked,
-          node_name: nodeName.value.trim() || 'NM-EPD-420',
-          channel_name: channelName.value.trim() || 'Public',
-          channel_psk: channelPsk.value.trim() || 'izOH6cXN6mrJ5e26oRXNcg==',
-        },
+        schema: 1,
+        lora: loraPatch,
       });
+      if (pskVal !== undefined) {
+        channelPsk.saved(Boolean(loraPatch.channel_psk && loraPatch.channel_psk !== 'izOH6cXN6mrJ5e26oRXNcg=='));
+      }
       note.className = 'good';
       note.textContent = 'Saved.';
       toast('Saved');
@@ -1495,6 +1552,13 @@ async function loraPage() {
       try {
         const res = await api('POST', '/api/lora/cli', { cmd: c });
         cliOutput.textContent = res.reply || '(empty reply)';
+        try {
+          const fresh = await api('GET', '/api/status');
+          st = fresh;
+          showNow(fresh);
+          showChat(fresh);
+          showNodes(fresh);
+        } catch (_) {}
       } catch (err) {
         cliOutput.textContent = `Error: ${err.message}`;
       }
@@ -1525,6 +1589,28 @@ async function loraPage() {
   );
 
   main.replaceChildren(h('h1', { text: 'LoRa' }), nowCard, chatCard, nodesCard, radioCard, cliCard);
+
+  let pollBusy = false;
+  const scheduleLoraPoll = () => {
+    if (pollBusy) return;
+    pollBusy = true;
+    loraPollTimer = setTimeout(async () => {
+      if (location.hash !== '#lora') {
+        pollBusy = false;
+        return;
+      }
+      try {
+        const fresh = await api('GET', '/api/status');
+        st = fresh;
+        showNow(fresh);
+        showChat(fresh);
+        showNodes(fresh);
+      } catch (_) {}
+      pollBusy = false;
+      if (location.hash === '#lora') scheduleLoraPoll();
+    }, 5000);
+  };
+  scheduleLoraPoll();
 }
 
 /* ---- Show as (spec §5.3, §10.3, M7, D44) ---- */
@@ -1591,7 +1677,6 @@ function showEditor(f, w, hgt, vis, set) {
 
 const LANGUAGES = [['en', 'English'], ['cs', 'Čeština']];
 const SENSOR_MIN = [1, 2, 5, 10, 15, 30];
-const RATES = [0.25, 0.5, 1, 2, 4, 8];
 
 async function devicePage() {
   const [s, st] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/status')]);
@@ -1603,7 +1688,6 @@ async function devicePage() {
   const hum = h('input', { type: 'number', step: 0.5, min: -20, max: 20, value: sensors.hum_offset_pct ?? 0 });
   const every = select(SENSOR_MIN.map((m) => [String(m), `${m} min`]), String(sensors.interval_min ?? 5));
   const update = select(Array.from({ length: 15 }, (_, i) => [String(i + 1), `${i + 1} min`]), String(display.update_min ?? 1));
-  const rate = select(RATES.map((r) => [String(r), `${String(r)} Hz`]), String(display.lpm_hz ?? 1));
   const bat = s.battery || {};
   const learned = Array.isArray(bat.learned_mv); /* D21: a full discharge was learned */
   const levelFrom = select([['curve', 'The built-in Li-ion curve'], ['manual', 'My own voltages'],
@@ -1645,9 +1729,7 @@ async function devicePage() {
     card('Sensors', field('Temperature offset, °C', temp, 'Added to every reading. The board warms the sensor by ' +
       'about 2 °C, which the default −2.0 makes up for; trim it against a thermometer you trust.'),
     field('Humidity offset, %', hum), field('Measure every', every)),
-    card('Screen', field('Update every', update, 'How often the dashboard is redrawn. Each update wakes the device.'),
-      field('Refresh rate', rate, 'How often the panel repaints its image between updates. At 1 Hz it looked as ' +
-        'good as the faster rates (D12).')),
+    card('Screen', field('Update every', update, 'How often the dashboard is redrawn. Each update wakes the device.')),
     batCard,
     note,
     actions(button('Save', () => busy(form, note, async () => {
@@ -1667,7 +1749,7 @@ async function devicePage() {
         units: { temp: unit.value },
         sensors: { temp_offset_c: Math.round(t * 10) / 10, hum_offset_pct: Math.round(hu * 2) / 2,
                    interval_min: Number(every.value) },
-        display: { update_min: Number(update.value), lpm_hz: Number(rate.value) },
+        display: { update_min: Number(update.value) },
         battery,
       });
       toast('Saved');
@@ -1686,8 +1768,9 @@ const NO_SLOTS = { radar: 'This layout draws the weather radar: its centre and z
                    lora: 'This layout draws the LoRa MeshCore dashboard: nodes, signal and companion status.' };
 /* The sync step a field's data come from (spec §9.3, D35): a field whose step is off ages out. */
 const fieldStep = (id) => (/^(wx\.)/.test(id) ? 'weather' : /^(aq|pollen)\./.test(id) ? 'air' : id === 'rain.map' ? 'radar'
-  : id.startsWith('pv.') ? 'solar' : id.startsWith('energy.') ? 'energy' : id.startsWith('pc.') ? 'pc' : null);
-const FIELD_GROUPS = [['solar', 'Solar forecast'], ['energy', 'House energy'], ['pc', 'PC']];
+  : id.startsWith('pv.') ? 'solar' : id.startsWith('energy.') ? 'energy' : id.startsWith('pc.') ? 'pc'
+  : id.startsWith('lora.') ? 'lora' : null);
+const FIELD_GROUPS = [['solar', 'Solar forecast'], ['energy', 'House energy'], ['pc', 'PC'], ['lora', 'LoRa']];
 
 /* A slot's or a cell's choices: the fields `fits` allows, the Solar and Energy ones in their groups, each marked
  * when its sync step is off. */

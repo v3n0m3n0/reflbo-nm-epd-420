@@ -812,7 +812,7 @@ size_t settings_to_json(const settings_t *s, const char *base_json, char *out, s
     put(lora, "share_loc", cJSON_CreateBool(s->lora.share_loc));
     put(lora, "node_name", cJSON_CreateString(s->lora.node_name));
     put(lora, "channel_name", cJSON_CreateString(s->lora.channel_name));
-    put(lora, "channel_psk", cJSON_CreateString(s->lora.channel_psk));
+    cJSON_DeleteItemFromObjectCaseSensitive(lora, "channel_psk");
     put(lora, "ble_pin", cJSON_CreateNumber(s->lora.ble_pin));
     bool ok = size > 0 && cJSON_PrintPreallocated(root, out, (int)size, true);
     cJSON_Delete(root);
@@ -870,6 +870,7 @@ static const char *const k_secret_keys[SETTINGS_SECRET_COUNT] = {
     "fs_key", "solcast_key", "solcast_site1", "solcast_site2", "solax_token", "solax_sn",
     "solax_client_id", "solax_secret", /* NVS keys have 15 characters at most */
     "pc_token",                        /* M7 (spec §14.2) */
+    "lora_psk",
 };
 
 const char *settings_secret_key(settings_secret_t secret)
@@ -939,7 +940,7 @@ static bool take_sites(cJSON *solar, settings_secrets_t *secrets, char *err, siz
     return ok;
 }
 
-/* The keys of every "solar", "energy" and "pc" object, and the flags a GET adds ("keys"), out of `root`. */
+/* The keys of every "solar", "energy", "pc" and "lora" object, and the flags a GET adds ("keys"), out of `root`. */
 static bool take_all(cJSON *root, settings_secrets_t *secrets, char *err, size_t err_size)
 {
     static const char k_alnum[] = "letters and digits only";
@@ -949,11 +950,24 @@ static bool take_all(cJSON *root, settings_secrets_t *secrets, char *err, size_t
         bool solar = c->string != NULL && strcmp(c->string, "solar") == 0;
         bool energy = c->string != NULL && strcmp(c->string, "energy") == 0;
         bool pc = c->string != NULL && strcmp(c->string, "pc") == 0;
-        if (!cJSON_IsObject(c) || !(solar || energy || pc)) {
+        bool lora = c->string != NULL && strcmp(c->string, "lora") == 0;
+        if (!cJSON_IsObject(c) || !(solar || energy || pc || lora)) {
             continue;
         }
         for (cJSON *flags; (flags = cJSON_DetachItemFromObjectCaseSensitive(c, "keys")) != NULL;) {
             cJSON_Delete(flags);
+        }
+        if (lora) {
+            for (cJSON *pub; (pub = cJSON_DetachItemFromObjectCaseSensitive(c, "is_public_psk")) != NULL;) {
+                cJSON_Delete(pub);
+            }
+            ok = take(c, "channel_psk", "lora.channel_psk", "+/=", "letters, digits, +, / and = only", secrets,
+                      SETTINGS_SECRET_LORA_PSK, err, err_size);
+            if (ok && secrets->given[SETTINGS_SECRET_LORA_PSK] &&
+                strcmp(secrets->value[SETTINGS_SECRET_LORA_PSK], LORA_DEFAULT_PUBLIC_PSK) == 0) {
+                secrets->value[SETTINGS_SECRET_LORA_PSK][0] = '\0';
+            }
+            continue;
         }
         if (pc) { /* the PC app's token, as typed: groups of five with dashes or spaces (spec §12a.1) */
             ok = take(c, "token", "pc.token", "- ", "letters, digits, - and spaces only", secrets,

@@ -632,7 +632,8 @@ static void test_secrets_never_reach_the_file(void)
                         "\"solcast_sites\":[\"ab12-cd34\",\"ef56\"],\"fs_key\":\"AbC123\"},"
                         "\"energy\":{\"solax_token\":\"20200722\",\"solax_sn\":\"SXA1B2C3D4\",\"battery\":\"off\","
                         "\"solax_client_id\":\"Cid-1\",\"solax_client_secret\":\"Sec_2\"},"
-                        "\"pc\":{\"enabled\":true,\"token\":\"ABCDE-FGHIJ-KLMNO-PQRST-UVWXY-Z\"}}";
+                        "\"pc\":{\"enabled\":true,\"token\":\"ABCDE-FGHIJ-KLMNO-PQRST-UVWXY-Z\"},"
+                        "\"lora\":{\"node_name\":\"MeshNode\",\"channel_psk\":\"dGVzdGtleTEyMzQ1Njc4OQ==\"}}";
     settings_secrets_t secrets;
     char clean[512];
     TEST_ASSERT_TRUE_MESSAGE(settings_take_secrets(patch, clean, sizeof(clean), &secrets, s_err, sizeof(s_err)) > 0,
@@ -641,8 +642,11 @@ static void test_secrets_never_reach_the_file(void)
     TEST_ASSERT_NULL(strstr(clean, "solax"));
     TEST_ASSERT_NULL(strstr(clean, "fs_key"));
     TEST_ASSERT_NULL(strstr(clean, "Kk_1"));
+    TEST_ASSERT_NULL(strstr(clean, "channel_psk"));
+    TEST_ASSERT_NULL(strstr(clean, "dGVzd"));
     TEST_ASSERT_NOT_NULL(strstr(clean, "\"source\":\"solcast\""));
     TEST_ASSERT_NOT_NULL(strstr(clean, "\"battery\":\"off\""));
+    TEST_ASSERT_NOT_NULL(strstr(clean, "\"node_name\":\"MeshNode\""));
     for (int i = 0; i < SETTINGS_SECRET_COUNT; i++) {
         TEST_ASSERT_TRUE(secrets.given[i]);
     }
@@ -653,12 +657,15 @@ static void test_secrets_never_reach_the_file(void)
     TEST_ASSERT_EQUAL_STRING("20200722", secrets.value[SETTINGS_SECRET_SOLAX_TOKEN]);
     TEST_ASSERT_EQUAL_STRING("SXA1B2C3D4", secrets.value[SETTINGS_SECRET_SOLAX_SN]);
     TEST_ASSERT_EQUAL_STRING("ABCDE-FGHIJ-KLMNO-PQRST-UVWXY-Z", secrets.value[SETTINGS_SECRET_PC_TOKEN]); /* as typed */
+    TEST_ASSERT_EQUAL_STRING("dGVzdGtleTEyMzQ1Njc4OQ==", secrets.value[SETTINGS_SECRET_LORA_PSK]);
     TEST_ASSERT_NULL(strstr(clean, "token"));
     TEST_ASSERT_NOT_NULL(strstr(clean, "\"enabled\":true"));
     TEST_ASSERT_EQUAL_STRING("solcast_site2", settings_secret_key(SETTINGS_SECRET_SOLCAST_SITE2));
     TEST_ASSERT_EQUAL_STRING("pc_token", settings_secret_key(SETTINGS_SECRET_PC_TOKEN)); /* spec §14.2 */
+    TEST_ASSERT_EQUAL_STRING("lora_psk", settings_secret_key(SETTINGS_SECRET_LORA_PSK));
     TEST_ASSERT_TRUE(settings_patch("{\"schema\":1}", clean, s_json, sizeof(s_json), s_err, sizeof(s_err)) > 0);
     TEST_ASSERT_NULL(strstr(s_json, "Kk_1"));
+    TEST_ASSERT_NULL(strstr(s_json, "dGVzd"));
 }
 
 static void test_a_secret_is_cleared_with_null_or_nothing(void)
@@ -721,6 +728,7 @@ static void test_secrets_the_requests_cannot_carry_are_refused(void)
         { "{\"energy\":{\"solax_token\":\"20\\r\\n20\"}}", "energy.solax_token: letters and digits only" },
         { "{\"energy\":{\"solax_sn\":42}}", "energy.solax_sn: a string" },
         { "{\"pc\":{\"token\":\"ABCDE/FGHIJ\"}}", "pc.token: letters, digits, - and spaces only" },
+        { "{\"lora\":{\"channel_psk\":\"bad!key?\"}}", "lora.channel_psk: letters, digits, +, / and = only" },
         { "{\"energy\":{\"solax_sn\":\"0123456789012345678901234567890123456789012345678901234567890123\"}}",
           "energy.solax_sn: 63 characters at most" },
     };
@@ -928,8 +936,10 @@ static void test_the_lora_settings_parse_clamp_and_round_trip(void)
     TEST_ASSERT_EQUAL_STRING("PrivateCh", s_out.lora.channel_name);
     TEST_ASSERT_EQUAL_STRING("abcdefghijklmnopqrstuv==", s_out.lora.channel_psk);
 
-    /* Round-trip */
-    TEST_ASSERT_TRUE(settings_to_json(&s_out, NULL, s_json, sizeof(s_json)) > 0);
+    /* Round-trip: settings_to_json omits channel_psk and strips any legacy channel_psk in base_json */
+    TEST_ASSERT_TRUE(settings_to_json(&s_out, good, s_json, sizeof(s_json)) > 0);
+    TEST_ASSERT_NULL(strstr(s_json, "channel_psk"));
+    TEST_ASSERT_NULL(strstr(s_json, "abcdefghijklmnopqrstuv=="));
     TEST_ASSERT_NOT_NULL(strstr(s_json, "\"bw_hz\":\t62500"));
     TEST_ASSERT_NOT_NULL(strstr(s_json, "\"bw_khz\":\t62.5"));
     TEST_ASSERT_NOT_NULL(strstr(s_json, "\"airtime_factor\":\t2.5"));
@@ -956,7 +966,23 @@ static void test_the_lora_settings_parse_clamp_and_round_trip(void)
     TEST_ASSERT_EQUAL_UINT32(482915, again.lora.ble_pin);
     TEST_ASSERT_EQUAL_STRING("MeshNode-1", again.lora.node_name);
     TEST_ASSERT_EQUAL_STRING("PrivateCh", again.lora.channel_name);
-    TEST_ASSERT_EQUAL_STRING("abcdefghijklmnopqrstuv==", again.lora.channel_psk);
+    TEST_ASSERT_EQUAL_STRING(LORA_DEFAULT_PUBLIC_PSK, again.lora.channel_psk);
+}
+
+static void test_lora_channel_psk_secret_and_public_fallback(void)
+{
+    settings_secrets_t secrets;
+    char clean[256];
+    const char *p1 = "{\"lora\":{\"channel_psk\":\"abc+12/=\",\"keys\":{\"psk\":true},\"is_public_psk\":false}}";
+    TEST_ASSERT_TRUE_MESSAGE(settings_take_secrets(p1, clean, sizeof(clean), &secrets, s_err, sizeof(s_err)) > 0, s_err);
+    TEST_ASSERT_TRUE(secrets.given[SETTINGS_SECRET_LORA_PSK]);
+    TEST_ASSERT_EQUAL_STRING("abc+12/=", secrets.value[SETTINGS_SECRET_LORA_PSK]);
+    TEST_ASSERT_EQUAL_STRING("{\"lora\":{}}", clean);
+
+    const char *p2 = "{\"lora\":{\"channel_psk\":\"" LORA_DEFAULT_PUBLIC_PSK "\"}}";
+    TEST_ASSERT_TRUE_MESSAGE(settings_take_secrets(p2, clean, sizeof(clean), &secrets, s_err, sizeof(s_err)) > 0, s_err);
+    TEST_ASSERT_TRUE(secrets.given[SETTINGS_SECRET_LORA_PSK]);
+    TEST_ASSERT_EQUAL_STRING("", secrets.value[SETTINGS_SECRET_LORA_PSK]);
 }
 
 static void test_the_lora_settings_patch_and_partial_updates(void)
@@ -1081,6 +1107,7 @@ int main(void)
     RUN_TEST(test_the_lora_defaults_are_the_specs);
     RUN_TEST(test_the_lora_settings_parse_clamp_and_round_trip);
     RUN_TEST(test_the_lora_ble_pin_validation);
+    RUN_TEST(test_lora_channel_psk_secret_and_public_fallback);
     RUN_TEST(test_the_lora_settings_patch_and_partial_updates);
     RUN_TEST(test_the_lora_narrowband_and_ranges);
     RUN_TEST(test_the_spec_sketch_parses);

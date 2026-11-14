@@ -4,6 +4,7 @@
 #include "gfx_fonts.h"
 #include "gfx_icons.h"
 #include "ui_internal.h"
+#include "ui_lora.h"
 #include "ui_pc.h"
 #include "util_time.h"
 
@@ -67,6 +68,11 @@ void ui_status_draw(gfx_fb_t *fb, const ui_context_t *ctx, const ui_preset_t *pr
         gfx_hline(fb, left + 4, 15, 6, GFX_BLACK);
         gfx_vline(fb, left + 6, 14, 1, GFX_BLACK);
         gfx_vline(fb, left + 7, 14, 1, GFX_BLACK);
+        left += 20;
+    }
+    if (ctx->lora != NULL && ctx->lora->enabled) {
+        const gfx_bitmap_t *lora_icon = ctx->lora->ble_connected ? &gfx_icon_bolt_16 : &gfx_icon_air_16;
+        gfx_bitmap(fb, left, 2, lora_icon, GFX_BLACK);
         left += 20;
     }
     if (ctx->sync != UI_SYNC_IDLE) { /* spec §5.2: a sync running, or the last one failed */

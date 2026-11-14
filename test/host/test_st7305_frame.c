@@ -81,6 +81,18 @@ static void test_random_frame_matches_the_vendor_formula(void)
     TEST_ASSERT_EQUAL_MEMORY(s_expected, s_panel, sizeof(s_panel));
 }
 
+static void test_ssd1683_temp_register_encoding_supports_below_zero(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(0xEC, ssd1683_encode_temp_reg(-20));
+    TEST_ASSERT_EQUAL_UINT8(0xF6, ssd1683_encode_temp_reg(-10));
+    TEST_ASSERT_EQUAL_UINT8(0xFF, ssd1683_encode_temp_reg(-1));
+    TEST_ASSERT_EQUAL_UINT8(0x00, ssd1683_encode_temp_reg(0));
+    TEST_ASSERT_EQUAL_UINT8(0x0E, ssd1683_encode_temp_reg(14));
+    TEST_ASSERT_EQUAL_UINT8(0x64, ssd1683_encode_temp_reg(15));
+    TEST_ASSERT_EQUAL_UINT8(0x64, ssd1683_encode_temp_reg(25));
+    TEST_ASSERT_EQUAL_UINT8(0x80, ssd1683_encode_temp_reg(-200));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -88,5 +100,6 @@ int main(void)
     RUN_TEST(test_black_frame_is_all_zeros_on_the_panel);
     RUN_TEST(test_corner_pixels_land_where_the_vendor_puts_them);
     RUN_TEST(test_random_frame_matches_the_vendor_formula);
+    RUN_TEST(test_ssd1683_temp_register_encoding_supports_below_zero);
     return UNITY_END();
 }

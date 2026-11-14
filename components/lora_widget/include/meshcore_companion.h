@@ -188,6 +188,12 @@ typedef struct {
     uint32_t last_tx_msg_ts;
     char     last_tx_msg_text[128];
     uint32_t last_tx_seen_s;
+    uint8_t  last_tx_ack_tag[4];
+
+    /* Persistent advert coordinates set via CMD_SET_ADVERT_LATLON */
+    int32_t  lat_e6;
+    int32_t  lon_e6;
+    bool     has_latlon;
 } companion_context_t;
 
 typedef struct {
@@ -205,6 +211,9 @@ typedef struct {
 
     bool (*send_advert)(bool flood);
     bool (*send_channel_txt)(uint8_t channel_idx, const char *text);
+    bool (*send_direct_txt)(const uint8_t pub_key[32], uint8_t txt_type, uint32_t msg_ts,
+                            const char *text, uint8_t out_ack_tag[4]);
+    void (*set_latlon)(int32_t lat_e6, int32_t lon_e6, void *user_data);
     void (*exec_cli)(const char *cmd, char *reply, size_t reply_sz);
     bool (*pop_msg)(uint8_t *msg_out, size_t max, size_t *out_len);
     void (*on_channels_changed)(companion_context_t *ctx, void *user_data);
@@ -219,6 +228,8 @@ void meshcore_companion_init(companion_context_t *ctx);
 bool meshcore_companion_add_update_contact(companion_context_t *ctx, const companion_contact_t *contact);
 bool meshcore_companion_remove_contact(companion_context_t *ctx, const uint8_t *pub_key);
 const companion_contact_t *meshcore_companion_get_contact(const companion_context_t *ctx, const uint8_t *pub_key);
+const companion_contact_t *meshcore_companion_find_contact_by_prefix(const companion_context_t *ctx,
+                                                                     const uint8_t prefix[6]);
 companion_contact_t *meshcore_companion_get_contact_mut(companion_context_t *ctx, const uint8_t *pub_key);
 bool meshcore_companion_step_iter(companion_context_t *ctx, const companion_env_t *env);
 

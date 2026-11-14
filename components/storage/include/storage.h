@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 #include "storage_file.h"
@@ -16,6 +17,8 @@
 
 esp_err_t storage_init(void);
 bool storage_ready(void);
+bool storage_is_healthy(void);
+bool storage_get_usage(uint32_t *used_kb, uint32_t *total_kb);
 /* Factory reset (spec §14.4): unmounts and formats the partition. The next boot starts empty. */
 esp_err_t storage_erase(void);
 

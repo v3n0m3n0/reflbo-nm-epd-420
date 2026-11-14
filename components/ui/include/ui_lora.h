@@ -8,7 +8,7 @@
 #include "ui_fields.h"
 
 #define UI_LORA_MAX_MSGS  6
-#define UI_LORA_MAX_NODES 4
+#define UI_LORA_MAX_NODES 3
 
 typedef struct {
     uint32_t timestamp;

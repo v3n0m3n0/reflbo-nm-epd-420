@@ -164,6 +164,14 @@ void app_ui_load(void)
     if (settings == ESP_ERR_INVALID_RESPONSE || presets == ESP_ERR_INVALID_RESPONSE) { /* spec §14.3: say so */
         app_ui_toast(lang_str(lang_get(s.settings.language), LS_T_DEFAULTS));
     }
+    app_lora_identity_init(!s.first_run);
+    if (settings == ESP_OK && s.settings.lora.channel_psk[0] != '\0' &&
+        strcmp(s.settings.lora.channel_psk, LORA_DEFAULT_PUBLIC_PSK) != 0 &&
+        !app_secret_set(SETTINGS_SECRET_LORA_PSK)) {
+        if (app_lora_sync_psk_secret(s.settings.lora.channel_psk) == ESP_OK) {
+            app_ui_save_settings(); /* strips legacy plaintext channel_psk from /fs/cfg/settings.json */
+        }
+    }
 }
 
 void app_ui_export(app_ui_state_t *out)
@@ -309,9 +317,9 @@ void app_ui_context(ui_context_t *ctx)
         dst->sender[0] = '\0';
     }
 
-    meshcore_advert_t all_advs[16];
+    meshcore_advert_t all_advs[MESHCORE_MAX_ADVERTS];
     size_t adv_count = 0;
-    for (size_t i = 0; i < 16; i++) {
+    for (size_t i = 0; i < MESHCORE_MAX_ADVERTS; i++) {
         if (lora_widget_get_advert(i, &all_advs[adv_count])) {
             adv_count++;
         }
@@ -794,11 +802,11 @@ static void run_schedule(time_t now)
     }
 }
 
-void app_ui_tick(bool force)
+time_t app_ui_tick(bool force)
 {
     time_t now = time(NULL);
     if (s.night_until != 0 && now < s.night_until && display_asleep()) {
-        return; /* night sleep: nothing is sampled or drawn (spec §9.1) */
+        return now; /* night sleep: nothing is sampled or drawn (spec §9.1) */
     }
     bool focus = app_focus_mode_active();
     time_t slot = now - now % 60;
@@ -830,7 +838,7 @@ void app_ui_tick(bool force)
                                                           s.settings.lat_e4, s.settings.lon_e4),
                           false); /* renders; not saved, the cycle will move on */
             app_seal_snapshot();
-            return;
+            return now;
         }
         if (s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
             lora_stats_t st = lora_widget_get_stats();
@@ -852,6 +860,7 @@ void app_ui_tick(bool force)
         app_ui_render();
     }
     app_seal_snapshot();
+    return now;
 }
 
 sched_wake_t app_ui_next_wake(time_t now)

@@ -234,9 +234,9 @@ void app_factory_reset(void)
     esp_restart();
 }
 
-static void schedule_next(void)
+static void schedule_next_at(time_t now)
 {
-    sched_wake_t wake = app_ui_next_wake(time(NULL));
+    sched_wake_t wake = app_ui_next_wake(now);
     s_wake_at = wake.when;
     if (wake.alarm != s_next_alarm) {
         s_next_alarm = wake.alarm;
@@ -271,11 +271,85 @@ bool app_focus_mode_active(void)
 
 void app_lora_apply(void)
 {
+    app_ui_state_t *st = app_state();
+    char psk[SETTINGS_SECRET_LEN];
+    bool nvs_ready = false;
+    if (app_secret_read(SETTINGS_SECRET_LORA_PSK, psk, sizeof(psk), &nvs_ready)) {
+        snprintf(st->settings.lora.channel_psk, sizeof(st->settings.lora.channel_psk),
+                 "%.*s", (int)(sizeof(st->settings.lora.channel_psk) - 1), psk);
+    } else if (nvs_ready) {
+        snprintf(st->settings.lora.channel_psk, sizeof(st->settings.lora.channel_psk), "%s", LORA_DEFAULT_PUBLIC_PSK);
+    }
+    memset(psk, 0, sizeof(psk));
     if (app_focus_mode_active()) {
+        lora_widget_sync_config(&st->settings.lora);
         lora_widget_sleep();
         return;
     }
-    lora_widget_apply(&app_state()->settings.lora);
+    lora_widget_apply(&st->settings.lora);
+}
+
+static void prepare_lora_work_cfg(lora_config_t *work, char *prev_psk, size_t prev_sz)
+{
+    *work = app_state()->settings.lora;
+    char psk[SETTINGS_SECRET_LEN] = { 0 };
+    bool nvs_ready = false;
+    if (app_secret_read(SETTINGS_SECRET_LORA_PSK, psk, sizeof(psk), &nvs_ready)) {
+        snprintf(work->channel_psk, sizeof(work->channel_psk), "%.*s",
+                 (int)(sizeof(work->channel_psk) - 1), psk);
+    } else if (work->channel_psk[0] == '\0' || nvs_ready) {
+        snprintf(work->channel_psk, sizeof(work->channel_psk), "%s", LORA_DEFAULT_PUBLIC_PSK);
+    }
+    memset(psk, 0, sizeof(psk));
+    snprintf(prev_psk, prev_sz, "%s", work->channel_psk);
+}
+
+static void commit_lora_work_cfg(lora_config_t *work, const char *prev_psk)
+{
+    bool psk_changed = strcmp(prev_psk, work->channel_psk) != 0;
+    char new_psk[LORA_CHANNEL_PSK_LEN] = { 0 };
+    snprintf(new_psk, sizeof(new_psk), "%s", work->channel_psk);
+    app_state()->settings.lora = *work;
+    if (psk_changed) {
+        app_lora_sync_psk_secret(new_psk);
+    }
+    memset(new_psk, 0, sizeof(new_psk));
+    app_lora_apply();
+    app_ui_save_settings();
+}
+
+void app_lora_exec_cli(const char *cmd, char *reply, size_t reply_sz)
+{
+    lora_config_t work;
+    char prev_psk[LORA_CHANNEL_PSK_LEN];
+    prepare_lora_work_cfg(&work, prev_psk, sizeof(prev_psk));
+    bool changed = false;
+    lora_widget_exec_cli(cmd, &work, &changed, reply, reply_sz);
+    if (changed) {
+        commit_lora_work_cfg(&work, prev_psk);
+    }
+    memset(&work, 0, sizeof(work));
+    memset(prev_psk, 0, sizeof(prev_psk));
+}
+
+size_t app_lora_handle_companion(const uint8_t *cmd, size_t cmd_len, uint8_t *resp, size_t resp_max)
+{
+    lora_config_t work;
+    char prev_psk[LORA_CHANNEL_PSK_LEN];
+    prepare_lora_work_cfg(&work, prev_psk, sizeof(prev_psk));
+    bool changed = false;
+    size_t resp_len = lora_widget_handle_companion_cmd(cmd, cmd_len, &work, &changed, resp, resp_max);
+    if (changed) {
+        commit_lora_work_cfg(&work, prev_psk);
+    }
+    memset(&work, 0, sizeof(work));
+    memset(prev_psk, 0, sizeof(prev_psk));
+    return resp_len;
+}
+
+static bool lora_rekey_cb(void)
+{
+    return app_lora_rekey() == ESP_OK;
 }
 
 void app_focus_mode_sync(bool entering)
@@ -326,8 +400,7 @@ static void on_tick(bool force, bool rtc_edge)
         }
         force = true;
     }
-    app_ui_tick(force);
-    schedule_next();
+    schedule_next_at(app_ui_tick(force));
 }
 
 void app_clock_moved(int64_t delta_s)
@@ -348,6 +421,8 @@ static const char *preset_name(void)
 /* Dashboard bindings (spec §5.6); the menu has its own while it is open. */
 static void handle_button(board_button_t button, gesture_t gesture)
 {
+    bool in_menu = app_menu_is_open();
+    time_t btn_now = time(NULL);
     power_hold_awake_ms(GRACE_MS);
     if (app_ui_night()) { /* any press keeps the night's dashboard up, awake, as the peek lives in RAM */
         s_peek_until_ms = app_uptime_ms() + PEEK_MS;
@@ -416,7 +491,7 @@ static void handle_button(board_button_t button, gesture_t gesture)
     } else if (button == BOARD_BUTTON_BOOT && gesture == GESTURE_LONG) {
         app_config_enter(); /* 3 s on the dashboard (spec §5.6) */
     }
-    schedule_next();
+    schedule_next_at(in_menu ? time(NULL) : btn_now);
 }
 
 /* A button held since before the sleep (D16) makes no gesture until it has been released. */
@@ -493,6 +568,7 @@ static void handle_event(const app_event_t *ev)
 
 static void handle_wake(power_wake_t wake)
 {
+    timekeeping_drift_correct();
     switch (wake) {
     case POWER_WAKE_RTC:
         on_tick(false, true);
@@ -508,9 +584,13 @@ static void handle_wake(power_wake_t wake)
         }
         board_buttons_resync(); /* edges during sleep raised no interrupt */
         power_hold_awake_ms(GRACE_MS);
-        app_ui_sample(time(NULL));
+        if (!app_focus_mode_active() && app_state() && app_state()->settings.lora.enabled) {
+            lora_widget_resume_ble();
+        }
+        time_t wake_now = time(NULL);
+        app_ui_sample(wake_now);
         app_ui_render();
-        schedule_next();
+        schedule_next_at(wake_now);
         break;
     default:
         if ((s_next_alarm != 0 && time(NULL) >= s_next_alarm) || (s_wake_at != 0 && time(NULL) >= s_wake_at)) {
@@ -749,6 +829,7 @@ static esp_err_t boot(void)
     ESP_RETURN_ON_ERROR(board_buttons_start(on_button, k_app_dashboard_buttons), TAG, "buttons");
     ESP_RETURN_ON_ERROR(start_rtc_int(), TAG, "RTC INT");
     lora_widget_set_rx_notify_cb(on_lora_notify);
+    lora_widget_set_rekey_cb(lora_rekey_cb);
     ignore_held_buttons();
 
     if (!warm) {
@@ -814,8 +895,15 @@ static void app_task(void *arg)
         /* Config mode and a new image waiting to prove itself keep the chip awake: sleep would
          * drop Wi-Fi, and a deep-sleep wake would roll the image back (spec §10.5). */
         bool focus = app_focus_mode_active();
-        bool lora_wake_lock = !focus && (app_state() && app_state()->settings.lora.enabled);
-        bool sync_wifi_lock = !focus && (app_sync_active() || app_sync_holds_wifi() || app_sync_wifi_pending());
+        bool lora_en = app_state() && app_state()->settings.lora.enabled;
+        bool lora_wake_on_rx = app_state() && app_state()->settings.lora.wake_on_rx;
+        bool lora_wake_lock = power_lora_wake_lock(
+            focus, lora_en, lora_wake_on_rx,
+            power_tethered(), lora_widget_ble_connected());
+        if (lora_wake_lock) {
+            lora_widget_resume_ble();
+        }
+        bool sync_wifi_lock = app_sync_active() || app_sync_wifi_pending() || (!focus && app_sync_holds_wifi());
         bool pending = uxQueueMessagesWaiting(s_queue) > 0 || board_buttons_busy() || app_config_active() ||
                        app_radar_loop_deadline_ms() != 0 ||
                        s_ota_pending || sync_wifi_lock || lora_wake_lock;
@@ -849,6 +937,13 @@ static void app_task(void *arg)
             }
             break;
         case POWER_PLAN_DEEP:
+            if (!focus && lora_en && lora_wake_on_rx) {
+                handle_wake(power_sleep_light(sleep_until()));
+                if ((s_wake_at != 0 && time(NULL) < s_wake_at) && uxQueueMessagesWaiting(s_queue) == 0) {
+                    continue;
+                }
+                break;
+            }
             enter_deep_sleep(sleep_until()); /* returns only if it had to sleep light instead */
             continue;
         case POWER_PLAN_RETRY:

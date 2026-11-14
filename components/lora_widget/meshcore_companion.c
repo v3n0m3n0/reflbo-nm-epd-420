@@ -131,6 +131,19 @@ const companion_contact_t *meshcore_companion_get_contact(const companion_contex
     return NULL;
 }
 
+const companion_contact_t *meshcore_companion_find_contact_by_prefix(const companion_context_t *ctx,
+                                                                     const uint8_t prefix[6])
+{
+    if (!ctx || !prefix) return NULL;
+
+    for (size_t i = 0; i < ctx->contact_count; i++) {
+        if (memcmp(ctx->contacts[i].pub_key, prefix, 6) == 0) {
+            return &ctx->contacts[i];
+        }
+    }
+    return NULL;
+}
+
 companion_contact_t *meshcore_companion_get_contact_mut(companion_context_t *ctx, const uint8_t *pub_key)
 {
     if (!ctx || !pub_key) return NULL;
@@ -227,9 +240,11 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
         resp_out[i++] = 22; /* MAX_LORA_TX_POWER */
         memcpy(&resp_out[i], env->pub_key, COMPANION_PUB_KEY_SIZE);
         i += COMPANION_PUB_KEY_SIZE;
-        wr_le32(&resp_out[i], (uint32_t)env->lat_e6);
+        int32_t lat_e6 = ctx->has_latlon ? ctx->lat_e6 : env->lat_e6;
+        int32_t lon_e6 = ctx->has_latlon ? ctx->lon_e6 : env->lon_e6;
+        wr_le32(&resp_out[i], (uint32_t)lat_e6);
         i += 4;
-        wr_le32(&resp_out[i], (uint32_t)env->lon_e6);
+        wr_le32(&resp_out[i], (uint32_t)lon_e6);
         i += 4;
         resp_out[i++] = ctx->multi_acks;
         resp_out[i++] = ctx->advert_loc_policy;
@@ -443,8 +458,14 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
 
     case CMD_SEND_TXT_MSG: {
         if (cmd_len < 14) return write_err(resp_out, resp_max, COMPANION_ERR_ILLEGAL_ARG);
+        uint8_t txt_type = cmd[1];
         uint8_t attempt = cmd[2];
         uint32_t msg_ts = rd_le32(&cmd[3]);
+        const companion_contact_t *c = meshcore_companion_find_contact_by_prefix(ctx, &cmd[7]);
+        if (!c) {
+            return write_err(resp_out, resp_max, COMPANION_ERR_NOT_FOUND);
+        }
+
         char text[128];
         size_t tlen = cmd_len - 13;
         if (tlen >= sizeof(text)) tlen = sizeof(text) - 1;
@@ -459,18 +480,23 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
                        (now_s == 0 || ctx->last_tx_seen_s == 0 || (now_s - ctx->last_tx_seen_s) <= 15));
 
         if (!is_dup) {
+            uint8_t ack_tag[4];
+            memcpy(ack_tag, &cmd[3], 4);
+            if (env->send_direct_txt) {
+                if (!env->send_direct_txt(c->pub_key, txt_type, msg_ts, text, ack_tag)) {
+                    return write_err(resp_out, resp_max, COMPANION_ERR_BAD_STATE);
+                }
+            }
             ctx->last_tx_msg_ts = msg_ts;
             copy_cstr(ctx->last_tx_msg_text, sizeof(ctx->last_tx_msg_text), text);
             ctx->last_tx_seen_s = now_s;
-            if (env->send_channel_txt) {
-                env->send_channel_txt(0, text);
-            }
+            memcpy(ctx->last_tx_ack_tag, ack_tag, 4);
         }
 
         if (resp_max < 10) return 0;
         resp_out[0] = RESP_CODE_SENT;
-        resp_out[1] = 1; /* flood */
-        memcpy(&resp_out[2], &cmd[3], 4); /* tag (msg_timestamp LE) */
+        resp_out[1] = (c->out_path_len > 0) ? 0 : 1; /* 0 = direct, 1 = flood */
+        memcpy(&resp_out[2], ctx->last_tx_ack_tag, 4);
         wr_le32(&resp_out[6], 5000); /* est_timeout_ms */
         return 10;
     }
@@ -546,6 +572,12 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
         int32_t lon_e6 = (int32_t)rd_le32(&cmd[5]);
         if (lat_e6 >= -90000000 && lat_e6 <= 90000000 && lon_e6 >= -180000000 && lon_e6 <= 180000000) {
             cfg->share_loc = true;
+            ctx->lat_e6 = lat_e6;
+            ctx->lon_e6 = lon_e6;
+            ctx->has_latlon = true;
+            if (env->set_latlon) {
+                env->set_latlon(lat_e6, lon_e6, env->user_data);
+            }
             if (cfg_changed) *cfg_changed = true;
             return write_ok(resp_out, resp_max);
         }
@@ -744,19 +776,6 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
         }
         return write_err(resp_out, resp_max, COMPANION_ERR_NOT_FOUND);
     }
-
-    case CMD_SHARE_CONTACT:
-    case CMD_IMPORT_CONTACT:
-    case CMD_REBOOT:
-    case CMD_SEND_RAW_DATA:
-    case CMD_SEND_LOGIN:
-    case CMD_SEND_STATUS_REQ:
-    case CMD_HAS_CONNECTION:
-    case CMD_LOGOUT:
-    case CMD_SEND_TRACE_PATH:
-    case CMD_SET_FLOOD_SCOPE_KEY:
-    case CMD_SEND_CONTROL_DATA:
-        return write_ok(resp_out, resp_max);
 
     case CMD_SYNC_NEXT_MESSAGE: {
         if (resp_max < 1) return 0;

@@ -54,13 +54,18 @@ static int nus_rx_access(uint16_t conn_handle, uint16_t attr_handle,
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         uint16_t om_len = OS_MBUF_PKTLEN(ctxt->om);
-        if (om_len > 0) {
-            uint8_t rx_buf[256];
-            uint16_t copied = 0;
-            int rc = ble_hs_mbuf_to_flat(ctxt->om, rx_buf, sizeof(rx_buf), &copied);
-            if (rc == 0 && copied > 0 && s_rx_cb) {
-                s_rx_cb(rx_buf, copied);
-            }
+        if (om_len == 0) {
+            return 0;
+        }
+        uint8_t rx_buf[256];
+        if (om_len > sizeof(rx_buf)) {
+            ESP_LOGW(TAG, "BLE RX frame too large: %u bytes", (unsigned)om_len);
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        uint16_t copied = 0;
+        int rc = ble_hs_mbuf_to_flat(ctxt->om, rx_buf, sizeof(rx_buf), &copied);
+        if (rc == 0 && copied > 0 && s_rx_cb) {
+            s_rx_cb(rx_buf, copied);
         }
         return 0;
     }
@@ -343,7 +348,7 @@ bool meshcore_ble_is_connected(void)
 
 bool meshcore_ble_send(const uint8_t *data, size_t len)
 {
-    if (!s_connected || s_conn_handle == BLE_HS_CONN_HANDLE_NONE || len == 0 || !data) {
+    if (!s_connected || !s_subscribed || s_conn_handle == BLE_HS_CONN_HANDLE_NONE || len == 0 || !data) {
         return false;
     }
 

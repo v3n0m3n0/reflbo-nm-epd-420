@@ -92,6 +92,7 @@ typedef struct {
     /* BLE companion state */
     uint32_t ble_pin;
     bool     ble_connected;
+    bool     legacy_identity;
 } lora_stats_t;
 
 /* Starts SX1262 in EU868 RX mode and launches background listener task */
@@ -99,6 +100,9 @@ esp_err_t lora_widget_init(void);
 
 /* Applies radio configuration and arms continuous RX mode */
 esp_err_t lora_widget_apply(const lora_config_t *cfg);
+
+/* Updates cached configuration and config-derived stats without powering radio or BLE (used in Focus sleep) */
+void lora_widget_sync_config(const lora_config_t *cfg);
 
 /* Puts SX1262 into sleep mode and cuts LORA_EN before deep sleep */
 void lora_widget_sleep(void);
@@ -151,3 +155,18 @@ size_t lora_widget_handle_companion_cmd(const uint8_t *cmd, size_t cmd_len,
 
 /* Pops an unread pushed frame for companion app tickle/sync */
 bool lora_widget_pop_companion_push(uint8_t *push_out, size_t push_max, size_t *push_len);
+
+/* Returns true if a MeshCore BLE companion client is currently connected */
+bool lora_widget_ble_connected(void);
+
+/* Flushes dirty contacts and cleanly stops BLE advertising before entering light sleep */
+void lora_widget_prepare_light_sleep(void);
+
+/* Restarts MeshCore BLE advertising if LoRa is enabled */
+void lora_widget_resume_ble(void);
+
+/* Sets persistent/NVS-backed node identity seed (or NULL for MAC-derived legacy) and default BLE PIN. */
+void lora_widget_set_identity(const uint8_t seed[32], uint32_t default_pin, bool legacy);
+
+/* Registers callback invoked by CLI 'reset-identity' command to rotate NVS identity and apply changes. */
+void lora_widget_set_rekey_cb(bool (*cb)(void));

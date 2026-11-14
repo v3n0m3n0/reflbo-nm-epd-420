@@ -6,6 +6,7 @@
 
 #include "gfx_fonts.h"
 #include "lang.h"
+#include "ui_internal.h"
 
 #define LORA_MSG_MAX_LINES   3
 #define LORA_MSG_LINE_W      384
@@ -23,9 +24,10 @@ static void format_bw(uint32_t bw_hz, char *out, size_t size)
 
 static void format_snr(int8_t snr_q4, char *out, size_t size)
 {
-    int whole = snr_q4 / 4;
-    int frac = abs(snr_q4 % 4) * 25 / 10;
-    snprintf(out, size, "%+d.%d dB", whole, frac);
+    int mag = (snr_q4 < 0) ? -((int)snr_q4) : (int)snr_q4;
+    int whole = mag / 4;
+    int frac = (mag % 4) * 25 / 10;
+    snprintf(out, size, "%c%d.%d dB", (snr_q4 < 0) ? '-' : '+', whole, frac);
 }
 
 static void format_lora_msg(const ui_lora_msg_t *msg, char *out, size_t out_sz)
@@ -250,8 +252,12 @@ void ui_draw_lora_view(gfx_fb_t *fb, gfx_rect_t below, const ui_context_t *ctx)
         gfx_text_in_rect(fb, font_md, (gfx_rect_t){ 8, 105, 384, 20 }, GFX_ALIGN_CENTER,
                          lang_str(ctx->lang, LS_LORA_NO_MESSAGES), GFX_BLACK);
         char hint[80];
-        snprintf(hint, sizeof(hint), "BLE: MeshCore-%s \xC2\xB7 PIN: %06lu",
-                 name, (unsigned long)lora->ble_pin);
+        if (lora->ble_pin > 0) {
+            snprintf(hint, sizeof(hint), "BLE: MeshCore-%s \xC2\xB7 PIN: %06lu",
+                     name, (unsigned long)lora->ble_pin);
+        } else {
+            snprintf(hint, sizeof(hint), "BLE: MeshCore-%s \xC2\xB7 PIN: \xE2\x80\x94", name);
+        }
         gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 8, 133, 384, 16 }, GFX_ALIGN_CENTER, hint, GFX_BLACK);
         gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 8, 153, 384, 16 }, GFX_ALIGN_CENTER,
                          "BOOT short: send Self Advert", GFX_BLACK);
@@ -307,7 +313,7 @@ void ui_draw_lora_view(gfx_fb_t *fb, gfx_rect_t below, const ui_context_t *ctx)
         gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 8, 245, 384, 16 }, GFX_ALIGN_CENTER,
                          lang_str(ctx->lang, LS_LORA_NO_NODES), GFX_BLACK);
     } else {
-        int max_nodes = lora->node_count > 3 ? 3 : lora->node_count;
+        int max_nodes = lora->node_count > UI_LORA_MAX_NODES ? UI_LORA_MAX_NODES : lora->node_count;
         int y_pos = 230;
         for (int i = 0; i < max_nodes; i++) {
             const ui_lora_node_t *node = &lora->nodes[i];
@@ -349,4 +355,115 @@ void ui_draw_lora_view(gfx_fb_t *fb, gfx_rect_t below, const ui_context_t *ctx)
             y_pos += 22;
         }
     }
+}
+
+static void copy_utf8(char *dst, size_t dst_sz, const char *src, size_t max_bytes)
+{
+    if (dst_sz == 0) {
+        return;
+    }
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+    size_t limit = dst_sz - 1;
+    if (max_bytes < limit) {
+        limit = max_bytes;
+    }
+    size_t len = strlen(src);
+    if (len > limit) {
+        len = limit;
+        while (len > 0 && (((unsigned char)src[len] & 0xC0u) == 0x80u)) {
+            len--;
+        }
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+bool ui_resolve_lora(const ui_context_t *ctx, ui_field_id_t field, ui_value_t *out)
+{
+    if (field < UI_FIELD_LORA_NODES || field > UI_FIELD_LORA_LAST_MSG) {
+        return false;
+    }
+    if (field == UI_FIELD_LORA_RSSI) {
+        ui_set_range(out, -130.0f, -30.0f);
+    } else if (field == UI_FIELD_LORA_SNR) {
+        ui_set_range(out, -20.0f, 15.0f);
+    }
+    const ui_lora_t *lora = ctx != NULL ? ctx->lora : NULL;
+    if (lora == NULL || !lora->enabled) {
+        return true;
+    }
+
+    switch (field) {
+    case UI_FIELD_LORA_NODES: {
+        int nodes = lora->total_node_count > 0 ? lora->total_node_count : lora->node_count;
+        if (nodes < 0) {
+            nodes = 0;
+        }
+        out->state = UI_VALUE_FRESH;
+        snprintf(out->text, sizeof(out->text), "%d", nodes);
+        ui_set_num(out, (float)nodes);
+        if (lora->node_count > 0 && lora->nodes[0].name[0] != '\0') {
+            copy_utf8(out->extra, sizeof(out->extra), lora->nodes[0].name, sizeof(out->extra) - 1);
+        }
+        break;
+    }
+    case UI_FIELD_LORA_MSGS: {
+        int msgs = lora->total_msg_count > 0 ? lora->total_msg_count : lora->msg_count;
+        if (msgs < 0) {
+            msgs = 0;
+        }
+        out->state = UI_VALUE_FRESH;
+        snprintf(out->text, sizeof(out->text), "%d", msgs);
+        ui_set_num(out, (float)msgs);
+        if (lora->ble_connected) {
+            snprintf(out->extra, sizeof(out->extra), "BLE");
+        }
+        break;
+    }
+    case UI_FIELD_LORA_RSSI:
+        if (lora->packet_count == 0) {
+            return true;
+        }
+        out->state = UI_VALUE_FRESH;
+        snprintf(out->text, sizeof(out->text), "%d", lora->last_rssi_dbm);
+        snprintf(out->unit, sizeof(out->unit), "dBm");
+        ui_set_num(out, (float)lora->last_rssi_dbm);
+        break;
+    case UI_FIELD_LORA_SNR: {
+        if (lora->packet_count == 0) {
+            return true;
+        }
+        int q4 = lora->last_snr_q4;
+        long snr10 = ((long)q4 * 10L) / 4L;
+        int snr_round = (q4 >= 0 ? q4 + 2 : q4 - 2) / 4;
+        out->state = UI_VALUE_FRESH;
+        lang_format_decimal(ctx->lang, snr10, 1, out->text, sizeof(out->text));
+        snprintf(out->short_text, sizeof(out->short_text), "%d", snr_round);
+        snprintf(out->unit, sizeof(out->unit), "dB");
+        ui_set_num(out, (float)q4 / 4.0f);
+        break;
+    }
+    case UI_FIELD_LORA_LAST_MSG: {
+        if (lora->msg_count <= 0) {
+            return true;
+        }
+        int count = lora->msg_count > UI_LORA_MAX_MSGS ? UI_LORA_MAX_MSGS : lora->msg_count;
+        const ui_lora_msg_t *m = &lora->msgs[count - 1];
+        out->state = UI_VALUE_FRESH;
+        copy_utf8(out->text, sizeof(out->text), m->text, sizeof(out->text) - 1);
+        copy_utf8(out->short_text, sizeof(out->short_text), m->text, 12);
+        if (m->outgoing) {
+            snprintf(out->extra, sizeof(out->extra), "TX");
+        } else {
+            copy_utf8(out->extra, sizeof(out->extra), m->sender, sizeof(out->extra) - 1);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    return true;
 }

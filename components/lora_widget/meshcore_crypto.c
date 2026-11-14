@@ -358,7 +358,8 @@ int meshcore_mac_then_decrypt(const uint8_t secret32[32],
                      src + MESHCORE_CIPHER_MAC_SIZE, enc_len,
                      full_hmac);
 
-    if (src[0] != full_hmac[0] || src[1] != full_hmac[1]) {
+    uint8_t diff = (uint8_t)(src[0] ^ full_hmac[0]) | (uint8_t)(src[1] ^ full_hmac[1]);
+    if (diff != 0) {
         return 0;
     }
 

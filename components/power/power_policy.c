@@ -24,3 +24,12 @@ power_plan_t power_policy(const power_policy_input_t *in)
     }
     return plan_for(in->strategy);
 }
+
+bool power_lora_wake_lock(bool focus_active, bool lora_enabled, bool wake_on_rx,
+                          bool usb_tethered, bool ble_connected)
+{
+    if (focus_active || !lora_enabled) {
+        return false;
+    }
+    return usb_tethered || ble_connected || !wake_on_rx;
+}

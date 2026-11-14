@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "app_internal.h"
@@ -10,6 +11,7 @@
 #include "lang.h"
 #include "lora_widget.h"
 #include "netmgr.h"
+#include "storage.h"
 #include "timekeeping.h"
 #include "ui_fields.h"
 #include "ui_layout.h"
@@ -699,14 +701,9 @@ static int lora_body(int argc, char **argv)
             if (w > 0) off += (size_t)w;
             if (off >= sizeof(cmd_buf) - 1) break;
         }
-        app_ui_state_t *st = app_state();
-        bool changed = false;
-        char reply[512] = { 0 };
-        lora_widget_exec_cli(cmd_buf, &st->settings.lora, &changed, reply, sizeof(reply));
-        if (changed) {
-            app_lora_apply();
-            app_ui_save_settings();
-        }
+        static char reply[1536];
+        reply[0] = '\0';
+        app_lora_exec_cli(cmd_buf, reply, sizeof(reply));
         printf("%s", reply);
         if (reply[0] == '\0' || reply[strlen(reply) - 1] != '\n') {
             printf("\n");
@@ -718,7 +715,8 @@ static int lora_body(int argc, char **argv)
     printf("lora: %s\n", s.initialized ? "initialized (SX1262 continuous RX)" : "disabled or not populated");
     printf("  enabled: %s\n", s.enabled ? "yes" : "no");
     printf("  node name: %s\n", s.node_name);
-    printf("  BLE PIN: %06lu (%s)\n", (unsigned long)s.ble_pin, s.ble_connected ? "connected" : "advertising");
+    printf("  BLE PIN: %06lu (%s)\n", (unsigned long)s.ble_pin,
+           !s.enabled ? "disabled" : (s.ble_connected ? "connected" : "advertising"));
     printf("  public key: %s\n", s.pub_key_hex[0] != '\0' ? s.pub_key_hex : "(none)");
     if (s.freq_khz > 0) {
         printf("  frequency: %lu.%03lu MHz\n", (unsigned long)(s.freq_khz / 1000), (unsigned long)(s.freq_khz % 1000));
@@ -764,6 +762,55 @@ static int cmd_lora(int argc, char **argv)
     return diag_on_owner(lora_body, argc, argv);
 }
 
+/* `storage [status | format]`: inspect LittleFS health or format `/fs` while preserving NVS. */
+static int storage_body(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "format") == 0) {
+        esp_err_t err = storage_erase();
+        if (err == ESP_OK) {
+            err = storage_init();
+        }
+        if (err == ESP_OK) {
+            printf("storage: LittleFS formatted cleanly (NVS preserved); reboot to recreate defaults\n");
+            return 0;
+        }
+        printf("storage: format failed (%s)\n", esp_err_to_name(err));
+        return 1;
+    }
+    if (argc >= 2 && strcmp(argv[1], "status") != 0) {
+        return usage("storage [status | format]");
+    }
+    uint32_t used_kb = 0, total_kb = 0;
+    bool have_usage = storage_get_usage(&used_kb, &total_kb);
+    printf("storage: mounted=%s, healthy=%s",
+           storage_ready() ? "yes" : "no",
+           storage_is_healthy() ? "yes" : "no");
+    if (have_usage) {
+        printf(", used=%lu/%lu KB", (unsigned long)used_kb, (unsigned long)total_kb);
+    }
+    printf("\n");
+    static const char *const k_paths[] = {
+        STORAGE_SETTINGS_PATH,
+        STORAGE_PRESETS_PATH,
+        "/fs/state/lora_channels.bin",
+        "/fs/state/lora_contacts.bin",
+    };
+    for (size_t i = 0; i < sizeof(k_paths) / sizeof(k_paths[0]); i++) {
+        struct stat st_buf;
+        if (stat(k_paths[i], &st_buf) == 0) {
+            printf("  %s: %ld B\n", k_paths[i], (long)st_buf.st_size);
+        } else {
+            printf("  %s: (missing)\n", k_paths[i]);
+        }
+    }
+    return 0;
+}
+
+static int cmd_storage(int argc, char **argv)
+{
+    return diag_on_owner(storage_body, argc, argv);
+}
+
 void app_register_commands(void)
 {
     const esp_console_cmd_t cmds[] = {
@@ -780,6 +827,7 @@ void app_register_commands(void)
         { .command = "energy", .help = "energy raw: SolaX's last replies (D37)", .func = &cmd_energy },
         { .command = "pc", .help = "pc status | demo on | demo off (spec §12a)", .func = &cmd_pc },
         { .command = "lora", .help = "lora [status|reset|on|off|advert|discover|send|cli]: SX1262 LoRa module and MeshCore", .func = &cmd_lora },
+        { .command = "storage", .help = "storage [status | format]: LittleFS health and formatting", .func = &cmd_storage },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         esp_err_t err = esp_console_cmd_register(&cmds[i]);

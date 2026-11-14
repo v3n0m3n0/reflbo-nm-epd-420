@@ -1314,15 +1314,12 @@ test('an interval shorter than the panel\'s frame time shows a warning', async (
   await ctx.pcPage();
   const warning = below(main).find((e) => /frame time/.test(e.textContent));
   assert.ok(warning, 'the warning is there');
-  assert.equal(warning.hidden, true); /* 1 s at 1 Hz */
+  assert.equal(warning.hidden, true); /* 1000 ms matches 1 s frame time */
   await type(inputNamed(main, 'A reading every (ms)'), '500');
   assert.equal(warning.hidden, false);
-  assert.match(warning.textContent, /1 s at 1 Hz/);
-  const fast = { ...PC_SETTINGS, display: { lpm_hz: 2 } }; /* 500 ms at 2 Hz */
-  const page = await load(pcDevice([], fast));
-  await page.ctx.pcPage();
-  await type(inputNamed(page.main, 'A reading every (ms)'), '500');
-  assert.equal(below(page.main).find((e) => /frame time/.test(e.textContent)).hidden, true);
+  assert.match(warning.textContent, /1 s/);
+  await type(inputNamed(main, 'A reading every (ms)'), '1000');
+  assert.equal(warning.hidden, true);
 });
 
 test('Test asks the PC at once and says what came back', async () => {
@@ -1471,6 +1468,17 @@ test('the field lists group the PC\'s readings', async () => {
   assert.ok(below(main).filter((e) => e.tag === 'option').map(text).includes('CPU load — 55 %'));
 });
 
+test('the field lists group the LoRa readings', async () => {
+  const fields = { fields: [...SHOW_FIELDS.fields,
+    { id: 'lora.rssi', kind: 'number', label: 'LoRa RSSI', value: '-72 dBm', numeric: true,
+      min: -130, max: -30 }] };
+  const { ctx, main } = await load({ ...showDevice([], BIG), 'GET /api/fields': () => reply(200, fields) });
+  await ctx.presetsPage();
+  const groups = below(main).filter((e) => e.tag === 'optgroup').map((g) => g.attrs.label);
+  assert.ok(groups.includes('LoRa'), groups.join());
+  assert.ok(below(main).filter((e) => e.tag === 'option').map(text).includes('LoRa RSSI — -72 dBm'));
+});
+
 test('the Sync page switches the PC step too', async () => {
   const patches = [];
   const settings = { ...STEP_SETTINGS, sync: { ...STEP_SETTINGS.sync, steps: ['weather', 'pc'] } };
@@ -1530,7 +1538,8 @@ const LORA_SETTINGS = {
     ble_pin: 0,
     node_name: 'NM-EPD-420',
     channel_name: 'Public',
-    channel_psk: 'izOH6cXN6mrJ5e26oRXNcg==',
+    keys: { psk: false, channel_psk: false },
+    is_public_psk: true,
   },
 };
 
@@ -1631,6 +1640,12 @@ function loraDevice(patches, customSettings = {}, customStatus = {}, resetCalls 
       patches.push(p);
       if (p.lora) {
         Object.assign(settings.lora, p.lora);
+        if ('channel_psk' in p.lora) {
+          const custom = Boolean(p.lora.channel_psk && p.lora.channel_psk !== 'izOH6cXN6mrJ5e26oRXNcg==');
+          settings.lora.keys = { psk: custom, channel_psk: custom };
+          settings.lora.is_public_psk = !custom;
+          delete settings.lora.channel_psk;
+        }
         if (currentStatus.lora) Object.assign(currentStatus.lora, p.lora);
       }
       return reply(200, settings);
@@ -1656,6 +1671,24 @@ function loraDevice(patches, customSettings = {}, customStatus = {}, resetCalls 
       const b = JSON.parse(init.body || '{}');
       actions.cli = b;
       return reply(200, { ok: true, reply: `CLI output for ${b.cmd}` });
+    },
+    'POST /api/lora/rekey': () => {
+      actions.rekey = (actions.rekey || 0) + 1;
+      currentStatus = {
+        ...currentStatus,
+        lora: {
+          ...currentStatus.lora,
+          legacy_identity: false,
+          pub_key: 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
+          ble_pin: 765432,
+        },
+      };
+      return reply(200, {
+        ok: true,
+        pub_key: currentStatus.lora.pub_key,
+        ble_pin: 765432,
+        legacy_identity: false,
+      });
     },
   };
 }
@@ -1802,6 +1835,7 @@ test('changing LoRa settings saves via PATCH /api/settings', async () => {
 
   assert.match(text(main), /Saved\./);
   assert.deepEqual(patches.at(-1), {
+    schema: 1,
     lora: {
       enabled: false,
       ble_pin: 0,
@@ -1822,9 +1856,9 @@ test('changing LoRa settings saves via PATCH /api/settings', async () => {
       share_loc: false,
       node_name: 'NM-EPD-420',
       channel_name: 'Public',
-      channel_psk: 'izOH6cXN6mrJ5e26oRXNcg==',
     },
   });
+  assert.equal('channel_psk' in patches.at(-1).lora, false);
 });
 
 test('LoRa settings form validates frequency and sync word', async () => {
@@ -2133,6 +2167,120 @@ test('a preset on the LoRa layout has no slots to fill', async () => {
   await ctx.presetsPage();
   assert.match(text(main), /LoRa MeshCore dashboard/);
   assert.match(text(main), /LoRa Node/);
+});
+
+test('the Device page no longer renders Refresh rate and omits lpm_hz on Save', async () => {
+  const patches = [];
+  const { ctx, main } = await load(settingsDevice(patches));
+  await ctx.devicePage();
+  assert.throws(() => control(main, 'Refresh rate'), /no field "Refresh rate"/);
+  control(main, 'Update every').value = '5';
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.equal(patches.length, 1);
+  assert.deepEqual(patches[0].display, { update_min: 5 });
+  assert.equal('lpm_hz' in patches[0].display, false);
+});
+
+test('LoRa Card 4 initializes fractional bw_hz and sends schema: 1 on Save', async () => {
+  for (const [bwHz, expectedVal] of [[62500, '62.5'], [31250, '31.25']]) {
+    const patches = [];
+    const { ctx, main } = await load(loraDevice(patches, { lora: { bw_hz: bwHz } }));
+    await ctx.loraPage();
+    assert.equal(control(main, 'Bandwidth').value, expectedVal);
+    await buttonNamed(main, 'Save').click();
+    await settle();
+    assert.equal(patches.at(-1).schema, 1);
+  }
+});
+
+test('executing a MeshCore CLI command refreshes /api/status in #lora', async () => {
+  let statusGets = 0;
+  let pktCount = 10;
+  const dev = {
+    'GET /api/settings': () => reply(200, LORA_SETTINGS),
+    'GET /api/status': () => {
+      statusGets += 1;
+      return reply(200, { ...LORA_STATUS, lora: { ...LORA_STATUS.lora, packet_count: pktCount } });
+    },
+    'POST /api/lora/cli': (init) => {
+      pktCount = 99;
+      return reply(200, { ok: true, reply: `ran ${JSON.parse(init.body).cmd}` });
+    },
+  };
+  const { ctx, main } = await load(dev);
+  await ctx.loraPage();
+  assert.equal(statusGets, 1);
+  assert.match(text(main), /Packets10/);
+
+  const cliInput = below(main).find((e) => e.attrs?.id === 'lora-cli-input' || e.id === 'lora-cli-input');
+  const cliRun = below(main).find((e) => e.attrs?.id === 'lora-cli-run' || e.id === 'lora-cli-run');
+  await type(cliInput, 'set af 1.5');
+  await cliRun.click();
+  await settle();
+
+  assert.equal(statusGets, 2);
+  assert.match(text(main), /Packets99/);
+});
+
+test('LoRa Card 4 write-only Channel PSK omits secret when untouched and supports Use Public PSK', async () => {
+  const patches = [];
+  const customDev = loraDevice(patches, {
+    lora: {
+      channel_name: 'TeamCh',
+      keys: { psk: true, channel_psk: true },
+      is_public_psk: false,
+    },
+  });
+  const { ctx, main } = await load(customDev);
+  await ctx.loraPage();
+
+  const pskInput = control(main, 'Channel PSK (Base64)');
+  assert.equal(pskInput.attrs.type, 'password');
+  assert.equal(pskInput.value, '');
+  assert.match(text(main), /A key is set\./);
+
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.equal(patches.length, 1);
+  assert.equal('channel_psk' in patches[0].lora, false);
+
+  await buttonNamed(main, 'Use Public PSK').click();
+  assert.equal(control(main, 'Channel name').value, 'Public');
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.equal(patches.length, 2);
+  assert.equal(patches[1].lora.channel_name, 'Public');
+  assert.equal(patches[1].lora.channel_psk, null);
+});
+
+test('LoRa live status shows legacy_identity warning and Reset identity calls POST /api/lora/rekey', async () => {
+  const actionsCalled = {};
+  const devDenied = loraDevice([], {}, { lora: { legacy_identity: true } }, [], actionsCalled);
+  const denied = await load(devDenied, { confirm: () => false });
+  await denied.ctx.loraPage();
+
+  assert.match(text(denied.main), /Legacy MAC-derived identity \(reset recommended\)/);
+  const rekeyDeniedBtn = below(denied.main).find((e) => e.attrs?.id === 'btn-lora-rekey' || e.id === 'btn-lora-rekey');
+  assert.ok(rekeyDeniedBtn, '#btn-lora-rekey exists');
+  await rekeyDeniedBtn.click();
+  await settle();
+  assert.equal(actionsCalled.rekey, undefined);
+
+  const actionsOk = {};
+  const devOk = loraDevice([], {}, { lora: { legacy_identity: true } }, [], actionsOk);
+  const { ctx, main } = await load(devOk, { confirm: () => true });
+  await ctx.loraPage();
+  assert.match(text(main), /Legacy MAC-derived identity \(reset recommended\)/);
+
+  const rekeyBtn = below(main).find((e) => e.attrs?.id === 'btn-lora-rekey' || e.id === 'btn-lora-rekey');
+  await rekeyBtn.click();
+  await settle();
+
+  assert.equal(actionsOk.rekey, 1);
+  assert.equal(/Legacy MAC-derived identity/.test(text(main)), false);
+  assert.match(text(main), /fedcba9876543210/);
+  assert.match(text(main), /765432/);
 });
 
 

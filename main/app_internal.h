@@ -88,6 +88,8 @@ void app_seal_snapshot(void);
 /* Applies the settings that live outside the app: time zone, sensor offsets, freshness, panel rate. */
 void app_ui_apply_settings(void);
 void app_lora_apply(void);
+void app_lora_exec_cli(const char *cmd, char *reply, size_t reply_sz);
+size_t app_lora_handle_companion(const uint8_t *cmd, size_t cmd_len, uint8_t *resp, size_t resp_max);
 /* Draws what the screen shows now (the menu, the critical screen or the dashboard, and a toast
  * over it) and pushes it. */
 void app_ui_render(void);
@@ -100,8 +102,9 @@ void app_ui_select(int index, bool persist);
 void app_ui_toggle_cycle(void);
 void app_ui_set_cycle(bool enabled);
 /* Samples and renders what is due now: minute slots, the cycle switch, the seconds display and
- * the schedule. `force` samples and renders anyway. Call after reading the RTC. */
-void app_ui_tick(bool force);
+ * the schedule. `force` samples and renders anyway. Call after reading the RTC.
+ * Returns the `now` timestamp evaluated for this tick. */
+time_t app_ui_tick(bool force);
 sched_wake_t app_ui_next_wake(time_t now);
 esp_err_t app_ui_save_settings(void);
 esp_err_t app_ui_save_presets(void);
@@ -208,8 +211,12 @@ void app_solar_demo(bool on); /* `solar demo on|off` */
 
 /* The keys in NVS `secrets` (main/app_secrets.c, spec §14.2): write-only from the web UI, never logged. */
 bool app_secret_get(settings_secret_t which, char *out, size_t size); /* false and "" when unset */
+bool app_secret_read(settings_secret_t which, char *out, size_t size, bool *nvs_ready);
 bool app_secret_set(settings_secret_t which);
 esp_err_t app_secrets_apply(const settings_secrets_t *secrets); /* the given ones written, "" erased */
+esp_err_t app_lora_sync_psk_secret(const char *psk);
+void app_lora_identity_init(bool has_prior_state);
+esp_err_t app_lora_rekey(void);
 
 /* The weather radar (main/app_radar.c, spec §11.2): its frames, kept in PSRAM, the newest also in
  * /fs/state/radar.bin; the sync task fetches them. */

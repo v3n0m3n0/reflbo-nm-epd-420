@@ -6,6 +6,7 @@
 
 #include "context_fixtures.h"
 #include "ui_fields.h"
+#include "ui_lora.h"
 #include "ui_radar.h"
 #include "ui_solar.h"
 #include "unity.h"
@@ -625,6 +626,86 @@ static void test_powers_are_kilowatts_and_energies_kilowatt_hours_whatever_the_t
     TEST_ASSERT_FALSE(resolve(UI_FIELD_EN_FLOW).has_num);
 }
 
+static void test_lora_fields_resolve_when_enabled_and_missing_when_disabled(void)
+{
+    s_ctx.lora = NULL;
+    static const ui_field_id_t k_lora_fields[] = {
+        UI_FIELD_LORA_NODES, UI_FIELD_LORA_MSGS, UI_FIELD_LORA_RSSI,
+        UI_FIELD_LORA_SNR, UI_FIELD_LORA_LAST_MSG,
+    };
+    for (size_t i = 0; i < sizeof(k_lora_fields) / sizeof(k_lora_fields[0]); i++) {
+        ui_value_t v = resolve(k_lora_fields[i]);
+        TEST_ASSERT_EQUAL_INT(UI_VALUE_MISSING, v.state);
+    }
+    ui_value_t rssi_missing = resolve(UI_FIELD_LORA_RSSI);
+    TEST_ASSERT_TRUE(rssi_missing.has_range);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, -130.0f, rssi_missing.range_min);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, -30.0f, rssi_missing.range_max);
+    ui_value_t snr_missing = resolve(UI_FIELD_LORA_SNR);
+    TEST_ASSERT_TRUE(snr_missing.has_range);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, -20.0f, snr_missing.range_min);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 15.0f, snr_missing.range_max);
+
+    ui_lora_t lora = { 0 };
+    s_ctx.lora = &lora;
+    TEST_ASSERT_EQUAL_INT(UI_VALUE_MISSING, resolve(UI_FIELD_LORA_NODES).state);
+    TEST_ASSERT_EQUAL_INT(UI_VALUE_MISSING, resolve(UI_FIELD_LORA_LAST_MSG).state);
+
+    lora.enabled = true;
+    TEST_ASSERT_EQUAL_STRING("0", resolve(UI_FIELD_LORA_NODES).text);
+    TEST_ASSERT_EQUAL_STRING("0", resolve(UI_FIELD_LORA_MSGS).text);
+    TEST_ASSERT_EQUAL_INT(UI_VALUE_MISSING, resolve(UI_FIELD_LORA_RSSI).state);
+    TEST_ASSERT_EQUAL_INT(UI_VALUE_MISSING, resolve(UI_FIELD_LORA_SNR).state);
+    TEST_ASSERT_EQUAL_INT(UI_VALUE_MISSING, resolve(UI_FIELD_LORA_LAST_MSG).state);
+
+    lora.ble_connected = true;
+    lora.packet_count = 3;
+    lora.last_rssi_dbm = -72;
+    lora.last_snr_q4 = -1;
+    lora.total_node_count = 5;
+    lora.node_count = 1;
+    snprintf(lora.nodes[0].name, sizeof(lora.nodes[0].name), "NodeAlpha");
+    lora.total_msg_count = 4;
+    lora.msg_count = 1;
+    snprintf(lora.msgs[0].sender, sizeof(lora.msgs[0].sender), "Alice");
+    snprintf(lora.msgs[0].text, sizeof(lora.msgs[0].text), "Hi mesh!");
+
+    ui_value_t v = resolve(UI_FIELD_LORA_NODES);
+    TEST_ASSERT_EQUAL_INT(UI_VALUE_FRESH, v.state);
+    TEST_ASSERT_TRUE(v.has_num);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 5.0f, v.num);
+    TEST_ASSERT_EQUAL_STRING("5", v.text);
+    TEST_ASSERT_EQUAL_STRING("NodeAlpha", v.extra);
+
+    v = resolve(UI_FIELD_LORA_MSGS);
+    TEST_ASSERT_EQUAL_INT(UI_VALUE_FRESH, v.state);
+    TEST_ASSERT_TRUE(v.has_num);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 4.0f, v.num);
+    TEST_ASSERT_EQUAL_STRING("4", v.text);
+    TEST_ASSERT_EQUAL_STRING("BLE", v.extra);
+
+    v = resolve(UI_FIELD_LORA_RSSI);
+    TEST_ASSERT_EQUAL_INT(UI_VALUE_FRESH, v.state);
+    TEST_ASSERT_TRUE(v.has_num && v.has_range);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, -72.0f, v.num);
+    TEST_ASSERT_EQUAL_STRING("-72", v.text);
+    TEST_ASSERT_EQUAL_STRING("dBm", v.unit);
+
+    v = resolve(UI_FIELD_LORA_SNR);
+    TEST_ASSERT_EQUAL_INT(UI_VALUE_FRESH, v.state);
+    TEST_ASSERT_TRUE(v.has_num && v.has_range);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, -0.25f, v.num);
+    TEST_ASSERT_EQUAL_STRING("-0.2", v.text);
+    TEST_ASSERT_EQUAL_STRING("0", v.short_text);
+    TEST_ASSERT_EQUAL_STRING("dB", v.unit);
+
+    v = resolve(UI_FIELD_LORA_LAST_MSG);
+    TEST_ASSERT_EQUAL_INT(UI_VALUE_FRESH, v.state);
+    TEST_ASSERT_FALSE(v.has_num);
+    TEST_ASSERT_EQUAL_STRING("Hi mesh!", v.text);
+    TEST_ASSERT_EQUAL_STRING("Alice", v.extra);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -660,5 +741,6 @@ int main(void)
     RUN_TEST(test_numeric_fields_carry_their_number);
     RUN_TEST(test_the_air_carries_its_numbers);
     RUN_TEST(test_powers_are_kilowatts_and_energies_kilowatt_hours_whatever_the_text);
+    RUN_TEST(test_lora_fields_resolve_when_enabled_and_missing_when_disabled);
     return UNITY_END();
 }

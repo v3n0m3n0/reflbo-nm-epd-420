@@ -20,6 +20,7 @@
 #include "nvs.h"
 #include "sdkconfig.h"
 #include "soc/rtc.h"
+#include "timekeeping.h"
 #include "util_snapshot.h"
 
 #define STATE_MAGIC   0x72666c70u /* "rflp" */
@@ -245,10 +246,7 @@ static void count_wake(power_wake_t wake, int64_t slept_ms)
 /* To the microsecond, so a wake set for a whole second (the seconds display) lands on it. */
 static uint64_t sleep_us_until(time_t until_utc)
 {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    int64_t left = (int64_t)until_utc * 1000000 - ((int64_t)tv.tv_sec * 1000000 + tv.tv_usec);
-    return left > 1000 ? (uint64_t)left : 1000u;
+    return timekeeping_sleep_us_until(until_utc);
 }
 
 power_wake_t power_sleep_light(time_t until_utc)
@@ -268,6 +266,9 @@ power_wake_t power_sleep_light(time_t until_utc)
     }
     lora_stats_t lstats = lora_widget_get_stats();
     bool lora_wake = lstats.enabled && lstats.wake_on_rx;
+    if (lstats.enabled) {
+        lora_widget_prepare_light_sleep();
+    }
     if (lora_wake) {
         gpio_intr_disable(BOARD_PIN_LORA_DIO1);
         gpio_wakeup_enable(BOARD_PIN_LORA_DIO1, GPIO_INTR_HIGH_LEVEL);

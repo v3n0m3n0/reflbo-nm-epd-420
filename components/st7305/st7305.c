@@ -313,7 +313,7 @@ esp_err_t st7305_push(const uint8_t *canonical)
         send_data(0x00);
 
         send_command(0x1A);
-        send_data(s_ambient_c >= 15 ? 0x64 : (uint8_t)(s_ambient_c > 0 ? s_ambient_c : 0));
+        send_data(ssd1683_encode_temp_reg(s_ambient_c));
 
         send_command(0x22);
         send_data(0xD7);

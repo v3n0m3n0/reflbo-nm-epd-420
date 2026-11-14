@@ -85,6 +85,11 @@ typedef enum {
     UI_FIELD_EN_SELF,
     UI_FIELD_PV_CHART, /* M6d: the day's forecast and the readings, as bars */
     UI_FIELD_EN_FLOW,  /* M6d: the house's energy flow now */
+    UI_FIELD_LORA_NODES,
+    UI_FIELD_LORA_MSGS,
+    UI_FIELD_LORA_RSSI,
+    UI_FIELD_LORA_SNR,
+    UI_FIELD_LORA_LAST_MSG,
     UI_FIELD_COUNT,
 } ui_field_id_t;
 

@@ -55,6 +55,11 @@ static const ui_field_info_t k_fields[UI_FIELD_COUNT] = {
     [UI_FIELD_EN_SELF] = { "energy.self", UI_FK_NUMBER, LS_EN_SELF, -1 },
     [UI_FIELD_PV_CHART] = { "pv.chart", UI_FK_CHART, LS_PV_CHART, -1 },
     [UI_FIELD_EN_FLOW] = { "energy.flow", UI_FK_FLOW, LS_EN_FLOW, -1 },
+    [UI_FIELD_LORA_NODES] = { "lora.nodes", UI_FK_NUMBER, LS_LORA_FIELD_NODES, -1 },
+    [UI_FIELD_LORA_MSGS] = { "lora.msgs", UI_FK_NUMBER, LS_LORA_FIELD_MSGS, -1 },
+    [UI_FIELD_LORA_RSSI] = { "lora.rssi", UI_FK_NUMBER, LS_LORA_FIELD_RSSI, -1 },
+    [UI_FIELD_LORA_SNR] = { "lora.snr", UI_FK_NUMBER, LS_LORA_FIELD_SNR, -1 },
+    [UI_FIELD_LORA_LAST_MSG] = { "lora.last_msg", UI_FK_TEXT, LS_LORA_FIELD_LAST_MSG, -1 },
 };
 
 static const ui_field_info_t k_pc_info = { "pc", UI_FK_NUMBER, LS_PC, -1 }; /* M7: the label is the PC app's */
@@ -262,7 +267,7 @@ void ui_resolve(const ui_context_t *ctx, ui_field_id_t field, ui_value_t *out)
     if (info->ds_field >= 0) {
         resolve_store(ctx, field, out);
     } else if (!ui_resolve_pc(ctx, field, out) && !ui_resolve_forecast(ctx, field, out) && !ui_resolve_radar(ctx, field, out) &&
-               !ui_resolve_solar(ctx, field, out)) {
+               !ui_resolve_solar(ctx, field, out) && !ui_resolve_lora(ctx, field, out)) {
         resolve_clock(ctx, field, out);
     }
 }

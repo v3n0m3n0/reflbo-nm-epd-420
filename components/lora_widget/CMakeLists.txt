@@ -1,6 +1,8 @@
 idf_component_register(
     SRCS
         "lora_widget.c"
+        "sx1262_radio.c"
+        "meshcore_node.c"
         "meshcore_proto.c"
         "meshcore_crypto.c"
         "meshcore_companion.c"
@@ -15,5 +17,5 @@ idf_component_register(
         "ed25519/key_exchange.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "." "ed25519"
-    PRIV_REQUIRES board esp_driver_gpio esp_driver_spi freertos esp_timer esp_hw_support log util bt timekeeping
+    PRIV_REQUIRES board esp_driver_gpio esp_driver_spi freertos esp_timer esp_hw_support log util bt timekeeping storage
 )

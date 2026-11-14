@@ -23,6 +23,8 @@ bool ui_radar_widget(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_
 bool ui_resolve_solar(const ui_context_t *ctx, ui_field_id_t field, ui_value_t *out);
 /* pc.<id> (ui_pc.c, M7); false for any other field. */
 bool ui_resolve_pc(const ui_context_t *ctx, ui_field_id_t field, ui_value_t *out);
+/* lora.* (ui_lora.c); false for any other field. */
+bool ui_resolve_lora(const ui_context_t *ctx, ui_field_id_t field, ui_value_t *out);
 /* pv.chart and energy.flow in an M or L slot (ui_solar.c); false for any other kind. */
 bool ui_solar_widget(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, const lang_t *lang);
 

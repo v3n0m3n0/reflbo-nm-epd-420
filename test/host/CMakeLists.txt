@@ -214,11 +214,12 @@ target_compile_options(ui PRIVATE ${REFLBO_WARNINGS})
 target_link_libraries(ui PUBLIC gfx locale datastore util map radar_logic adsb_logic solar_logic energy_logic pcstats_logic
                       PRIVATE cjson scheduler weather_logic astro m)
 
-# meshcore: pure-C host-buildable MeshCore protocol codec and crypto.
+# meshcore: pure-C host-buildable MeshCore protocol, crypto, and node logic.
 add_library(meshcore_logic STATIC
             ${REPO_ROOT}/components/lora_widget/meshcore_proto.c
             ${REPO_ROOT}/components/lora_widget/meshcore_crypto.c
             ${REPO_ROOT}/components/lora_widget/meshcore_companion.c
+            ${REPO_ROOT}/components/lora_widget/meshcore_node.c
             ${REPO_ROOT}/components/lora_widget/ed25519/fe.c
             ${REPO_ROOT}/components/lora_widget/ed25519/ge.c
             ${REPO_ROOT}/components/lora_widget/ed25519/sc.c
@@ -322,9 +323,11 @@ reflbo_host_test(test_ui_catalog ui cjson)
 reflbo_host_test(test_ui_flights ui)
 reflbo_host_test(test_ui_solar ui)
 reflbo_host_test(test_ui_lora ui)
+target_include_directories(test_ui_lora PRIVATE ${REPO_ROOT}/components/ui) # ui_status_draw()
 reflbo_host_test(test_settings storage_logic)
 reflbo_host_test(test_meshcore_proto meshcore_logic util)
 reflbo_host_test(test_meshcore_companion meshcore_logic util)
+reflbo_host_test(test_meshcore_node meshcore_logic util)
 reflbo_host_test(test_storage_file storage_logic)
 target_compile_definitions(test_storage_file PRIVATE TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}/storage_tmp")
 reflbo_host_test(test_storage_backup storage_logic)

@@ -68,6 +68,22 @@ static void test_a_new_image_that_fails_to_boot_rolls_back(void)
     TEST_ASSERT_EQUAL(POWER_PLAN_AWAKE, power_policy(&in));
 }
 
+static void test_lora_wake_lock_hybrid_policy(void)
+{
+    /* Focus mode or disabled LoRa never holds wake lock. */
+    TEST_ASSERT_FALSE(power_lora_wake_lock(true, true, false, true, true));
+    TEST_ASSERT_FALSE(power_lora_wake_lock(false, false, false, true, true));
+
+    /* USB tether or active BLE companion connection always holds wake lock (when enabled outside focus). */
+    TEST_ASSERT_TRUE(power_lora_wake_lock(false, true, true, true, false));
+    TEST_ASSERT_TRUE(power_lora_wake_lock(false, true, true, false, true));
+    TEST_ASSERT_TRUE(power_lora_wake_lock(false, true, false, true, true));
+
+    /* On battery without BLE: wake_on_rx=true releases CPU to light sleep; wake_on_rx=false keeps CPU awake. */
+    TEST_ASSERT_FALSE(power_lora_wake_lock(false, true, true, false, false));
+    TEST_ASSERT_TRUE(power_lora_wake_lock(false, true, false, false, false));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -77,5 +93,6 @@ int main(void)
     RUN_TEST(test_sleep_test_cycles_sleep_even_when_tethered);
     RUN_TEST(test_failed_boot_serves_the_console_or_retries);
     RUN_TEST(test_a_new_image_that_fails_to_boot_rolls_back);
+    RUN_TEST(test_lora_wake_lock_hybrid_policy);
     return UNITY_END();
 }

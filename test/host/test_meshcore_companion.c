@@ -25,12 +25,50 @@ static bool mock_send_channel_txt(uint8_t ch_idx, const char *text)
     return true;
 }
 
+static int s_send_direct_txt_calls = 0;
+static char s_last_sent_direct_txt[128];
+static const uint8_t s_mock_direct_ack_tag[4] = { 0x11, 0x22, 0x33, 0x44 };
+static bool mock_send_direct_txt(const uint8_t pub_key[32], uint8_t txt_type, uint32_t msg_ts,
+                                 const char *text, uint8_t out_ack_tag[4])
+{
+    (void)pub_key;
+    (void)txt_type;
+    (void)msg_ts;
+    s_send_direct_txt_calls++;
+    if (text) {
+        strncpy(s_last_sent_direct_txt, text, sizeof(s_last_sent_direct_txt) - 1);
+        s_last_sent_direct_txt[sizeof(s_last_sent_direct_txt) - 1] = '\0';
+    } else {
+        s_last_sent_direct_txt[0] = '\0';
+    }
+    if (out_ack_tag) {
+        memcpy(out_ack_tag, s_mock_direct_ack_tag, 4);
+    }
+    return true;
+}
+
+static int s_set_latlon_calls = 0;
+static int32_t s_last_lat_e6 = 0;
+static int32_t s_last_lon_e6 = 0;
+static void mock_set_latlon(int32_t lat_e6, int32_t lon_e6, void *user_data)
+{
+    (void)user_data;
+    s_set_latlon_calls++;
+    s_last_lat_e6 = lat_e6;
+    s_last_lon_e6 = lon_e6;
+}
+
 void setUp(void)
 {
     s_mock_time_s = 1000;
     s_send_channel_txt_calls = 0;
     s_last_sent_channel_txt[0] = '\0';
     s_last_sent_channel_idx = 0;
+    s_send_direct_txt_calls = 0;
+    s_last_sent_direct_txt[0] = '\0';
+    s_set_latlon_calls = 0;
+    s_last_lat_e6 = 0;
+    s_last_lon_e6 = 0;
 }
 
 void tearDown(void)
@@ -99,7 +137,7 @@ void test_companion_txt_msg_attempt_retry_deduplication(void)
 
     companion_env_t env = {
         .get_time_s = mock_get_time_s,
-        .send_channel_txt = mock_send_channel_txt,
+        .send_direct_txt = mock_send_direct_txt,
     };
 
     uint8_t resp[256];
@@ -114,26 +152,43 @@ void test_companion_txt_msg_attempt_retry_deduplication(void)
     size_t tlen = strlen(text);
     memcpy(&cmd[13], text, tlen);
 
-    /* 1. Initial attempt = 0: must call send_channel_txt and return RESP_CODE_SENT */
+    /* 0. Unknown prefix must fail with COMPANION_ERR_NOT_FOUND */
     size_t len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, 13 + tlen, resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(2, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_ERR, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(COMPANION_ERR_NOT_FOUND, resp[1]);
+    TEST_ASSERT_EQUAL_INT(0, s_send_direct_txt_calls);
+
+    /* Register contact with matching prefix and a known direct path */
+    companion_contact_t contact = { .out_path_len = 2 };
+    for (int i = 0; i < 32; i++) contact.pub_key[i] = (uint8_t)(0x30 + i);
+    strncpy(contact.name, "Peer30", sizeof(contact.name) - 1);
+    TEST_ASSERT_TRUE(meshcore_companion_add_update_contact(&ctx, &contact));
+
+    /* 1. Initial attempt = 0: must call send_direct_txt and return RESP_CODE_SENT */
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, 13 + tlen, resp, sizeof(resp));
     TEST_ASSERT_EQUAL_INT(10, (int)len);
     TEST_ASSERT_EQUAL_UINT8(RESP_CODE_SENT, resp[0]);
-    TEST_ASSERT_EQUAL_INT(1, s_send_channel_txt_calls);
-    TEST_ASSERT_EQUAL_STRING(text, s_last_sent_channel_txt);
+    TEST_ASSERT_EQUAL_UINT8(0, resp[1]); /* direct route since out_path_len == 2 */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(s_mock_direct_ack_tag, &resp[2], 4);
+    TEST_ASSERT_EQUAL_INT(1, s_send_direct_txt_calls);
+    TEST_ASSERT_EQUAL_STRING(text, s_last_sent_direct_txt);
 
-    /* 2. Retry attempt = 1: companion app retransmitting; must NOT call send_channel_txt */
+    /* 2. Retry attempt = 1: companion app retransmitting; must NOT call send_direct_txt */
     cmd[2] = 1;
     len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, 13 + tlen, resp, sizeof(resp));
     TEST_ASSERT_EQUAL_INT(10, (int)len);
     TEST_ASSERT_EQUAL_UINT8(RESP_CODE_SENT, resp[0]);
-    TEST_ASSERT_EQUAL_INT(1, s_send_channel_txt_calls); /* Still 1! */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(s_mock_direct_ack_tag, &resp[2], 4);
+    TEST_ASSERT_EQUAL_INT(1, s_send_direct_txt_calls); /* Still 1! */
 
-    /* 3. Retry attempt = 2: must NOT call send_channel_txt */
+    /* 3. Retry attempt = 2: must NOT call send_direct_txt */
     cmd[2] = 2;
     len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, 13 + tlen, resp, sizeof(resp));
     TEST_ASSERT_EQUAL_INT(10, (int)len);
     TEST_ASSERT_EQUAL_UINT8(RESP_CODE_SENT, resp[0]);
-    TEST_ASSERT_EQUAL_INT(1, s_send_channel_txt_calls); /* Still 1! */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(s_mock_direct_ack_tag, &resp[2], 4);
+    TEST_ASSERT_EQUAL_INT(1, s_send_direct_txt_calls); /* Still 1! */
 }
 
 void test_companion_battery_reporting_4190mv(void)
@@ -273,11 +328,60 @@ void test_companion_set_channel_and_delete(void)
     TEST_ASSERT_EQUAL_UINT8(0, resp[2]);
 }
 
+void test_companion_latlon_and_unsupported_cmds(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+    lora_config_t cfg = { .freq_khz = 869618, .bw_hz = 62500, .sf = 8, .cr = 5, .tx_power_dbm = 22, .node_name = "LatLonNode" };
+    companion_env_t env = {
+        .lat_e6 = 1000000,
+        .lon_e6 = 2000000,
+        .set_latlon = mock_set_latlon,
+    };
+    uint8_t resp[256];
+    bool changed = false;
+
+    uint8_t latlon_cmd[9] = { CMD_SET_ADVERT_LATLON };
+    int32_t lat_e6 = 50061400;
+    int32_t lon_e6 = 19936600;
+    memcpy(&latlon_cmd[1], &lat_e6, 4);
+    memcpy(&latlon_cmd[5], &lon_e6, 4);
+
+    size_t len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, latlon_cmd, sizeof(latlon_cmd), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)len);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_TRUE(changed);
+    TEST_ASSERT_TRUE(cfg.share_loc);
+    TEST_ASSERT_EQUAL_INT(1, s_set_latlon_calls);
+    TEST_ASSERT_EQUAL_INT32(lat_e6, s_last_lat_e6);
+    TEST_ASSERT_EQUAL_INT32(lon_e6, s_last_lon_e6);
+
+    uint8_t app_start[] = { CMD_APP_START };
+    len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, app_start, sizeof(app_start), resp, sizeof(resp));
+    TEST_ASSERT_TRUE(len >= 58);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_SELF_INFO, resp[0]);
+    int32_t ret_lat = 0, ret_lon = 0;
+    memcpy(&ret_lat, &resp[36], 4);
+    memcpy(&ret_lon, &resp[40], 4);
+    TEST_ASSERT_EQUAL_INT32(lat_e6, ret_lat);
+    TEST_ASSERT_EQUAL_INT32(lon_e6, ret_lon);
+
+    const uint8_t unsupported[] = { CMD_SHARE_CONTACT, CMD_REBOOT, CMD_SEND_TRACE_PATH, CMD_SEND_CONTROL_DATA };
+    for (size_t i = 0; i < sizeof(unsupported); i++) {
+        uint8_t cmd[1] = { unsupported[i] };
+        len = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, sizeof(cmd), resp, sizeof(resp));
+        TEST_ASSERT_EQUAL_INT(2, (int)len);
+        TEST_ASSERT_EQUAL_UINT8(RESP_CODE_ERR, resp[0]);
+        TEST_ASSERT_EQUAL_UINT8(COMPANION_ERR_UNSUPPORTED_CMD, resp[1]);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_companion_channel_txt_retry_deduplication);
     RUN_TEST(test_companion_txt_msg_attempt_retry_deduplication);
+    RUN_TEST(test_companion_latlon_and_unsupported_cmds);
     RUN_TEST(test_companion_battery_reporting_4190mv);
     RUN_TEST(test_companion_get_channel_slots_0_to_7_and_not_found_on_8);
     RUN_TEST(test_companion_set_channel_and_delete);

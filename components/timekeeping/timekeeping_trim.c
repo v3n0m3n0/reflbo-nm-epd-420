@@ -107,6 +107,16 @@ int64_t timekeeping_drift_us(int64_t elapsed_us, int32_t drift_ppb)
     return whole + rem;
 }
 
+uint64_t timekeeping_trim_sleep_us(int64_t left_us, int32_t drift_ppb)
+{
+    if (left_us <= 1000LL) {
+        return 1000ULL;
+    }
+    int64_t comp_us = timekeeping_drift_us(left_us, drift_ppb);
+    int64_t hw_us = left_us + comp_us + 2000LL; /* 2 ms margin so corrected time lands >= target second */
+    return hw_us > 1000LL ? (uint64_t)hw_us : 1000ULL;
+}
+
 bool timekeeping_sw_drift_measure(int32_t *drift_ppb, int64_t span_ms, int64_t error_ms)
 {
     if (drift_ppb == NULL || span_ms < (int64_t)TIMEKEEPING_SW_MIN_SPAN_S * 1000) {

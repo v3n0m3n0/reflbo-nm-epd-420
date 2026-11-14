@@ -28,3 +28,9 @@ typedef struct {
 } power_policy_input_t;
 
 power_plan_t power_policy(const power_policy_input_t *in);
+
+/* Hybrid LoRa wake-lock policy (Option A): keep the CPU awake when LoRa is enabled
+ * outside focus mode only while tethered on USB, connected via BLE companion, or when
+ * wake-on-RX light sleep is disabled. */
+bool power_lora_wake_lock(bool focus_active, bool lora_enabled, bool wake_on_rx,
+                          bool usb_tethered, bool ble_connected);

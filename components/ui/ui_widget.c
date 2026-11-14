@@ -130,6 +130,17 @@ static const gfx_bitmap_t *field_icon(const ui_value_t *v, int size)
     case UI_FIELD_EN_SELF:
         s16 = &gfx_icon_self_use_16, s24 = &gfx_icon_self_use_24, s48 = &gfx_icon_self_use_48;
         break;
+    case UI_FIELD_LORA_NODES:
+        s16 = &gfx_icon_grid_16, s24 = &gfx_icon_grid_24, s48 = &gfx_icon_grid_48;
+        break;
+    case UI_FIELD_LORA_MSGS:
+    case UI_FIELD_LORA_LAST_MSG:
+        s16 = &gfx_icon_person_16, s24 = &gfx_icon_person_24, s48 = &gfx_icon_person_48;
+        break;
+    case UI_FIELD_LORA_RSSI:
+    case UI_FIELD_LORA_SNR:
+        s16 = &gfx_icon_air_16, s24 = &gfx_icon_air_24, s48 = &gfx_icon_air_48;
+        break;
     default:
         break;
     }

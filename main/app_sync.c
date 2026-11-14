@@ -31,6 +31,7 @@ static time_t s_radar_next;     /* sync mode `always`: the next radar refresh; 0
 static time_t s_energy_next;    /* and the next reading of the house's energy (M6d) */
 static bool s_refresh;          /* what runs is such a refresh, or a check (M6d), not a sync */
 static bool s_manual_waiting;   /* a sync asked for during such a refresh: it starts when that ends */
+static RTC_DATA_ATTR uint32_t s_focus_anchor_utc; /* fallback Focus sync anchor before first SNTP ok_at */
 
 static bool always_wanted(time_t now);
 static bool wifi_off(void);
@@ -77,6 +78,14 @@ void app_sync_schedule(void)
     sync_schedule_t s;
     schedule_from_settings(&s);
     time_t now = time(NULL);
+    if (now <= 0) {
+        now = 1;
+    }
+    if (!timekeeping_valid()) {
+        s_focus_anchor_utc = 0;
+    } else if (s_focus_anchor_utc == 0 || (time_t)s_focus_anchor_utc > now) {
+        s_focus_anchor_utc = (uint32_t)now;
+    }
     uint32_t expected = sync_expected_interval_s(&s, now);
     ds_set_forecast_ttl(app_ds(), expected == 0 ? 0 : expected + 2 * 3600); /* spec §5.1 */
     if (!networks_saved()) {
@@ -101,7 +110,11 @@ void app_sync_schedule(void)
 time_t app_sync_due(void)
 {
     if (app_focus_mode_active()) {
-        return sync_focus_next_due(st()->ok_at, st()->history.failed_at, timekeeping_temp_excursion_active());
+        if (!timekeeping_valid()) {
+            return st()->due.at;
+        }
+        uint32_t base = st()->ok_at != 0 ? st()->ok_at : s_focus_anchor_utc;
+        return sync_focus_next_due(base, st()->history.failed_at, timekeeping_temp_excursion_active());
     }
     return st()->due.at;
 }
@@ -556,6 +569,9 @@ static void refresh_tick(time_t now)
 void app_sync_tick(void)
 {
     time_t now = time(NULL);
+    if (now <= 0) {
+        now = 1;
+    }
     bool critical = app_state()->critical;
     app_sync_wifi_check();
     if (critical || app_ui_night()) {
@@ -564,8 +580,9 @@ void app_sync_tick(void)
     if (app_focus_mode_active()) {
         time_t focus_due = app_sync_due();
         if (focus_due != 0 && now >= focus_due && !s_active) {
+            uint32_t base = st()->ok_at != 0 ? st()->ok_at : s_focus_anchor_utc;
             sync_due_t d = { .at = focus_due,
-                             .retry = (st()->history.failed_at != 0 && st()->history.failed_at >= st()->ok_at) };
+                             .retry = (st()->history.failed_at != 0 && st()->history.failed_at >= (time_t)base) };
             if (start(false, d) != ESP_OK) {
                 ESP_LOGE(TAG, "focus NTP sync didn't start");
                 sync_history_record(&st()->history, d, false, now);

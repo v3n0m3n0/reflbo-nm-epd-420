@@ -36,12 +36,15 @@ esp_err_t timekeeping_init(const char *tz_posix)
 
 esp_err_t timekeeping_load_from_rtc(bool at_edge)
 {
+    (void)at_edge;
     time_t utc;
     bool valid;
     ESP_RETURN_ON_ERROR(pcf85063_read(&utc, &valid), TAG, "RTC read");
     struct timeval now;
     gettimeofday(&now, NULL);
-    if (timekeeping_rtc_resync(now.tv_sec, utc, at_edge)) {
+    /* NM-EPD-420 has no external RTC; pcf85063_read() reads the same system clock, so do not
+     * pass at_edge=true which would truncate tv_usec to 0 on every minute wake. */
+    if (timekeeping_rtc_resync(now.tv_sec, utc, false)) {
         struct timeval tv = { .tv_sec = utc };
         settimeofday(&tv, NULL);
     }
@@ -118,6 +121,8 @@ esp_err_t timekeeping_trim_start(void)
         timekeeping_trim_forget(&s_trim);
         trim_save();
     }
+    s_last_corr_us = 0;
+    s_sw_corr_accum_us = 0;
     ESP_LOGI(TAG, "RTC trim %d steps", s_trim.offset);
     return pcf85063_set_offset(s_trim.offset); /* the chip loses it with its power (D9) */
 }
@@ -212,7 +217,7 @@ esp_err_t timekeeping_drift_correct(void)
         return ESP_OK;
     }
     int64_t drift_us = timekeeping_drift_us(now_us - s_last_corr_us, s_trim.drift_ppb);
-    if (llabs(drift_us) < 50000LL) {
+    if (llabs(drift_us) < 1000LL) {
         return ESP_OK;
     }
     int64_t new_us = now_us - drift_us;
@@ -225,6 +230,14 @@ esp_err_t timekeeping_drift_correct(void)
     s_sw_corr_accum_us += drift_us;
     ESP_LOGI(TAG, "SW drift correction: %lld us", (long long)(-drift_us));
     return ESP_OK;
+}
+
+uint64_t timekeeping_sleep_us_until(time_t until_utc)
+{
+    trim_load();
+    timekeeping_drift_correct();
+    int64_t left_us = (int64_t)until_utc * 1000000LL - clock_us();
+    return timekeeping_trim_sleep_us(left_us, s_trim.drift_ppb);
 }
 
 esp_err_t timekeeping_set_utc(time_t utc)
