@@ -7,8 +7,9 @@
 #include "unity.h"
 #include "util_crc32.h"
 
-/* The ČHMÚ frames and the RainViewer tile were fetched on 2026-10-01; their pixel counts come from
- * Pillow, so they check this reader against another one. */
+/* The DWD frames (dwd_rv_rain.png, dwd_iconeu_rain.png) and the RainViewer tile
+ * (rainviewer_tile.png) have reference pixel counts from Pillow, so they check this reader against
+ * another one. */
 
 void setUp(void) {}
 void tearDown(void) {}

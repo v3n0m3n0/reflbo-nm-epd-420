@@ -37,8 +37,10 @@ bool ui_sync_time_fit(const ui_context_t *ctx, time_t at, const gfx_font_t *font
 }
 
 /* Status bar (spec §5.2): "Set time" or a stale warning on the left, then a globe while a phone is
- * logged in to the web UI (D20), a monitor during a PC session (M7), the sync state and in sync mode `always` the Wi-Fi state, and the last
- * good sync's time if the preset asks, with a cloud before it when it stands alone (D43); an optional clock in the
+ * logged in to the web UI (D20), a monitor during a PC session (M7), the sync state, the Wi-Fi
+ * indicator reflecting active/joining STA connectivity across all sync modes unless suppressed
+ * (e.g., Focus / Setup) or UI_WIFI_NONE when idle/sleeping/Focus, and the last good sync's time if
+ * the preset asks, with a cloud before it when it stands alone (D43); an optional clock in the
  * middle, the battery on the right with its level, voltage or days left as the preset asks. */
 void ui_status_draw(gfx_fb_t *fb, const ui_context_t *ctx, const ui_preset_t *preset, bool any_stale)
 {
@@ -80,7 +82,9 @@ void ui_status_draw(gfx_fb_t *fb, const ui_context_t *ctx, const ui_preset_t *pr
                    GFX_BLACK);
         left += 20;
     }
-    if (ctx->wifi != UI_WIFI_NONE) { /* sync mode `always` (D19) */
+    /* Active/joining STA connectivity across all sync modes; UI_WIFI_NONE when idle, sleeping,
+     * or suppressed (e.g., Focus / Setup). */
+    if (ctx->wifi != UI_WIFI_NONE) {
         gfx_bitmap(fb, left, 2, ctx->wifi == UI_WIFI_ON ? &gfx_icon_wifi_16 : &gfx_icon_wifi_off_16, GFX_BLACK);
         left += 20;
     }

@@ -596,9 +596,10 @@ void app_sync_wifi_check(void)
     app_net_refresh();
 }
 
-/* Sync mode `always` on the network: the radar every 5 min (RainViewer: 10), at once when the mode begins, so
- * the loop's hour comes in one go (spec §9.3, D28); the house's reading every 5 min, in the radar's refresh when
- * one runs then (D36). A step that is off makes no requests (D35). */
+/* Sync mode `always` on the network: the radar per app_radar_step_s() (DWD Radar 1x1 km: 5 min,
+ * DWD ICON-EU: 60 min, RainViewer: 10 min), at once when the mode begins, so the loop's hour comes
+ * in one go (spec §9.3, D28); the house's reading every 5 min, in the radar's refresh when one runs
+ * then (D36). A step that is off makes no requests (D35). */
 static void refresh_tick(time_t now)
 {
     if (!app_sync_lan_ui()) {
