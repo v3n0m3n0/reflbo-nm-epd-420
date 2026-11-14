@@ -29,6 +29,8 @@ static uint32_t s_saved_at; /* the time of the frame in the file; 0 = none known
 static map_data_t s_map;
 static int s_map_state; /* 0 not opened yet, 1 open, -1 broken */
 static app_radar_status_t s_status;
+static uint32_t s_gen;     /* bumped on app_radar_invalidate() to reject in-flight stale fetches */
+static uint32_t s_req_gen; /* generation captured when app_radar_request() builds the request */
 static ui_radar_t s_ui;
 static uint8_t s_loop_at, s_loop_count; /* the loop (D28): the frame shown of how many; 0 when it doesn't run */
 static int64_t s_loop_next_ms;          /* app_uptime_ms() of its next frame */
@@ -178,10 +180,18 @@ void app_radar_request(radar_fetch_req_t *out)
         out->have[out->have_count++] = s_store.frames[i].time;
     }
     out->now = timekeeping_valid() ? (uint32_t)time(NULL) : 0; /* a sync's own NTP time replaces it */
+    s_req_gen = s_gen;
 }
 
 void app_radar_apply(radar_fetch_result_t *res, uint8_t result, const char *detail)
 {
+    if (s_req_gen != s_gen) {
+        for (int i = 0; i < res->count; i++) {
+            radar_frame_free(&res->frames[i], &radar_fetch_mem);
+        }
+        res->count = 0;
+        return;
+    }
     app_radar_loop_stop(); /* new frames move the old ones along */
     tidy();
     int added = 0;
@@ -208,6 +218,7 @@ void app_radar_apply(radar_fetch_result_t *res, uint8_t result, const char *deta
 void app_radar_invalidate(void)
 {
     ready();
+    s_gen++;
     s_loop_count = 0;
     radar_store_clear(&s_store);
     s_saved_at = 0;

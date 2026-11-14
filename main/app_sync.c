@@ -31,6 +31,7 @@ static time_t s_radar_next;     /* sync mode `always`: the next radar refresh; 0
 static time_t s_energy_next;    /* and the next reading of the house's energy (M6d) */
 static bool s_refresh;          /* what runs is such a refresh, or a check (M6d), not a sync */
 static bool s_manual_waiting;   /* a sync asked for during such a refresh: it starts when that ends */
+static bool s_radar_due;        /* radar settings changed while s_active: fetch once it ends */
 static RTC_DATA_ATTR uint32_t s_focus_anchor_utc; /* fallback Focus sync anchor before first SNTP ok_at */
 
 static bool always_wanted(time_t now);
@@ -215,6 +216,7 @@ static void save_summary(const sync_report_t *r, time_t started)
 static int64_t s_started_mono; /* esp_timer µs at the start, to date it once the clock is right */
 
 static esp_err_t start(bool manual, sync_due_t due);
+static bool start_radar_refresh(void);
 
 /* The Solar and Energy steps that ran, into the solar state (spec §11.5, §11.6). A step that kept the forecast
  * (Solcast's budget, a 429) shows its detail on the Sync page, not as an error. */
@@ -254,11 +256,20 @@ static void apply_refresh(sync_report_t *r)
     s_refresh = false;
     if (s_manual_waiting) {
         s_manual_waiting = false;
+        s_radar_due = false; /* manual sync runs all enabled steps with current settings */
         if (start(true, (sync_due_t){ 0 }) != ESP_OK) {
+            release_wifi();
             app_ui_toast(lang_str(lang_get(app_settings()->language), LS_T_SYNC_FAILED));
         }
         return;
     }
+    bool radar_due = s_radar_due;
+    s_radar_due = false;
+    if (radar_due && start_radar_refresh()) {
+        app_ui_render();
+        return;
+    }
+    release_wifi();
     app_ui_render();
 }
 
@@ -330,9 +341,6 @@ static void apply(void *arg)
         if (r->kind == SYNC_KIND_PC) {
             app_pc_tested(r); /* M7: a session may start, which keeps Wi-Fi */
         }
-        if (r->kind == SYNC_KIND_CHECK || r->kind == SYNC_KIND_PC) {
-            release_wifi(); /* as a sync does: config mode or `always` keep it */
-        }
         apply_refresh(r);
         return;
     }
@@ -366,10 +374,15 @@ static void apply(void *arg)
     ESP_LOGI(TAG, "sync %s%s%s", ok ? "done" : "failed at ", ok ? "" : sync_step_name(st()->last_failed_step),
              ok ? "" : st()->last_detail[st()->last_failed_step]);
     app_pc_report(r); /* M7: a PC found may start a session, which keeps Wi-Fi; before a new sync may start */
+    bool was_manual = s_manual;
     s_active = false; /* the report is applied: the next sync may overwrite it */
-    release_wifi();
+    bool radar_due = s_radar_due;
+    s_radar_due = false;
+    if (!radar_due || !start_radar_refresh()) {
+        release_wifi();
+    }
     app_sync_schedule();
-    if (s_manual) {
+    if (was_manual) {
         const lang_t *lang = lang_get(app_settings()->language);
         app_ui_toast(lang_str(lang, ok ? LS_T_SYNC_DONE : LS_T_SYNC_FAILED));
     } else {
@@ -623,18 +636,17 @@ static void refresh_tick(time_t now)
     }
 }
 
-void app_sync_radar_due_now(void)
+static bool start_radar_refresh(void)
 {
-    s_radar_next = 0;
     const settings_t *set = app_settings();
     if (!(set->sync_steps & SETTINGS_STEP_RADAR) || app_focus_mode_active() ||
         app_state()->critical || app_ui_night() || !app_net_ready() || s_active) {
-        return;
+        return false;
     }
     netmgr_status_t ns;
     netmgr_status(&ns);
     if (ns.state != NETMGR_STATION || ns.ip[0] == '\0') {
-        return;
+        return false;
     }
     time_t now = time(NULL);
     if (now <= 0) {
@@ -642,7 +654,7 @@ void app_sync_radar_due_now(void)
     }
     if (app_sync_lan_ui()) {
         refresh_tick(now);
-        return;
+        return s_active;
     }
     EXT_RAM_BSS_ATTR static sync_request_t req;
     req = (sync_request_t){ .kind = SYNC_KIND_REFRESH, .steps = set->sync_steps,
@@ -653,7 +665,25 @@ void app_sync_radar_due_now(void)
         s_refresh = true;
         s_manual = false;
         ESP_LOGI(TAG, "refresh: radar");
+        return true;
     }
+    return false;
+}
+
+void app_sync_radar_due_now(void)
+{
+    s_radar_next = 0;
+    const settings_t *set = app_settings();
+    if (app_focus_mode_active() || !(set->sync_steps & SETTINGS_STEP_RADAR)) {
+        s_radar_due = false;
+        return;
+    }
+    if (s_active) {
+        s_radar_due = true;
+        return;
+    }
+    s_radar_due = false;
+    start_radar_refresh();
 }
 
 void app_sync_tick(void)
