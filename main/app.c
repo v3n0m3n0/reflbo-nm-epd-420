@@ -376,7 +376,9 @@ void app_focus_mode_sync(bool entering)
         if (app_presets()->cycle_enabled) {
             app_state()->cycle_at = time(NULL) + app_presets()->cycle_interval_s;
         }
+        app_sync_tick();
     }
+    schedule_next_at(time(NULL));
 }
 
 /* A scheduled wake: the RTC alarm, its backup, a cycle switch or a seconds tick. `force` also
@@ -585,18 +587,19 @@ static void handle_wake(power_wake_t wake)
         }
         board_buttons_resync(); /* edges during sleep raised no interrupt */
         power_hold_awake_ms(GRACE_MS);
-        time_t wake_now = time(NULL);
-        if (wake == POWER_WAKE_KEY &&
-            (board_buttons_pressed(BOARD_BUTTON_KEY) || board_buttons_busy() || uxQueueMessagesWaiting(s_queue) > 0) &&
-            !app_ui_night() && !app_state()->critical && !app_config_shows_setup() && !app_menu_is_open()) {
-            schedule_next_at(wake_now);
-            break;
-        }
         if (!app_focus_mode_active() && app_state() && app_state()->settings.lora.enabled) {
             lora_widget_resume_ble();
         }
-        app_ui_sample(wake_now);
-        app_ui_render();
+        time_t wake_now = time(NULL);
+        bool skip_wake_render = wake == POWER_WAKE_KEY &&
+                                (board_buttons_pressed(BOARD_BUTTON_KEY) || board_buttons_busy() ||
+                                 uxQueueMessagesWaiting(s_queue) > 0) &&
+                                !app_ui_night() && !app_state()->critical && !app_config_shows_setup() &&
+                                !app_menu_is_open();
+        if (!skip_wake_render) {
+            app_ui_sample(wake_now);
+            app_ui_render();
+        }
         schedule_next_at(wake_now);
         break;
     default:
