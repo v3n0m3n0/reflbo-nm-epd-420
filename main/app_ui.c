@@ -249,6 +249,22 @@ static int32_t local_day(const struct tm *local)
     return (int32_t)util_days_from_civil(local->tm_year + 1900, local->tm_mon + 1, local->tm_mday);
 }
 
+ui_wifi_mark_t app_ui_wifi_state(void)
+{
+    if (app_focus_mode_active() || app_config_shows_setup() || !app_net_ready()) {
+        return UI_WIFI_NONE;
+    }
+    netmgr_status_t ns;
+    netmgr_status(&ns);
+    if (ns.state == NETMGR_STATION && ns.ip[0] != '\0') {
+        return UI_WIFI_ON;
+    }
+    if (ns.state == NETMGR_JOINING || (app_sync_holds_wifi() && !app_config_active())) {
+        return UI_WIFI_REJOINING;
+    }
+    return UI_WIFI_NONE;
+}
+
 void app_ui_context(ui_context_t *ctx)
 {
     time_t now = time(NULL);
@@ -260,12 +276,8 @@ void app_ui_context(ui_context_t *ctx)
                            .sync = app_sync_running()  ? UI_SYNC_RUNNING
                                    : app_sync_failed() ? UI_SYNC_FAILED
                                                        : UI_SYNC_IDLE,
+                           .wifi = app_ui_wifi_state(),
                            .sync_ok_at = app_sync_ok_at() };
-    if (app_sync_holds_wifi() && !app_config_active()) { /* spec §5.2: sync mode `always` */
-        netmgr_status_t ns;
-        netmgr_status(&ns);
-        ctx->wifi = ns.state == NETMGR_STATION && ns.ip[0] != '\0' ? UI_WIFI_ON : UI_WIFI_REJOINING;
-    }
     localtime_r(&now, &ctx->local);
     ctx->local_day = local_day(&ctx->local);
     ctx->radar = app_radar_ui(); /* M6 */

@@ -96,6 +96,8 @@ void app_ui_render(void);
 void app_ui_seed_previous(uint8_t partial_count);
 /* The context a render uses right now (also for the `field` command). */
 void app_ui_context(ui_context_t *ctx);
+/* Wi-Fi mark shown in the status bar for the active connection (UI_WIFI_NONE in Focus/setup). */
+ui_wifi_mark_t app_ui_wifi_state(void);
 void app_ui_sample(time_t now); /* SHTC3 and battery into the datastore */
 /* Makes preset `index` active and renders it. `persist` saves presets.json (manual switches). */
 void app_ui_select(int index, bool persist);

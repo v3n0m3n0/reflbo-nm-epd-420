@@ -43,8 +43,16 @@ static void net_changed_on_app(void *arg)
             app_sync_schedule(); /* the first network saved: the first forecast at once; the last forgotten: none */
         }
     }
+    static ui_wifi_mark_t s_last_wifi = UI_WIFI_NONE;
+    ui_wifi_mark_t now_wifi = app_ui_wifi_state();
     if (s_on) {
+        s_last_wifi = now_wifi;
         app_ui_render();
+    } else if (now_wifi != s_last_wifi) {
+        s_last_wifi = now_wifi;
+        if (!app_ui_night() && !app_state()->critical && !app_menu_is_open()) {
+            app_ui_render();
+        }
     }
 }
 

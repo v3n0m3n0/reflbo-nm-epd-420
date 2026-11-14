@@ -207,6 +207,91 @@ static void test_status_sync_after_marks_has_no_synced_mark(void)
     assert_same(&a, &b);
 }
 
+/* Status bar draws UI_WIFI_ON and UI_WIFI_REJOINING regardless of sync mode (e.g. manual TTL == 0). */
+static void test_wifi_icon_draws_on_and_rejoining_for_non_always_context(void)
+{
+    gfx_fb_t a, b;
+    ui_context_t ctx = context();
+    ui_preset_t preset = fixture_preset("home");
+    ui_solar_t manual_solar = { .forecast_ttl_s = 0 };
+    int lo, hi;
+
+    ds_set_forecast_ttl(&s_fix_ds, 0);
+    ctx.solar = &manual_solar;
+    ctx.sync = UI_SYNC_IDLE;
+    ctx.web_session = false;
+    ctx.pc = NULL;
+    ctx.lora = NULL;
+    preset.status_sync = false;
+
+    gfx_fb_init(&a, s_a, 400, 300);
+    gfx_fb_init(&b, s_b, 400, 300);
+
+    ctx.wifi = UI_WIFI_NONE;
+    gfx_clear(&a, GFX_WHITE);
+    ui_status_draw(&a, &ctx, &preset, false);
+
+    ctx.wifi = UI_WIFI_ON;
+    gfx_clear(&b, GFX_WHITE);
+    ui_status_draw(&b, &ctx, &preset, false);
+    diff_columns(&a, &b, &lo, &hi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(4, lo);
+    TEST_ASSERT_LESS_THAN_INT(20, hi);
+    gfx_bitmap(&a, 4, 2, &gfx_icon_wifi_16, GFX_BLACK);
+    assert_same(&a, &b);
+
+    ctx.wifi = UI_WIFI_NONE;
+    gfx_clear(&a, GFX_WHITE);
+    ui_status_draw(&a, &ctx, &preset, false);
+
+    ctx.wifi = UI_WIFI_REJOINING;
+    gfx_clear(&b, GFX_WHITE);
+    ui_status_draw(&b, &ctx, &preset, false);
+    diff_columns(&a, &b, &lo, &hi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(4, lo);
+    TEST_ASSERT_LESS_THAN_INT(20, hi);
+    gfx_bitmap(&a, 4, 2, &gfx_icon_wifi_off_16, GFX_BLACK);
+    assert_same(&a, &b);
+
+    ctx.sync = UI_SYNC_RUNNING;
+    ctx.wifi = UI_WIFI_NONE;
+    gfx_clear(&a, GFX_WHITE);
+    ui_status_draw(&a, &ctx, &preset, false);
+
+    ctx.wifi = UI_WIFI_ON;
+    gfx_clear(&b, GFX_WHITE);
+    ui_status_draw(&b, &ctx, &preset, false);
+    diff_columns(&a, &b, &lo, &hi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(24, lo);
+    TEST_ASSERT_LESS_THAN_INT(40, hi);
+    gfx_bitmap(&a, 24, 2, &gfx_icon_wifi_16, GFX_BLACK);
+    assert_same(&a, &b);
+}
+
+/* Focus mode keeps ctx->wifi == UI_WIFI_NONE, leaving the Wi-Fi icon region blank. */
+static void test_focus_with_wifi_none_leaves_wifi_icon_region_blank(void)
+{
+    gfx_fb_t a;
+    ui_context_t ctx;
+    ui_preset_t preset;
+    TEST_ASSERT_TRUE(fixture_dashboard("focus", &ctx, &preset));
+    ctx.wifi = UI_WIFI_NONE;
+    ctx.sync = UI_SYNC_IDLE;
+    ctx.web_session = false;
+    ctx.pc = NULL;
+    ctx.lora = NULL;
+    preset.status_sync = false;
+
+    gfx_fb_init(&a, s_a, 400, 300);
+    gfx_clear(&a, GFX_WHITE);
+    ui_status_draw(&a, &ctx, &preset, false);
+    for (int y = 2; y < 18; y++) {
+        for (int x = 4; x < 20; x++) {
+            TEST_ASSERT_EQUAL_INT_MESSAGE(GFX_WHITE, gfx_get_pixel(&a, x, y), "Focus Wi-Fi icon region must be blank");
+        }
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -220,5 +305,7 @@ int main(void)
     RUN_TEST(test_status_sync_without_the_clock_fits_beside_three_marks);
     RUN_TEST(test_status_sync_alone_gets_the_synced_mark);
     RUN_TEST(test_status_sync_after_marks_has_no_synced_mark);
+    RUN_TEST(test_wifi_icon_draws_on_and_rejoining_for_non_always_context);
+    RUN_TEST(test_focus_with_wifi_none_leaves_wifi_icon_region_blank);
     return UNITY_END();
 }
