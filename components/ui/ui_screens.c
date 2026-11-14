@@ -7,14 +7,14 @@
 
 void ui_draw_toast(gfx_fb_t *fb, const char *text)
 {
-    const gfx_font_t *f = &gfx_font_sans_bold_20;
+    const gfx_font_t *f = &gfx_font_sans_bold_16;
     char fit[96];
-    int w = gfx_text_ellipsize(f, text, fb->width - 60, fit, sizeof(fit)) + 40;
-    gfx_rect_t box = { (int16_t)((fb->width - w) / 2), (int16_t)(fb->height - 62), (int16_t)w, 44 };
+    int w = gfx_text_ellipsize(f, text, fb->width - 40, fit, sizeof(fit)) + 16;
+    gfx_rect_t box = { (int16_t)((fb->width - w) / 2), (int16_t)(fb->height - 26), (int16_t)w, 22 };
     gfx_reset_clip(fb);
     /* a white rim keeps the box visible over black content, such as an inverted preset */
-    gfx_fill_rect(fb, (gfx_rect_t){ (int16_t)(box.x - 3), (int16_t)(box.y - 3), (int16_t)(box.w + 6),
-                                    (int16_t)(box.h + 6) },
+    gfx_fill_rect(fb, (gfx_rect_t){ (int16_t)(box.x - 2), (int16_t)(box.y - 2), (int16_t)(box.w + 4),
+                                    (int16_t)(box.h + 4) },
                   GFX_WHITE);
     gfx_fill_rect(fb, box, GFX_BLACK);
     gfx_text_in_rect(fb, f, box, GFX_ALIGN_CENTER, fit, GFX_WHITE);

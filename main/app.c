@@ -412,10 +412,13 @@ void app_clock_moved(int64_t delta_s)
     on_tick(true, false); /* show the new time now, not at the next slot */
 }
 
-static const char *preset_name(void)
+static const char *preset_name_at(int index)
 {
     const ui_presets_t *p = app_presets();
-    return p->presets[p->active].name;
+    if (index < 0 || index >= p->count) {
+        return "";
+    }
+    return p->presets[index].name;
 }
 
 /* Dashboard bindings (spec §5.6); the menu has its own while it is open. */
@@ -456,13 +459,11 @@ static void handle_button(board_button_t button, gesture_t gesture)
             }
         }
     } else if (button == BOARD_BUTTON_KEY && gesture == GESTURE_SHORT) {
-        app_ui_select(ui_presets_next_with_lora(app_presets(), app_state()->settings.sync_mode == SETTINGS_SYNC_ALWAYS,
-                                                app_state()->settings.lora.enabled), true);
-        snprintf(text, sizeof(text), "%s: %s", lang_str(lang, LS_T_PRESET), preset_name());
-        app_ui_toast(text);
-    } else if (button == BOARD_BUTTON_KEY && gesture == GESTURE_DOUBLE) {
-        app_ui_toggle_cycle();
-        app_ui_toast(lang_str(lang, app_presets()->cycle_enabled ? LS_T_CYCLE_ON : LS_T_CYCLE_OFF));
+        int next = ui_presets_next_with_lora(app_presets(), app_state()->settings.sync_mode == SETTINGS_SYNC_ALWAYS,
+                                             app_state()->settings.lora.enabled);
+        snprintf(text, sizeof(text), "%s: %s", lang_str(lang, LS_T_PRESET), preset_name_at(next));
+        app_ui_toast_arm(text);
+        app_ui_select(next, true);
     } else if (button == BOARD_BUTTON_KEY && gesture == GESTURE_LONG) {
         app_menu_open();
     } else if (button == BOARD_BUTTON_BOOT && gesture == GESTURE_SHORT &&
@@ -584,10 +585,16 @@ static void handle_wake(power_wake_t wake)
         }
         board_buttons_resync(); /* edges during sleep raised no interrupt */
         power_hold_awake_ms(GRACE_MS);
+        time_t wake_now = time(NULL);
+        if (wake == POWER_WAKE_KEY &&
+            (board_buttons_pressed(BOARD_BUTTON_KEY) || board_buttons_busy() || uxQueueMessagesWaiting(s_queue) > 0) &&
+            !app_ui_night() && !app_state()->critical && !app_config_shows_setup() && !app_menu_is_open()) {
+            schedule_next_at(wake_now);
+            break;
+        }
         if (!app_focus_mode_active() && app_state() && app_state()->settings.lora.enabled) {
             lora_widget_resume_ble();
         }
-        time_t wake_now = time(NULL);
         app_ui_sample(wake_now);
         app_ui_render();
         schedule_next_at(wake_now);

@@ -22,7 +22,7 @@
 #include "util_time.h"
 #include "webui.h"
 
-#define TOAST_MS 3000
+#define TOAST_MS 2500
 #define DISPLAY_SUPPORTS_SECONDS 0 /* SSD1683 e-paper: no 1 Hz refresh */
 
 static const char *TAG = "app_ui";
@@ -42,6 +42,8 @@ static uint32_t s_last_lora_msg_count;
 static uint32_t s_last_lora_msg_seq;
 static uint32_t s_last_lora_adv_seq;
 static bool s_last_lora_ble;
+static bool s_focus_synced;
+static bool s_focus_sync_queued;
 
 #define LEARN_PATH "/fs/state/battery_learn.txt" /* the battery learning session in base64 (D21) */
 #define FORECAST_PATH "/fs/state/datastore.bin"    /* the last weather and air quality (spec §6) */
@@ -94,6 +96,8 @@ void app_ui_defaults(void)
     ds_init(&s.ds);
     default_settings(&s.settings);
     ui_presets_defaults(&s_presets);
+    s_focus_synced = app_focus_mode_active();
+    s_focus_sync_queued = false;
     sensors_set_battery_cal_save_cb(save_battery_cal_cb);
 }
 
@@ -144,6 +148,8 @@ void app_ui_load(void)
     s_presets = presets_defaults;
     s.cycle_at = 0; /* armed by the first tick, once the RTC has set the clock */
     s_settings_base[0] = '\0';
+    s_focus_synced = app_focus_mode_active();
+    s_focus_sync_queued = false;
     esp_err_t err = storage_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "storage: %s; settings and presets use their defaults", esp_err_to_name(err));
@@ -161,6 +167,7 @@ void app_ui_load(void)
         ESP_LOGI(TAG, "presets.json: offered the built-in presets it didn't have");
         app_ui_save_presets();
     }
+    s_focus_synced = app_focus_mode_active();
     if (settings == ESP_ERR_INVALID_RESPONSE || presets == ESP_ERR_INVALID_RESPONSE) { /* spec §14.3: say so */
         app_ui_toast(lang_str(lang_get(s.settings.language), LS_T_DEFAULTS));
     }
@@ -192,6 +199,8 @@ void app_ui_export_presets(ui_presets_t *out)
 void app_ui_import_presets(const ui_presets_t *in)
 {
     s_presets = *in;
+    s_focus_synced = app_focus_mode_active();
+    s_focus_sync_queued = false;
 }
 
 app_ui_state_t *app_state(void)
@@ -443,12 +452,17 @@ void app_ui_seed_previous(uint8_t partial_count)
     display_seed_previous(partial_count);
 }
 
-void app_ui_toast(const char *text)
+void app_ui_toast_arm(const char *text)
 {
     snprintf(s_toast, sizeof(s_toast), "%s", text);
     s_toast_until_ms = app_uptime_ms() + TOAST_MS;
     power_hold_awake_ms(TOAST_MS); /* a sleep would leave it on screen until the next wake */
     ESP_LOGI(TAG, "toast: %s", text);
+}
+
+void app_ui_toast(const char *text)
+{
+    app_ui_toast_arm(text);
     app_ui_render();
 }
 
@@ -715,22 +729,37 @@ esp_err_t app_ui_save_settings(void)
     return err;
 }
 
+static void focus_sync_on_app(void *arg)
+{
+    (void)arg;
+    s_focus_sync_queued = false;
+    bool is_focus = app_focus_mode_active();
+    if (is_focus != s_focus_synced) {
+        s_focus_synced = is_focus;
+        app_focus_mode_sync(is_focus);
+    }
+}
+
 void app_ui_select(int index, bool persist)
 {
     if (index < 0 || index >= s_presets.count) {
         return;
     }
-    bool was_focus = app_focus_mode_active();
     s_presets.active = (uint8_t)index;
     bool is_focus = app_focus_mode_active();
-    if (was_focus != is_focus) {
-        app_focus_mode_sync(is_focus);
-    }
     if (s_presets.cycle_enabled && !is_focus) {
         s.cycle_at = time(NULL) + s_presets.cycle_interval_s; /* a switch restarts the interval */
     }
     ESP_LOGI(TAG, "preset %s", s_presets.presets[index].id);
     app_ui_render();
+    if (is_focus != s_focus_synced && !s_focus_sync_queued) {
+        s_focus_sync_queued = true;
+        if (app_post(focus_sync_on_app, NULL) != ESP_OK) {
+            s_focus_sync_queued = false;
+            s_focus_synced = is_focus;
+            app_focus_mode_sync(is_focus);
+        }
+    }
     if (persist) {
         app_ui_save_presets();
     }
@@ -959,12 +988,12 @@ esp_err_t app_ui_patch_settings(const char *patch, char *err, size_t err_size)
 
 esp_err_t app_ui_replace_presets(const ui_presets_t *presets)
 {
-    bool was_focus = app_focus_mode_active();
     uint8_t offered = s_presets.offered;
     s_presets = *presets;
     s_presets.offered |= offered; /* a page or backup without the marker: what was offered stays offered */
     bool is_focus = app_focus_mode_active();
-    if (was_focus != is_focus) {
+    if (is_focus != s_focus_synced) {
+        s_focus_synced = is_focus;
         app_focus_mode_sync(is_focus);
     }
     s.cycle_at = 0;              /* the next tick starts the cycle interval */

@@ -32,10 +32,10 @@ _Static_assert(UI_MI_STEP_PC - UI_MI_STEP_WEATHER == 5 && SETTINGS_STEP_PC == 1 
 
 static int64_t s_closed_ms; /* app_uptime_ms() when the menu last closed */
 
-/* Gesture timings (spec §5.6): the dashboard binds both double presses (BOOT's since M6b, D31) and
- * a 3 s BOOT long press; the menu binds neither double, so KEY short answers at once. */
+/* Gesture timings (spec §5.6): the dashboard binds only BOOT double press (since M6b, D31) and a
+ * 3 s BOOT long press; KEY and the menu bind no double press, so KEY short answers at once. */
 const gesture_config_t k_app_dashboard_buttons[BOARD_BUTTON_COUNT] = {
-    [BOARD_BUTTON_KEY] = { .long_ms = 1000, .double_enabled = true },
+    [BOARD_BUTTON_KEY] = { .long_ms = 1000, .double_enabled = false },
     [BOARD_BUTTON_BOOT] = { .long_ms = 3000, .double_enabled = true },
 };
 static const gesture_config_t k_menu_buttons[BOARD_BUTTON_COUNT] = {

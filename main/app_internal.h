@@ -115,8 +115,10 @@ void app_ui_learn(bool start);
 /* A cold boot: the learning session saved in LittleFS, if one runs. */
 void app_ui_restore_learning(void);
 
-/* A short message over the screen for about 3 s (spec §5.5). */
+/* A short message over the screen for about 2.5 s (spec §5.5). */
 void app_ui_toast(const char *text);
+/* Sets the toast text and deadline without rendering yet (drawn on the next render). */
+void app_ui_toast_arm(const char *text);
 bool app_ui_toast_active(void);
 int64_t app_ui_toast_until_ms(void);
 /* The toast's time is up: draws the screen without it. */
