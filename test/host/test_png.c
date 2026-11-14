@@ -80,6 +80,7 @@ static void test_a_chmu_frame_decodes_with_its_palette(void)
     TEST_ASSERT_EQUAL_UINT16(680, info.width);
     TEST_ASSERT_EQUAL_UINT16(460, info.height);
     TEST_ASSERT_EQUAL_UINT8(PNG_PALETTE, info.type);
+    TEST_ASSERT_EQUAL_UINT8(8, info.depth);
     TEST_ASSERT_EQUAL_UINT16(256, info.palette_size);
     static const uint8_t k_green[4] = { 0, 160, 0, 255 }; /* 20 dBZ on ČHMÚ's scale */
     TEST_ASSERT_EQUAL_UINT8_ARRAY(k_green, info.palette[191], 4);
@@ -111,6 +112,7 @@ static void test_a_rainviewer_tile_decodes_as_rgba(void)
     s.probe_y = 128;
     TEST_ASSERT_EQUAL_INT(PNG_OK, png_decode(data, len, NULL, &info, on_row, &s));
     TEST_ASSERT_EQUAL_UINT8(PNG_RGBA, info.type);
+    TEST_ASSERT_EQUAL_UINT8(8, info.depth);
     TEST_ASSERT_EQUAL_UINT16(256, info.width);
     TEST_ASSERT_EQUAL_INT(256, s.rows);
     TEST_ASSERT_EQUAL_INT32(9297, s.opaque);
@@ -156,8 +158,14 @@ static size_t make_png(uint8_t *out, uint32_t w, uint32_t h, uint8_t depth, uint
                          depth, type, 0, 0, interlace };
     n += put_chunk(out + n, "IHDR", ihdr, 13);
     if (type == PNG_PALETTE) {
-        uint8_t plte[12] = { 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255 };
-        n += put_chunk(out + n, "PLTE", plte, 12);
+        static const uint8_t k_plte[16 * 3] = {
+            0, 0, 0,       255, 0, 0,     0, 255, 0,     0, 0, 255,
+            255, 255, 0,   255, 0, 255,   0, 255, 255,   128, 128, 128,
+            128, 0, 0,     0, 128, 0,     0, 0, 128,     128, 128, 0,
+            128, 0, 128,   0, 128, 128,   192, 192, 192, 255, 255, 255,
+        };
+        uint32_t plte_bytes = depth == 4 ? 16 * 3 : 4 * 3;
+        n += put_chunk(out + n, "PLTE", k_plte, plte_bytes);
     }
     static uint8_t z[4096];
     uLongf zn = sizeof(z);
@@ -283,22 +291,158 @@ static void counting_free(void *p)
 
 static void test_memory_comes_from_the_hooks_and_goes_back(void)
 {
-    size_t len;
-    uint8_t *data = load("chmi_dry.png", &len);
+    static const char *const k_files[] = { "chmi_dry.png", "dwd_iconeu_rain.png" };
     const png_mem_t mem = { counting_alloc, counting_free };
     png_info_t info;
     int rows = 0;
-    s_allocs = s_frees = 0;
-    s_fail_after = -1;
-    TEST_ASSERT_EQUAL_INT(PNG_OK, png_decode(data, len, &mem, &info, ignore_row, &rows));
-    TEST_ASSERT_TRUE(s_allocs > 0);
-    TEST_ASSERT_EQUAL_INT(s_allocs, s_frees);
-    for (int fail = 0; fail < 2; fail++) {
+    for (size_t i = 0; i < sizeof(k_files) / sizeof(k_files[0]); i++) {
+        size_t len;
+        uint8_t *data = load(k_files[i], &len);
         s_allocs = s_frees = 0;
-        s_fail_after = fail;
-        TEST_ASSERT_EQUAL_INT(PNG_ERR_NO_MEMORY, png_decode(data, len, &mem, &info, ignore_row, &rows));
+        s_fail_after = -1;
+        TEST_ASSERT_EQUAL_INT(PNG_OK, png_decode(data, len, &mem, &info, ignore_row, &rows));
+        TEST_ASSERT_EQUAL_INT(2, s_allocs);
         TEST_ASSERT_EQUAL_INT(s_allocs, s_frees);
+        for (int fail = 0; fail < 2; fail++) {
+            s_allocs = s_frees = 0;
+            s_fail_after = fail;
+            TEST_ASSERT_EQUAL_INT(PNG_ERR_NO_MEMORY, png_decode(data, len, &mem, &info, ignore_row, &rows));
+            TEST_ASSERT_EQUAL_INT(s_allocs, s_frees);
+        }
+        free(data);
     }
+}
+
+typedef struct {
+    uint8_t px[4][16];
+    int rows;
+    uint16_t width;
+} sub_byte_t;
+
+static void on_sub_byte_row(void *ctx, int y, const uint8_t *row, const png_info_t *info)
+{
+    sub_byte_t *s = ctx;
+    TEST_ASSERT_EQUAL_UINT16(s->width, info->width);
+    TEST_ASSERT_TRUE(y >= 0 && y < 4);
+    memcpy(s->px[y], row, info->width);
+    s->rows++;
+}
+
+static void check_sub_byte_case(uint16_t w, uint16_t h, uint8_t depth, const uint8_t *raw, size_t raw_len,
+                                const uint8_t want[4][16])
+{
+    static uint8_t file[8192];
+    size_t n = make_png(file, w, h, depth, PNG_PALETTE, 0, raw, raw_len);
+    png_info_t info;
+    sub_byte_t s;
+    memset(&s, 0, sizeof(s));
+    s.width = w;
+    TEST_ASSERT_EQUAL_INT(PNG_OK, png_decode(file, n, NULL, &info, on_sub_byte_row, &s));
+    TEST_ASSERT_EQUAL_UINT8(depth, info.depth);
+    TEST_ASSERT_EQUAL_INT(h, s.rows);
+    for (int y = 0; y < h; y++) {
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(want[y], s.px[y], w);
+    }
+}
+
+static void test_sub_byte_palette_depths_unpack_to_indices(void)
+{
+    /* 4-bit w=5, h=3: None, Sub (bpp=1), Up (bpp=1), with non-zero trailing padding nibble 0x79 */
+    static const uint8_t k_raw4[] = {
+        0, 0xA3, 0xF1, 0x79,
+        1, 0x24, 0x6A, 0x32,
+        2, 0x32, 0x0D, 0x10,
+    };
+    static const uint8_t k_want4[4][16] = {
+        { 0xA, 0x3, 0xF, 0x1, 0x7 },
+        { 0x2, 0x4, 0x8, 0xE, 0xC },
+        { 0x5, 0x6, 0x9, 0xB, 0xD },
+    };
+    check_sub_byte_case(5, 3, 4, k_raw4, sizeof(k_raw4), k_want4);
+
+    /* 2-bit w=5, h=2: None, Sub (bpp=1), with non-zero padding bits 0x3F in row 0 */
+    static const uint8_t k_raw2[] = {
+        0, 0xD8, 0xBF,
+        1, 0x2D, 0x93,
+    };
+    static const uint8_t k_want2[4][16] = {
+        { 3, 1, 2, 0, 2 },
+        { 0, 2, 3, 1, 3 },
+    };
+    check_sub_byte_case(5, 2, 2, k_raw2, sizeof(k_raw2), k_want2);
+
+    /* 1-bit w=5, h=2: None and Up within a single packed byte, ignoring trailing padding bits */
+    static const uint8_t k_raw1_5[] = {
+        0, 0xB7,
+        2, 0x91,
+    };
+    static const uint8_t k_want1_5[4][16] = {
+        { 1, 0, 1, 1, 0 },
+        { 0, 1, 0, 0, 1 },
+    };
+    check_sub_byte_case(5, 2, 1, k_raw1_5, sizeof(k_raw1_5), k_want1_5);
+
+    /* 1-bit w=11, h=2: None and Sub across byte boundary */
+    static const uint8_t k_raw1_11[] = {
+        0, 0xB2, 0xDF,
+        1, 0x69, 0xF7,
+    };
+    static const uint8_t k_want1_11[4][16] = {
+        { 1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0 },
+        { 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1 },
+    };
+    check_sub_byte_case(11, 2, 1, k_raw1_11, sizeof(k_raw1_11), k_want1_11);
+
+    /* Unsupported sub-byte RGBA and 16-bit / invalid palette bit depths */
+    static uint8_t file[8192];
+    static const uint8_t dummy[16] = { 0 };
+    png_info_t info;
+    int rows = 0;
+    static const struct {
+        uint8_t depth;
+        uint8_t type;
+    } k_bad[] = {
+        { 4, PNG_RGBA },
+        { 2, PNG_RGBA },
+        { 1, PNG_RGBA },
+        { 16, PNG_PALETTE },
+        { 3, PNG_PALETTE },
+    };
+    for (size_t i = 0; i < sizeof(k_bad) / sizeof(k_bad[0]); i++) {
+        size_t n = make_png(file, 4, 1, k_bad[i].depth, k_bad[i].type, 0, dummy, sizeof(dummy));
+        TEST_ASSERT_EQUAL_INT(PNG_ERR_UNSUPPORTED, png_decode(file, n, NULL, &info, ignore_row, &rows));
+    }
+}
+
+static void test_a_dwd_iconeu_frame_decodes_4bit_palette(void)
+{
+    size_t len;
+    uint8_t *data = load("dwd_iconeu_rain.png", &len);
+    png_info_t info;
+    static stats_t s;
+    memset(&s, 0, sizeof(s));
+    s.probe_x = 72;
+    s.probe_y = 251;
+    TEST_ASSERT_EQUAL_INT(PNG_OK, png_decode(data, len, NULL, &info, on_row, &s));
+    TEST_ASSERT_EQUAL_UINT16(400, info.width);
+    TEST_ASSERT_EQUAL_UINT16(279, info.height);
+    TEST_ASSERT_EQUAL_UINT8(PNG_PALETTE, info.type);
+    TEST_ASSERT_EQUAL_UINT8(4, info.depth);
+    TEST_ASSERT_EQUAL_UINT16(16, info.palette_size);
+    TEST_ASSERT_EQUAL_UINT8(0, info.palette[0][3]); /* tRNS: transparent background */
+    static const uint8_t k_light_rain[4] = { 192, 192, 192, 255 };
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(k_light_rain, info.palette[1], 4);
+    static const uint8_t k_mod_rain[4] = { 254, 254, 192, 255 };
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(k_mod_rain, info.palette[2], 4);
+    TEST_ASSERT_EQUAL_UINT8(0, info.palette[15][3]);
+    TEST_ASSERT_EQUAL_INT(279, s.rows);
+    TEST_ASSERT_EQUAL_INT32(104678, s.count[0]);
+    TEST_ASSERT_EQUAL_INT32(6871, s.count[1]);
+    TEST_ASSERT_EQUAL_INT32(51, s.count[2]);
+    for (int i = 3; i < 256; i++) {
+        TEST_ASSERT_EQUAL_INT32(0, s.count[i]);
+    }
+    TEST_ASSERT_EQUAL_UINT8(2, s.probe[0]);
     free(data);
 }
 
@@ -310,5 +454,7 @@ int main(void)
     RUN_TEST(test_every_filter_type_is_undone);
     RUN_TEST(test_broken_and_unsupported_files_are_refused);
     RUN_TEST(test_memory_comes_from_the_hooks_and_goes_back);
+    RUN_TEST(test_sub_byte_palette_depths_unpack_to_indices);
+    RUN_TEST(test_a_dwd_iconeu_frame_decodes_4bit_palette);
     return UNITY_END();
 }

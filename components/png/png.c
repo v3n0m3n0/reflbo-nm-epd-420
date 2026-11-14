@@ -80,6 +80,17 @@ static bool unfilter(uint8_t *row, const uint8_t *prev, size_t n, size_t bpp, ui
     return filter <= 4;
 }
 
+/* Unpacks MSB-first 1/2/4-bit palette indices in `src` to 1-byte-per-pixel indices in `dst`. */
+static void unpack_row(const uint8_t *src, uint8_t *dst, uint16_t width, uint8_t depth)
+{
+    uint8_t mask = (uint8_t)((1u << depth) - 1u);
+    int ppb = 8 / depth;
+    for (uint16_t x = 0; x < width; x++) {
+        int shift = (ppb - 1 - (x % ppb)) * depth;
+        dst[x] = (uint8_t)((src[x / ppb] >> shift) & mask);
+    }
+}
+
 /* The first pass: every chunk in order and undamaged, the header supported, the image data counted. */
 static png_err_t check(const uint8_t *data, size_t len, png_info_t *info, size_t *idat_len)
 {
@@ -99,7 +110,10 @@ static png_err_t check(const uint8_t *data, size_t len, png_info_t *info, size_t
             if (w == 0 || h == 0 || c.data[10] != 0 || c.data[11] != 0) { /* compression and filter method 0 */
                 return PNG_ERR_FORMAT;
             }
-            if (c.data[8] != 8 || (c.data[9] != PNG_PALETTE && c.data[9] != PNG_RGBA) || c.data[12] != 0) {
+            uint8_t depth = c.data[8], type = c.data[9];
+            bool ok_fmt = (type == PNG_RGBA && depth == 8) ||
+                          (type == PNG_PALETTE && (depth == 1 || depth == 2 || depth == 4 || depth == 8));
+            if (!ok_fmt || c.data[12] != 0) {
                 return PNG_ERR_UNSUPPORTED;
             }
             if (w > PNG_MAX_SIDE || h > PNG_MAX_SIDE) {
@@ -107,7 +121,8 @@ static png_err_t check(const uint8_t *data, size_t len, png_info_t *info, size_t
             }
             info->width = (uint16_t)w;
             info->height = (uint16_t)h;
-            info->type = c.data[9];
+            info->type = type;
+            info->depth = depth;
             header = true;
         } else if (is(&c, "PLTE")) {
             if (c.len % 3 != 0 || c.len > 3 * 256 || *idat_len > 0) {
@@ -159,12 +174,15 @@ png_err_t png_decode(const uint8_t *data, size_t len, const png_mem_t *mem, png_
     void *(*alloc)(size_t) = mem != NULL && mem->alloc != NULL ? mem->alloc : malloc;
     void (*release)(void *) = mem != NULL && mem->release != NULL ? mem->release : free;
     size_t bpp = info->type == PNG_RGBA ? 4 : 1;
-    size_t stride = 1 + info->width * bpp, raw_len = stride * info->height;
+    size_t row_bytes = info->type == PNG_RGBA ? (size_t)info->width * 4 : ((size_t)info->width * info->depth + 7) / 8;
+    size_t stride = 1 + row_bytes, raw_len = stride * info->height;
+    bool sub_byte = info->type == PNG_PALETTE && info->depth < 8;
     uint8_t *z = alloc(idat_len);
     if (z == NULL) {
         return PNG_ERR_NO_MEMORY;
     }
-    uint8_t *raw = alloc(raw_len);
+    /* Trail raw[] with a single-row unpack scratch buffer so sub-byte images keep the 2-alloc contract. */
+    uint8_t *raw = alloc(raw_len + (sub_byte ? info->width : 0));
     if (raw == NULL) {
         release(z);
         return PNG_ERR_NO_MEMORY;
@@ -180,12 +198,16 @@ png_err_t png_decode(const uint8_t *data, size_t len, const png_mem_t *mem, png_
     } while (!is(&c, "IEND"));
     bool inflated = png_inflate(z, idat_len, raw, raw_len);
     release(z);
+    uint8_t *row_out = sub_byte ? raw + raw_len : NULL;
     err = inflated ? PNG_OK : PNG_ERR_INFLATE;
     for (int y = 0; err == PNG_OK && y < info->height; y++) {
         uint8_t *line = raw + (size_t)y * stride;
         const uint8_t *prev = y > 0 ? line - stride + 1 : NULL;
-        if (!unfilter(line + 1, prev, stride - 1, bpp, line[0])) {
+        if (!unfilter(line + 1, prev, row_bytes, bpp, line[0])) {
             err = PNG_ERR_FORMAT;
+        } else if (sub_byte) {
+            unpack_row(line + 1, row_out, info->width, info->depth);
+            row(ctx, y, row_out, info);
         } else {
             row(ctx, y, line + 1, info);
         }
