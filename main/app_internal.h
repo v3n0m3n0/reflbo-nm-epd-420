@@ -115,10 +115,12 @@ void app_ui_learn(bool start);
 /* A cold boot: the learning session saved in LittleFS, if one runs. */
 void app_ui_restore_learning(void);
 
-/* A short message over the screen for about 2.5 s (spec §5.5). */
+/* A short message over the screen for about 2.5 s (spec §5.5), or 1.5 s for preset switches. */
+#define APP_UI_PRESET_TOAST_MS 1500
 void app_ui_toast(const char *text);
 /* Sets the toast text and deadline without rendering yet (drawn on the next render). */
 void app_ui_toast_arm(const char *text);
+void app_ui_toast_arm_ms(const char *text, int64_t duration_ms);
 bool app_ui_toast_active(void);
 int64_t app_ui_toast_until_ms(void);
 /* The toast's time is up: draws the screen without it. */
@@ -240,6 +242,8 @@ void app_radar_apply(radar_fetch_result_t *res, uint8_t result, const char *deta
 /* Before drawing `p`: the built-in map opened (spec §11.1) if `p` has one, and for the weather radar
  * the newest frame read from its file, each once a boot or a wake, so other presets touch neither. */
 void app_radar_prepare(const ui_preset_t *p);
+const map_data_t *app_radar_map(void);
+void app_radar_maybe_refresh(const ui_preset_t *p);
 const ui_radar_t *app_radar_ui(void); /* the radars as a render draws them now */
 uint32_t app_radar_step_s(void);      /* the source's frame step: 300 s (DWD RV), 3600 (ICON-EU), 600 (RainViewer) */
 void app_radar_invalidate(void);      /* drop cached radar frames and status after view/settings change */
@@ -320,7 +324,7 @@ bool app_net_ready(void);     /* it started: netmgr_status() may be called */
 void app_config_enter(void);
 void app_config_exit(void);
 bool app_config_active(void);
-void app_config_key(void); /* KEY short: the other QR code, or the setup screen and the dashboard (D20) */
+void app_config_key(void); /* BOOT short: the other QR code, or the setup screen and the dashboard (D20) */
 bool app_config_shows_setup(void); /* the setup screen, rather than the dashboard while a phone is logged in */
 void app_config_tick(void);      /* the timeout and the minutes left; call from the app loop */
 int64_t app_config_deadline_ms(void); /* app_uptime_ms() at which config mode ends; 0 when off */

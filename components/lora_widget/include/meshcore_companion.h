@@ -136,32 +136,8 @@ extern "C" {
 
 /*------------ Protocol Limits & Sizes --------------*/
 #define COMPANION_FIRMWARE_VER_CODE 10
-#define COMPANION_PUB_KEY_SIZE      32
-#define COMPANION_MAX_PATH_SIZE     64
-#define COMPANION_NAME_SIZE         32
-#define COMPANION_MAX_CONTACTS      64
-#define COMPANION_MAX_CHANNELS      8
 #define COMPANION_MAX_FRAME_SIZE    176
 #define COMPANION_CONTACT_FRAME_SIZE 148
-
-typedef struct {
-    uint8_t  pub_key[COMPANION_PUB_KEY_SIZE];
-    uint8_t  type;
-    uint8_t  flags;
-    int8_t   out_path_len;
-    uint8_t  out_path[COMPANION_MAX_PATH_SIZE];
-    char     name[COMPANION_NAME_SIZE];
-    uint32_t last_advert_ts;
-    int32_t  lat_e6;
-    int32_t  lon_e6;
-    uint32_t lastmod;
-} companion_contact_t;
-
-typedef struct {
-    char    name[COMPANION_NAME_SIZE];
-    uint8_t secret[16];
-    bool    valid;
-} companion_channel_t;
 
 typedef struct {
     companion_channel_t channels[COMPANION_MAX_CHANNELS];

@@ -444,6 +444,8 @@ static void handle_button(board_button_t button, gesture_t gesture)
                                                 : (held ? UI_MENU_KEY_EXIT : UI_MENU_KEY_BACK));
     } else if (app_config_active()) { /* spec §5.6 */
         if (button == BOARD_BUTTON_KEY && gesture == GESTURE_SHORT) {
+            app_config_exit();
+        } else if (button == BOARD_BUTTON_BOOT && gesture == GESTURE_SHORT) {
             app_config_key();
         } else if (button == BOARD_BUTTON_BOOT && gesture == GESTURE_LONG) {
             app_config_exit();
@@ -464,7 +466,7 @@ static void handle_button(board_button_t button, gesture_t gesture)
         int next = ui_presets_next_with_lora(app_presets(), app_state()->settings.sync_mode == SETTINGS_SYNC_ALWAYS,
                                              app_state()->settings.lora.enabled);
         snprintf(text, sizeof(text), "%s: %s", lang_str(lang, LS_T_PRESET), preset_name_at(next));
-        app_ui_toast_arm(text);
+        app_ui_toast_arm_ms(text, APP_UI_PRESET_TOAST_MS);
         app_ui_select(next, true);
     } else if (button == BOARD_BUTTON_KEY && gesture == GESTURE_LONG) {
         app_menu_open();
@@ -745,7 +747,7 @@ void app_alive(void)
 
 static void *json_malloc(size_t size)
 {
-    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM); /* Wi-Fi and TLS need the internal RAM */
+    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); /* Wi-Fi and TLS need the internal RAM */
 }
 
 static esp_err_t boot(void)

@@ -32,7 +32,7 @@ static void test_the_blob_opens_and_holds_the_world(void)
     TEST_ASSERT_TRUE(map_data_open(&s_map, s_blob, s_len));
     TEST_ASSERT_TRUE(map_data_verify(&s_map)); /* the file as read from disk */
     TEST_ASSERT_TRUE(s_map.lines > 2000);
-    TEST_ASSERT_TRUE(s_map.towns > 11000); /* Natural Earth's 7342 and GeoNames' (D29) */
+    TEST_ASSERT_TRUE(s_map.towns > 7500); /* Natural Earth's 7342 and Poland GeoNames */
     TEST_ASSERT_TRUE(s_map.airports > 5000);
 }
 
@@ -86,27 +86,23 @@ static void test_towns_around_brno_come_largest_first(void)
     TEST_ASSERT_TRUE(index_of(&west, "Plzeň") >= 0); /* corrected from "Pizen" */
 }
 
-/* GeoNames' places inside ČHMÚ's radar area (D29): the smaller towns, but no districts and no second
+/* GeoNames' places in Poland (>= 20,000): the smaller towns, but no districts and no second
  * name for a town Natural Earth has. */
 static void test_geonames_adds_the_smaller_towns_but_no_districts(void)
 {
-    map_bounds_t b = { 49.0, 49.45, 16.2, 17.1 }; /* around Brno */
+    map_bounds_t b = { 49.9, 50.2, 19.6, 20.3 }; /* around Kraków */
     towns_t c = { 0 };
     map_data_towns(&s_map, &b, on_town, &c);
-    TEST_ASSERT_EQUAL_INT(0, index_of(&c, "Brno"));
-    TEST_ASSERT_TRUE(index_of(&c, "Vyškov") > 0);
-    TEST_ASSERT_TRUE(index_of(&c, "Blansko") > 0);
-    TEST_ASSERT_TRUE(index_of(&c, "Kuřim") > 0);
-    TEST_ASSERT_EQUAL_INT(-1, index_of(&c, "Brno střed"));
-    TEST_ASSERT_EQUAL_INT(-1, index_of(&c, "Líšeň"));
+    TEST_ASSERT_EQUAL_INT(0, index_of(&c, "Kraków"));
+    TEST_ASSERT_TRUE(index_of(&c, "Skawina") > 0);
+    TEST_ASSERT_EQUAL_INT(-1, index_of(&c, "Nowa Huta"));
 
-    b = (map_bounds_t){ 49.9, 50.3, 14.1, 14.8 }; /* around Prague */
+    b = (map_bounds_t){ 52.0, 52.5, 20.6, 21.4 }; /* around Warszawa */
     towns_t p = { 0 };
     map_data_towns(&s_map, &b, on_town, &p);
-    TEST_ASSERT_EQUAL_INT(0, index_of(&p, "Praha"));
-    TEST_ASSERT_EQUAL_INT(-1, index_of(&p, "Prague"));
-    TEST_ASSERT_EQUAL_INT(-1, index_of(&p, "Stodůlky"));
-    TEST_ASSERT_TRUE(index_of(&p, "Kladno") > 0);
+    TEST_ASSERT_EQUAL_INT(0, index_of(&p, "Warszawa"));
+    TEST_ASSERT_EQUAL_INT(-1, index_of(&p, "Warsaw"));
+    TEST_ASSERT_TRUE(index_of(&p, "Pruszków") > 0);
 }
 
 static bool stop_after_one(void *ctx, const map_town_t *t)
@@ -158,7 +154,7 @@ static void test_airports_near_brno_come_large_first(void)
 
 typedef struct {
     map_bounds_t box;
-    int borders, coasts, outside;
+    int borders, coasts, admin1, outside;
 } segments_t;
 
 static void on_segment(void *ctx, map_line_kind_t kind, double lat0, double lon0, double lat1, double lon1)
@@ -166,8 +162,10 @@ static void on_segment(void *ctx, map_line_kind_t kind, double lat0, double lon0
     segments_t *s = ctx;
     if (kind == MAP_LINE_BORDER) {
         s->borders++;
-    } else {
+    } else if (kind == MAP_LINE_COAST) {
         s->coasts++;
+    } else if (kind == MAP_LINE_ADMIN1) {
+        s->admin1++;
     }
     if (fmax(lat0, lat1) < s->box.lat_min || fmin(lat0, lat1) > s->box.lat_max || fmax(lon0, lon1) < s->box.lon_min ||
         fmin(lon0, lon1) > s->box.lon_max) {
@@ -186,6 +184,10 @@ static void test_segments_near_mikulov_are_the_border_only(void)
     segments_t sea = { .box = { 53.5, 54.5, 9.5, 11.0 } }; /* Kiel: the Baltic coast */
     map_data_segments(&s_map, &sea.box, on_segment, &sea);
     TEST_ASSERT_TRUE(sea.coasts > 0);
+
+    segments_t pol = { .box = { 50.0, 52.5, 18.0, 22.0 } }; /* central Poland: voivodeship boundaries */
+    map_data_segments(&s_map, &pol.box, on_segment, &pol);
+    TEST_ASSERT_TRUE(pol.admin1 > 0);
 }
 
 static void test_a_damaged_blob_is_refused(void)

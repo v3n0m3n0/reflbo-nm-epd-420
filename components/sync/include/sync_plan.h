@@ -84,7 +84,7 @@ typedef enum {
 sync_need_t sync_need(bool clock_valid, bool always_wifi_off, bool have_forecast, bool weather_on);
 
 /* sync_next_due() for a device that lacks what a sync brings. SYNC_NEED_TIME: at `now`, or after a
- * failure at the next retry, 15, 30 then 60 min on and every 60 min after the third, whatever the
+ * failure at the next retry, 1, 15, 30 then 60 min on and every 60 min after, whatever the
  * schedule, quiet hours or the battery, as a lost clock knows none of them. SYNC_NEED_FORECAST and
  * SYNC_NEED_WIFI: at `now`, unless a sync failed since (the retries and the schedule take over, so a
  * router that is off isn't tried every minute) or in `manual` mode. */

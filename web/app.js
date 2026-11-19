@@ -229,8 +229,21 @@ const pages = { status: statusPage, wifi: wifiPage, place: placePage, sync: sync
 
 function route() {
   const name = location.hash.slice(1) || 'status';
+  if (name !== 'lora') {
+    if (loraPollTimer !== null) {
+      clearTimeout(loraPollTimer);
+      loraPollTimer = null;
+    }
+    document.title = 'reflbo';
+  }
   const page = pages[name] || statusPage;
-  for (const a of document.querySelectorAll('nav a')) a.classList.toggle('on', a.getAttribute('href') === '#' + name);
+  for (const a of document.querySelectorAll('nav a')) {
+    const active = a.getAttribute('href') === '#' + name;
+    a.classList.toggle('on', active);
+    if (active) a.setAttribute('aria-current', 'page');
+    else if (typeof a.removeAttribute === 'function') a.removeAttribute('aria-current');
+    else if (a.attrs) delete a.attrs['aria-current'];
+  }
   main.replaceChildren(h('p', { class: 'muted', text: 'Loading…' }));
   window.scrollTo(0, 0);
   page().catch((e) => {
@@ -730,26 +743,40 @@ async function radarPage() {
   const zoom = h('select', { name: 'zoom' }, ZOOMS.map((z) => h('option', { value: String(z), selected: z === (wx.zoom ?? 6.5) },
     `${z}: about ${acrossKm(z, lat)} km across`)));
   zoom.value = String(ZOOMS.includes(wx.zoom) ? wx.zoom : 6.5);
+  const WX_SOURCES = [
+    ['auto', 'Automatic (DWD 1×1 km radar, else RainViewer)'],
+    ['rainviewer', 'RainViewer (10 min live radar)'],
+    ['dwd', 'DWD OpenData WMS (Radar_rv / ICON-EU)'],
+  ];
+  const sourceSel = h('select', { name: 'source' }, WX_SOURCES.map(([v, label]) =>
+    h('option', { value: v, selected: v === (wx.source || 'auto') }, label)));
+  sourceSel.value = wx.source || 'auto';
   const wxImg = h('img', { class: 'screen', alt: 'The Radar layout' });
   const w = now.weather || {};
   const wxCard = card('Weather radar', wxImg, facts([
-    ['Source', w.source === 'rainviewer' ? 'RainViewer (outside DWD coverage or fallback)' : 'DWD'],
+    ['Source', w.source === 'rainviewer' ? 'RainViewer (10 min live radar)' : 'DWD'],
     ['Newest frame', w.frame_at ? when(w.frame_at) : 'none yet'],
     ['Frames kept', `${w.frames ?? 0}${always ? ', the last hour for the loop' : ''}`],
     w.error ? ['Last fetch', `failed: ${w.error}`] : null,
   ]),
   h('p', { class: 'muted small', text: 'A frame comes with each sync, and every 5 minutes in sync mode Always on ' +
-    '(DWD ICON-EU: 60 min; RainViewer: 10 min). Rain for a new centre or zoom fetches a fresh frame. In sync mode Always on, BOOT on the ' +
-    'Radar layout plays the last hour; otherwise BOOT there syncs for a fresh frame.' }),
-  wxCentre.els, field('Zoom', zoom), wxNote,
+    '(DWD Radar_rv: 5 min, ICON-EU: 60 min; RainViewer: 10 min). Auto uses DWD 1×1 km Radar_rv where covered, ' +
+    'RainViewer live 10 min radar elsewhere with DWD ICON-EU fallback. Rain for a new centre, zoom, or source fetches a fresh frame. ' +
+    'In sync mode Always on, BOOT on the Radar layout plays the last hour; otherwise BOOT there syncs for a fresh frame.' }),
+  wxCentre.els, field('Zoom', zoom), field('Source', sourceSel), wxNote,
   actions(button('Save weather radar', () => busy(wxCard, wxNote, async () => {
-    await api('PATCH', '/api/settings', { radar: { weather: { ...wxCentre.value(), zoom: Number(zoom.value) } } });
+    const weatherPatch = { ...wxCentre.value(), zoom: Number(zoom.value) };
+    if (sourceSel.value !== 'auto') {
+      weatherPatch.source = sourceSel.value;
+    } else if (wx.source) {
+      weatherPatch.source = null;
+    }
+    await api('PATCH', '/api/settings', { radar: { weather: weatherPatch } });
     toast('Weather radar saved');
     await radarPreview(wxImg, 'radar');
   }), 'primary')),
   h('p', { class: 'muted small' }, 'Rain: ', link('https://opendata.dwd.de', 'DWD OpenData WMS'),
-    ' (Radar_rv 1x1 km / ICON-EU); outside DWD coverage or fallback: ',
-    link('https://www.rainviewer.com', 'RainViewer'), '.'));
+    ' (Radar_rv 1×1 km / ICON-EU); ', link('https://www.rainviewer.com', 'RainViewer'), ' (10 min live radar).'));
 
   const flNote = h('p');
   const flCentre = centreEditor('fl-centre', s, fl, flNote);
@@ -1083,7 +1110,130 @@ function nodeTypeName(t) {
   }
 }
 
+let loraActiveTarget = 'all';
+let loraDmTargets = [];
+let loraSeenMaxId = 0;
+let loraUnreadByKey = {};
+let loraSoundEnabled = false;
+let loraForceFlood = false;
 let loraPollTimer = null;
+let loraActiveTab = 'all';
+
+function loraAirtimeMs(bwHz, sf, cr, preambleLen, payloadBytes) {
+  if (!bwHz || sf < 5 || sf > 12) return 0;
+  const symbolLengthUs = Math.floor((1000000 * Math.pow(2, sf)) / bwHz);
+  const sfCoeff1X4 = (sf === 5 || sf === 6) ? 25 : 17;
+  const sfCoeff2 = (sf === 5 || sf === 6) ? 0 : 8;
+  const ldro = symbolLengthUs >= 16384;
+  const sfDivisor = ldro ? (4 * (sf - 2)) : (4 * sf);
+  let bitCount = 8 * payloadBytes + 16 - 4 * sf + sfCoeff2 + 20;
+  if (bitCount < 0) bitCount = 0;
+  const nPrecoded = Math.floor((bitCount + sfDivisor - 1) / sfDivisor);
+  const crMult = cr <= 4 ? (cr + 4) : cr;
+  const nSymbolX4 = (preambleLen + 8) * 4 + sfCoeff1X4 + nPrecoded * crMult * 4;
+  const toaUs = Math.floor((symbolLengthUs * nSymbolX4) / 4);
+  return Math.floor((toaUs + 999) / 1000);
+}
+
+function loraPlayBeep() {
+  try {
+    const AC = typeof globalThis !== 'undefined' && (globalThis.AudioContext || globalThis.webkitAudioContext);
+    if (!AC) return;
+    const ctx = new AC();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.08);
+    gain.gain.setValueAtTime(0.06, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.16);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.onended = () => {
+      try { if (typeof ctx.close === 'function') ctx.close(); } catch (_) {}
+    };
+    osc.start();
+    osc.stop(ctx.currentTime + 0.17);
+  } catch (_) {}
+}
+
+function loraCopyText(text, okMsg) {
+  if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      navigator.clipboard.writeText(text);
+      toast(okMsg || 'Copied');
+      return;
+    } catch (_) {}
+  }
+  toast('Clipboard unavailable — copy manually');
+}
+
+function loraBuildUri(pubKey, name, type, loc) {
+  if (!pubKey) return '';
+  let uri = `meshcore://${pubKey}?name=${encodeURIComponent(name || 'Node')}&type=${type || 1}`;
+  if (loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lon) && (loc.lat !== 0 || loc.lon !== 0)) {
+    uri += `&lat=${loc.lat}&lon=${loc.lon}`;
+  }
+  return uri;
+}
+
+function loraParseUri(uri) {
+  const s = (uri || '').trim();
+  const m = s.match(/^meshcore:\/\/([0-9a-fA-F]{64})(?:\?(.*))?$/);
+  if (!m) return null;
+  const pub_key = m[1].toLowerCase();
+  const out = { pub_key, name: '', node_type: 1, lat: null, lon: null };
+  if (m[2]) {
+    const params = new URLSearchParams(m[2]);
+    if (params.has('name')) out.name = params.get('name') || '';
+    if (params.has('type')) {
+      const t = Number(params.get('type'));
+      if (t >= 1 && t <= 4) out.node_type = t;
+    }
+    if (params.has('lat') && params.has('lon')) {
+      const la = Number(params.get('lat'));
+      const lo = Number(params.get('lon'));
+      if (Number.isFinite(la) && Number.isFinite(lo)) {
+        out.lat = la;
+        out.lon = lo;
+      }
+    }
+  }
+  return out;
+}
+
+function loraHaversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function loraBearingDeg(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+    Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+function loraCompass(deg) {
+  const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  return dirs[Math.round(deg / 45) % 8];
+}
+
+function loraFormatTime(ts) {
+  if (!ts || ts <= 0) return '';
+  const d = new Date(ts * 1000);
+  return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, '0')).join(':');
+}
+
+function loraMsgKey(m) {
+  if (m.direct && m.peer_pub) return 'dm:' + String(m.peer_pub).toLowerCase();
+  return 'ch:' + (m.channel || 0);
+}
 
 async function loraPage() {
   if (loraPollTimer !== null) {
@@ -1093,6 +1243,12 @@ async function loraPage() {
   const [s, initialSt] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/status')]);
   let st = initialSt;
   const lora = s.lora || {};
+
+  /* Seed seen message ID so initial load does not trigger unread/sound */
+  const initMsgs = (st && st.lora && st.lora.messages) || [];
+  for (const m of initMsgs) {
+    if (m.id && m.id > loraSeenMaxId) loraSeenMaxId = m.id;
+  }
 
   /* Card 1: Now (Live status, telemetry & quick controls) */
   const summary = h('div', { id: 'lora-live-status' });
@@ -1115,10 +1271,7 @@ async function loraPage() {
 
     const pubKeyKid = l.pub_key ? h('span', {},
       `${l.pub_key.slice(0, 16)}… `,
-      button('Copy key', () => {
-        try { navigator.clipboard?.writeText(l.pub_key); } catch (_) {}
-        toast('Key copied');
-      }, 'small')
+      button('Copy key', () => loraCopyText(l.pub_key, 'Key copied'), 'small')
     ) : '—';
 
     const bleState = !l.enabled
@@ -1139,7 +1292,7 @@ async function loraPage() {
       ['Companion BLE', bleBadge],
       ['Node', l.node_name || '—'],
       ['Public key', pubKeyKid],
-      ['Noise floor', l.noise_floor_dbm !== undefined ? `${l.noise_floor_dbm} dBm` : '—'],
+      ['Noise floor', (l.noise_floor_dbm === undefined || l.noise_floor_dbm === null || l.noise_floor_dbm === 0) ? '—' : `${l.noise_floor_dbm} dBm`],
       ['RSSI / SNR', rssiSnr],
       ['Last packet', ageText],
       ['Packets', `${l.packet_count ?? 0} (flood ${l.recv_flood ?? 0}, direct ${l.recv_direct ?? 0}, err ${l.recv_errors ?? 0})`],
@@ -1168,6 +1321,18 @@ async function loraPage() {
   toggleBtn.id = 'lora-toggle-btn';
   toggleBtn.setAttribute('id', 'lora-toggle-btn');
 
+  const copyUriBtn = button('Copy meshcore:// URI', () => {
+    const l = (st && st.lora) || {};
+    if (!l.pub_key) {
+      toast('Public key not available yet');
+      return;
+    }
+    const uri = loraBuildUri(l.pub_key, s.lora?.node_name || l.node_name || 'Node', 1, (st && st.location) || s.location);
+    loraCopyText(uri, 'meshcore:// URI copied');
+  });
+  copyUriBtn.id = 'lora-btn-copy-uri';
+  copyUriBtn.setAttribute('id', 'lora-btn-copy-uri');
+
   const rekeyBtn = button('Reset identity', () => {
     if (!confirm('Generate a new random Ed25519 identity and default BLE PIN? Existing MeshCore contacts will need to re-discover this node.')) return;
     busy(nowCard, nowNote, async () => {
@@ -1177,7 +1342,7 @@ async function loraPage() {
       showNow(fresh);
       toast('Identity reset');
     });
-  });
+  }, 'danger');
   rekeyBtn.id = 'btn-lora-rekey';
   rekeyBtn.setAttribute('id', 'btn-lora-rekey');
 
@@ -1228,20 +1393,162 @@ async function loraPage() {
       showNow(fresh);
       toast('Counter reset');
     })),
+    copyUriBtn,
     rekeyBtn,
   ));
 
-  /* Card 2: Group channel chat */
+  /* Card 2: Group channel chat & MeshCore messenger */
   const chInfo = h('p', { class: 'muted small' });
-  const chatBox = h('div', { class: 'chat-box' });
+  const convTabs = h('div', { id: 'lora-conv-tabs', class: 'conv-tabs' });
+  convTabs.id = 'lora-conv-tabs';
+  convTabs.setAttribute('id', 'lora-conv-tabs');
+
+  const forceFloodCb = h('input', { type: 'checkbox', id: 'lora-force-flood' });
+  forceFloodCb.id = 'lora-force-flood';
+  forceFloodCb.setAttribute('id', 'lora-force-flood');
+  forceFloodCb.checked = loraForceFlood;
+  forceFloodCb.addEventListener('change', () => {
+    loraForceFlood = forceFloodCb.checked;
+  });
+  const forceFloodLabel = h('label', { class: 'check' }, forceFloodCb, 'Force Flood');
+
+  const soundCb = h('input', { type: 'checkbox', id: 'lora-sound-toggle' });
+  soundCb.id = 'lora-sound-toggle';
+  soundCb.setAttribute('id', 'lora-sound-toggle');
+  soundCb.checked = loraSoundEnabled;
+  soundCb.addEventListener('change', () => {
+    loraSoundEnabled = soundCb.checked;
+  });
+  const soundLabel = h('label', { class: 'check' }, soundCb, 'Sound');
+
+  const filterMessages = (msgs) => {
+    if (loraActiveTarget === 'all') return msgs;
+    if (loraActiveTarget.startsWith('ch:')) {
+      const chIdx = Number(loraActiveTarget.slice(3)) || 0;
+      return msgs.filter((m) => !m.direct && (m.channel || 0) === chIdx);
+    }
+    if (loraActiveTarget.startsWith('dm:')) {
+      const key = loraActiveTarget.slice(3).toLowerCase();
+      return msgs.filter((m) => m.direct && (m.peer_pub || '').toLowerCase() === key);
+    }
+    return msgs;
+  };
+
+  const loraChannelName = (channels, chIdx, primaryName) => {
+    const idx = Number(chIdx);
+    const slot = (channels || []).find((c) => c && c.index === idx);
+    if (slot && slot.name) return slot.name;
+    if (idx === 0) return primaryName || 'Public';
+    return `#${idx}`;
+  };
+
+  const exportBtn = button('Export .txt', () => {
+    const l = (st && st.lora) || {};
+    const channels = l.channels || [];
+    const chName = l.channel_name || 'Public';
+    const msgs = filterMessages(l.messages || []);
+    const lines = msgs.map((m) => {
+      const ts = loraFormatTime(m.ts) || (m.age_s !== undefined ? `${Math.round(m.age_s)}s ago` : '');
+      const dir = m.outgoing ? 'TX' : 'RX';
+      let scope = '';
+      if (m.direct) {
+        scope = '[DM] ';
+      } else if (m.channel !== undefined) {
+        const chLabel = loraChannelName(channels, m.channel, chName);
+        scope = `[${chLabel}] `;
+      }
+      const who = m.sender ? `${m.sender}: ` : '';
+      return `[${ts}] [${dir}] ${scope}${who}${m.body || m.text || ''}`;
+    });
+    download(new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' }), 'meshcore-chat.txt');
+  }, 'small');
+
+  const clearHistBtn = button('Clear history', () => {
+    if (!confirm('Clear all LoRa chat history?')) return;
+    busy(chatCard, chatNote, async () => {
+      await api('POST', '/api/lora/messages/clear', {});
+      loraUnreadByKey = {};
+      document.title = 'reflbo';
+      const fresh = await api('GET', '/api/status');
+      st = fresh;
+      showChat(fresh);
+      toast('History cleared');
+    });
+  }, 'small danger');
+
+  const chatToolbar = h('div', { class: 'chat-toolbar' }, forceFloodLabel, soundLabel, exportBtn, clearHistBtn);
+  const chatBox = h('div', { id: 'lora-chat-box', class: 'chat-box' });
+  chatBox.id = 'lora-chat-box';
+  chatBox.setAttribute('id', 'lora-chat-box');
   const chatNote = h('p');
   const chatInput = h('input', { type: 'text', id: 'lora-chat-input', placeholder: 'Message on channel…' });
   chatInput.setAttribute('id', 'lora-chat-input');
+
+  const byteCounterEl = h('span', { text: '0 / 120 B' });
+  const airtimeEl = h('span', { text: 'Est. airtime: ~— ms' });
+  const composerMeta = h('div', { class: 'composer-meta muted small' }, byteCounterEl, airtimeEl);
+
+  const updateComposerMeta = () => {
+    const val = chatInput.value || '';
+    const bLen = bytes(val);
+    byteCounterEl.textContent = `${bLen} / 120 B`;
+    byteCounterEl.className = bLen > 120 ? 'over' : '';
+    const l = (st && st.lora) || {};
+    const curSf = Number(sf?.value || l.sf || 7);
+    const curBwKhz = Number(bw?.value || l.bw_khz || 250);
+    const curCr = Number(cr?.value || l.cr || 5);
+    const curBwHz = Math.round(curBwKhz * 1000);
+    const preamble = curSf <= 8 ? 32 : 16;
+    const isDm = loraActiveTarget.startsWith('dm:');
+    const nodePrefixBytes = isDm ? 0 : bytes((nodeName?.value || l.node_name || 'NM-EPD-420').trim()) + 2;
+    const plainLen = 5 + nodePrefixBytes + bLen;
+    const encBlocks = Math.max(1, Math.ceil(plainLen / 16)) * 16;
+    const wireBytes = 2 + (isDm ? 2 : 1) + 2 + encBlocks;
+    const ms = loraAirtimeMs(curBwHz, curSf, curCr, preamble, wireBytes);
+    airtimeEl.textContent = `Est. airtime: ~${ms} ms @ SF${curSf}/BW${curBwKhz}`;
+  };
+  chatInput.addEventListener('input', updateComposerMeta);
+
+  const updateTitleUnread = () => {
+    const total = Object.values(loraUnreadByKey).reduce((a, b) => a + b, 0);
+    document.title = total > 0 ? `(${total}) reflbo` : 'reflbo';
+  };
+
+  const openDmTab = (pubKey, name, focusInput) => {
+    if (!pubKey) return;
+    const key = pubKey.toLowerCase();
+    if (!loraDmTargets.some((t) => t.pub_key.toLowerCase() === key)) {
+      loraDmTargets.push({ pub_key: key, name: name || key.slice(0, 8) });
+    }
+    loraActiveTarget = 'dm:' + key;
+    delete loraUnreadByKey[loraActiveTarget];
+    updateTitleUnread();
+    showChat(st);
+    if (focusInput) chatInput.focus();
+  };
+
+  const selectTarget = (target) => {
+    loraActiveTarget = target;
+    delete loraUnreadByKey[target];
+    updateTitleUnread();
+    showChat(st);
+  };
+
   const chatSend = button('Send', () => busy(chatCard, chatNote, async () => {
     const txt = (chatInput.value || '').trim();
     if (!txt) return;
-    await api('POST', '/api/lora/send', { text: txt });
+    let payload;
+    if (loraActiveTarget.startsWith('dm:')) {
+      payload = { text: txt, to: loraActiveTarget.slice(3), force_flood: !!loraForceFlood };
+    } else if (loraActiveTarget.startsWith('ch:')) {
+      const chIdx = Number(loraActiveTarget.slice(3)) || 0;
+      payload = chIdx === 0 ? { text: txt } : { text: txt, channel: chIdx };
+    } else {
+      payload = { text: txt };
+    }
+    await api('POST', '/api/lora/send', payload);
     chatInput.value = '';
+    updateComposerMeta();
     toast('Message sent');
     const fresh = await api('GET', '/api/status');
     st = fresh;
@@ -1259,52 +1566,1044 @@ async function loraPage() {
     const l = (status && status.lora) || {};
     const chName = l.channel_name || 'Public';
     const chHash = l.channel_hash !== undefined ? '0x' + l.channel_hash.toString(16).padStart(2, '0').toUpperCase() : '0x00';
-    chInfo.textContent = `Channel: ${chName} (${chHash})`;
+    const channels = l.channels || [];
+    const contacts = l.contacts || [];
+    const adverts = l.adverts || [];
 
-    const msgs = l.messages || [];
+    forceFloodLabel.hidden = !loraActiveTarget.startsWith('dm:');
+    if (loraActiveTarget.startsWith('dm:')) {
+      const dmKey = loraActiveTarget.slice(3).toLowerCase();
+      const dm = loraDmTargets.find((t) => t.pub_key.toLowerCase() === dmKey);
+      const dmContact = contacts.find((c) => (c.pub_key || '').toLowerCase() === dmKey);
+      let dmRoute = 'FLOOD';
+      if (!loraForceFlood && dmContact && dmContact.out_path_len !== undefined && dmContact.out_path_len !== null &&
+          dmContact.out_path_len !== -1 && dmContact.out_path_len !== 255) {
+        const pl = dmContact.out_path_len & 0xff;
+        const hops = pl & 0x3f;
+        const hashSz = (pl >> 6) + 1;
+        if (hashSz <= 3) dmRoute = `DIRECT (${hops} hops${hashSz > 1 ? `, ${hashSz}B` : ''})`;
+      }
+      const peerLabel = dm ? dm.name : (dmContact ? dmContact.name : dmKey.slice(0, 8));
+      chInfo.textContent = `Direct Message to @${peerLabel} · E2E X25519 · Route: ${dmRoute}`;
+      chatInput.placeholder = `Direct message to @${peerLabel}…`;
+    } else if (loraActiveTarget.startsWith('ch:')) {
+      const chIdx = Number(loraActiveTarget.slice(3)) || 0;
+      const slot = channels.find((c) => c && c.index === chIdx);
+      const slotName = (slot && slot.name) || (chIdx === 0 ? chName : `Ch${chIdx}`);
+      const slotHash = (slot && slot.channel_hash !== undefined && slot.channel_hash !== null)
+        ? '0x' + Number(slot.channel_hash).toString(16).padStart(2, '0').toUpperCase()
+        : (chIdx === 0 ? chHash : '—');
+      chInfo.textContent = `Channel #${chIdx}: ${slotName} (${slotHash}) · AES-128`;
+      chatInput.placeholder = `Message on ${slotName}…`;
+    } else {
+      chInfo.textContent = `All conversations · Primary #0: ${chName} (${chHash})`;
+      chatInput.placeholder = 'Message on channel…';
+    }
+    updateComposerMeta();
+
+    /* Render conversation tabs */
+    const tabEls = [];
+    const makeTab = (key, label, closable) => {
+      const unread = loraUnreadByKey[key] || 0;
+      const cls = 'conv-tab' + (loraActiveTarget === key ? ' active' : '');
+      const tab = h('button', {
+        type: 'button',
+        class: cls,
+        onclick: () => selectTarget(key),
+      }, label, unread > 0 ? h('span', { class: 'badge unread', text: String(unread) }) : null);
+      if (closable) {
+        const closeBtn = h('span', {
+          class: 'conv-tab-close',
+          text: '×',
+          onclick: (ev) => {
+            ev.stopPropagation();
+            loraDmTargets = loraDmTargets.filter((t) => 'dm:' + t.pub_key.toLowerCase() !== key);
+            delete loraUnreadByKey[key];
+            updateTitleUnread();
+            if (loraActiveTarget === key) loraActiveTarget = 'all';
+            showChat(st);
+          },
+        });
+        tab.append(' ', closeBtn);
+      }
+      return tab;
+    };
+
+    const allUnread = Object.values(loraUnreadByKey).reduce((a, b) => a + b, 0);
+    const allTab = makeTab('all', 'All', false);
+    if (allUnread > 0 && loraActiveTarget !== 'all') {
+      allTab.append(' ', h('span', { class: 'badge unread', text: String(allUnread) }));
+    }
+    tabEls.push(allTab);
+    for (const ch of channels) {
+      if (ch && (ch.enabled || ch.index === 0)) {
+        tabEls.push(makeTab(`ch:${ch.index}`, `#${ch.index} ${ch.name || (ch.index === 0 ? 'Public' : 'Ch' + ch.index)}`, false));
+      }
+    }
+    for (const dm of loraDmTargets) {
+      tabEls.push(makeTab(`dm:${dm.pub_key.toLowerCase()}`, `@${dm.name}`, true));
+    }
+    convTabs.replaceChildren(...tabEls);
+
+    const msgs = filterMessages(l.messages || []);
+    const nearBottom = ((chatBox.scrollHeight || 0) - (chatBox.clientHeight || 0) - (chatBox.scrollTop || 0)) <= 40;
     if (msgs.length === 0) {
       chatBox.replaceChildren(h('p', { class: 'muted' }, 'No channel messages yet'));
     } else {
       chatBox.replaceChildren(...msgs.map((m) => {
         const dirCls = m.outgoing ? 'out' : 'in';
+        const dmCls = m.direct ? ' dm' : '';
         const sig = (m.rssi_dbm !== undefined && m.snr_db !== undefined)
           ? `${m.rssi_dbm} dBm / ${typeof m.snr_db === 'number' ? m.snr_db.toFixed(1) : m.snr_db} dB` : '';
         const hops = m.hops !== undefined ? `${m.hops} hops` : '';
         const age = (m.age_s !== undefined && m.age_s !== null) ? `${Math.round(m.age_s)}s ago` : '';
+        const timeStr = loraFormatTime(m.ts);
         const metaStr = [m.outgoing ? 'TX' : 'RX', sig, hops, age].filter(Boolean).join(' · ');
-        return h('div', { class: `chat-msg ${dirCls}` },
-          h('div', { class: 'chat-text', text: m.text || '' }),
-          h('div', { class: 'chat-meta', text: metaStr })
+
+        let senderPub = m.peer_pub || '';
+        if (!senderPub && m.sender) {
+          const cMatch = contacts.find((c) => c.name === m.sender) || adverts.find((a) => a.name === m.sender);
+          if (cMatch && cMatch.pub_key) senderPub = cMatch.pub_key;
+        }
+        const senderEl = (!m.outgoing && m.sender && senderPub)
+          ? h('button', {
+            type: 'button',
+            class: 'chat-sender-btn',
+            text: m.sender,
+            onclick: () => openDmTab(senderPub, m.sender, true),
+          })
+          : (m.sender ? h('strong', { text: m.sender }) : null);
+
+        let scopeBadge = null;
+        if (m.direct) {
+          scopeBadge = h('span', { class: 'badge type', text: 'DM' });
+        } else if (m.channel !== undefined) {
+          const label = loraChannelName(channels, m.channel, chName);
+          scopeBadge = h('span', { class: 'badge type channel', text: label });
+        }
+
+        let ackEl = null;
+        if (m.direct && m.outgoing) {
+          if (m.ack === 1) {
+            ackEl = h('div', { class: 'chat-ack pending', text: '⏳ Waiting ACK…' });
+          } else if (m.ack === 2) {
+            ackEl = h('div', { class: 'chat-ack delivered', text: `✓✓ Delivered (${m.ack_rtt_ms || 0} ms)` });
+          } else if (m.ack === 3) {
+            ackEl = h('div', { class: 'chat-ack timeout' },
+              '⚠ No ACK ',
+              button('Retry (Flood)', () => busy(chatCard, chatNote, async () => {
+                await api('POST', '/api/lora/send', { text: m.body || m.text || '', to: m.peer_pub, force_flood: true });
+                toast('Retried via flood');
+                const fresh = await api('GET', '/api/status');
+                st = fresh;
+                showChat(fresh);
+              }), 'small')
+            );
+          }
+        }
+
+        return h('div', { class: `chat-msg ${dirCls}${dmCls}` },
+          h('div', { class: 'chat-header' },
+            timeStr ? h('span', { class: 'muted small', text: timeStr }) : null,
+            scopeBadge,
+            senderEl,
+            h('span', { class: 'chat-meta', text: metaStr })
+          ),
+          h('div', { class: 'chat-body', text: m.body || m.text || '' }),
+          ackEl
         );
       }));
     }
+    if (nearBottom) chatBox.scrollTop = chatBox.scrollHeight || 0;
   };
-  showChat(st);
 
   const chatCard = card('Group channel chat',
     chInfo,
+    convTabs,
+    chatToolbar,
     chatBox,
     h('div', { class: 'actions' }, chatInput, chatSend),
+    composerMeta,
     chatNote
   );
 
   /* Card 3: Neighbors & heard nodes */
   const nbrBox = h('div');
-  const advBox = h('div');
+  const contactsHeading = h('h3', { text: 'Saved Contacts (0 / 64)' });
+  let contactFilterQuery = '';
+  const contactFilterInput = h('input', {
+    type: 'search',
+    id: 'lora-contact-filter',
+    class: 'contacts-filter',
+    placeholder: 'Filter contacts by name, key or role…',
+  });
+  contactFilterInput.id = 'lora-contact-filter';
+  contactFilterInput.setAttribute('id', 'lora-contact-filter');
+  const contactsBox = h('div', { id: 'lora-contacts-box', class: 'contacts-list' });
+  contactsBox.id = 'lora-contacts-box';
+  contactsBox.setAttribute('id', 'lora-contacts-box');
+
+  const importName = h('input', { type: 'text', placeholder: 'Contact name' });
+  const importHex = h('input', { type: 'text', placeholder: '64-hex public key' });
+  const importType = choose([['1', 'Chat'], ['2', 'Repeater'], ['3', 'Room'], ['4', 'Sensor']], '1');
+  const importUri = h('input', { type: 'text', placeholder: 'Paste meshcore://… URI' });
+  const importNote = h('p');
+  importUri.addEventListener('input', () => {
+    const parsed = loraParseUri(importUri.value);
+    if (parsed) {
+      importHex.value = parsed.pub_key;
+      if (parsed.name) importName.value = parsed.name;
+      importType.value = String(parsed.node_type || 1);
+    }
+  });
+  const importPanel = h('div', { class: 'import-box', hidden: true },
+    h('div', { class: 'import-grid' },
+      field('meshcore:// URI', importUri),
+      field('Name', importName),
+      field('Public key (64 hex)', importHex),
+      field('Type', importType),
+    ),
+    importNote,
+    actions(button('Save contact', () => busy(nodesCard, importNote, async () => {
+      const parsed = importUri.value.trim() ? loraParseUri(importUri.value) : null;
+      const pub_key = (importHex.value || (parsed && parsed.pub_key) || '').trim().toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(pub_key)) {
+        throw new ApiError('Public key must be 64 hexadecimal characters.');
+      }
+      const body = {
+        action: 'save',
+        pub_key,
+        name: (importName.value || (parsed && parsed.name) || 'Node').trim(),
+        type: Number(importType.value) || 1,
+      };
+      if (parsed && parsed.lat !== null && parsed.lon !== null) {
+        body.lat = parsed.lat;
+        body.lon = parsed.lon;
+      }
+      await api('POST', '/api/lora/contacts', body);
+      importUri.value = '';
+      importName.value = '';
+      importHex.value = '';
+      importPanel.hidden = true;
+      toast('Contact saved');
+      const fresh = await api('GET', '/api/status');
+      st = fresh;
+      showNodes(fresh);
+    }), 'primary'))
+  );
+  const importToggleBtn = button('+ Add / Import Contact', () => {
+    importPanel.hidden = !importPanel.hidden;
+  }, 'small');
+
+  const advBox = h('div', { id: 'lora-adverts-box' });
+  advBox.id = 'lora-adverts-box';
+  advBox.setAttribute('id', 'lora-adverts-box');
+
+  const radarCanvas = h('canvas', { id: 'lora-node-map', width: '560', height: '360' });
+  radarCanvas.id = 'lora-node-map';
+  radarCanvas.setAttribute('id', 'lora-node-map');
+
+  const noGpsStrip = h('div', { class: 'map-nogps-strip', hidden: true });
+
+  const inspectorBox = h('div', { id: 'lora-map-inspector', class: 'map-inspector' },
+    h('p', { class: 'muted small', text: 'Click a node on the map or press Map on an advert to inspect details.' })
+  );
+  inspectorBox.id = 'lora-map-inspector';
+  inspectorBox.setAttribute('id', 'lora-map-inspector');
+
+  let mapW = 560;
+  let mapH = 360;
+  let mapViewMode = null;
+  let mapCenterLat = null;
+  let mapCenterLon = null;
+  let mapRangeKm = 25;
+  let mapSelectedKey = null;
+  let mapHitTargets = [];
+  let mapCachedData = null;
+  let mapFetchTimer = null;
+  let mapLastInspectorSig = null;
+  let mapLastNoGpsSig = null;
+  let lastMapStatus = st;
+  let mapDragStart = null;
+  let mapDidDrag = false;
+
+  const hasGps = (obj) => obj && Number.isFinite(Number(obj.lat)) && Number.isFinite(Number(obj.lon)) && (Number(obj.lat) !== 0 || Number(obj.lon) !== 0);
+
+  const getAllMapNodes = (status) => {
+    const l = (status && status.lora) || {};
+    const loc = (status && status.location) || s.location;
+    const map = new Map();
+    const ensure = (key) => {
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          pub_key: '',
+          pub_prefix: '',
+          name: '',
+          node_type: 1,
+          isStation: false,
+          isContact: false,
+          isAdvert: false,
+          isNeighbor: false,
+          lat: null,
+          lon: null,
+          has_loc: false,
+          rssi_dbm: null,
+          snr_db: null,
+          snr_in_db: null,
+          snr_out_db: null,
+          hops: null,
+          out_path_len: null,
+          age_s: null,
+          rx_ts: null,
+          adv_ts: null,
+        });
+      }
+      return map.get(key);
+    };
+
+    const stKey = (l.pub_key || 'station').toLowerCase();
+    const stNode = ensure(stKey);
+    stNode.isStation = true;
+    stNode.pub_key = l.pub_key || '';
+    stNode.pub_prefix = stNode.pub_key ? stNode.pub_key.slice(0, 8) : '';
+    stNode.name = l.node_name || 'Local Station';
+    if (hasGps(loc)) {
+      stNode.lat = Number(loc.lat);
+      stNode.lon = Number(loc.lon);
+      stNode.has_loc = true;
+    }
+
+    for (const c of (l.contacts || [])) {
+      const k = (c.pub_key || c.name || '').toLowerCase();
+      if (!k) continue;
+      const n = ensure(k);
+      n.isContact = true;
+      n.contact = c;
+      n.pub_key = c.pub_key || n.pub_key;
+      n.pub_prefix = n.pub_key ? n.pub_key.slice(0, 8) : n.pub_prefix;
+      n.name = c.name || n.name;
+      n.node_type = c.type !== undefined ? c.type : (c.node_type !== undefined ? c.node_type : n.node_type);
+      n.out_path_len = c.out_path_len !== undefined ? c.out_path_len : n.out_path_len;
+      if (hasGps(c)) {
+        n.lat = Number(c.lat);
+        n.lon = Number(c.lon);
+        n.has_loc = true;
+      }
+      if (c.age_s !== undefined && c.age_s !== null) n.age_s = c.age_s;
+    }
+
+    for (const a of (l.adverts || [])) {
+      const k = (a.pub_key || a.name || '').toLowerCase();
+      if (!k) continue;
+      const n = ensure(k);
+      n.isAdvert = true;
+      n.advert = a;
+      n.pub_key = a.pub_key || n.pub_key;
+      n.pub_prefix = n.pub_key ? n.pub_key.slice(0, 8) : n.pub_prefix;
+      n.name = a.name || n.name;
+      if (a.node_type !== undefined) n.node_type = a.node_type;
+      if (a.has_loc !== false && hasGps(a)) {
+        n.lat = Number(a.lat);
+        n.lon = Number(a.lon);
+        n.has_loc = true;
+      }
+      if (a.rssi_dbm !== undefined) n.rssi_dbm = a.rssi_dbm;
+      if (a.snr_db !== undefined) n.snr_db = a.snr_db;
+      if (a.hops !== undefined) n.hops = a.hops;
+      if (a.age_s !== undefined && a.age_s !== null) n.age_s = a.age_s;
+      if (a.rx_ts !== undefined) n.rx_ts = a.rx_ts;
+      if (a.adv_ts !== undefined) n.adv_ts = a.adv_ts;
+    }
+
+    for (const nb of (l.neighbors || [])) {
+      const pfx = (nb.pub_key || '').toLowerCase();
+      let target = null;
+      if (pfx) {
+        for (const [k, v] of map.entries()) {
+          if (k.startsWith(pfx)) { target = v; break; }
+        }
+      }
+      if (!target) target = ensure(pfx || (nb.name || 'neighbor').toLowerCase());
+      target.isNeighbor = true;
+      target.neighbor = nb;
+      if (!target.pub_key && nb.pub_key) target.pub_key = nb.pub_key;
+      if (!target.pub_prefix && nb.pub_key) target.pub_prefix = nb.pub_key.slice(0, 8);
+      if (!target.name && nb.name) target.name = nb.name;
+      if (nb.node_type !== undefined) target.node_type = nb.node_type;
+      if (nb.rssi_dbm !== undefined) target.rssi_dbm = nb.rssi_dbm;
+      if (nb.snr_in_db !== undefined) target.snr_in_db = nb.snr_in_db;
+      if (nb.snr_out_db !== undefined) target.snr_out_db = nb.snr_out_db;
+      if (nb.age_s !== undefined && nb.age_s !== null) target.age_s = nb.age_s;
+    }
+
+    return Array.from(map.values());
+  };
+
+  const isInsideCachedBounds = (lat, lon, rangeKm) => {
+    if (!mapCachedData || !mapCachedData.bounds) return false;
+    const b = mapCachedData.bounds;
+    const dLat = rangeKm / 111.32;
+    const cosLat = Math.max(0.15, Math.cos((lat * Math.PI) / 180));
+    const dLon = rangeKm / (111.32 * cosLat);
+    if (Array.isArray(b) && b.length >= 4) {
+      return (lat - dLat) >= b[0] && (lat + dLat) <= b[1] &&
+             (lon - dLon) >= b[2] && (lon + dLon) <= b[3];
+    }
+    if (b.range_km && rangeKm > b.range_km) return false;
+    if (b.min_lat !== undefined && b.max_lat !== undefined && b.min_lon !== undefined && b.max_lon !== undefined) {
+      return (lat - dLat) >= b.min_lat && (lat + dLat) <= b.max_lat &&
+             (lon - dLon) >= b.min_lon && (lon + dLon) <= b.max_lon;
+    }
+    return false;
+  };
+
+  const fetchMapVectors = (lat, lon, rangeKm, immediate = false) => {
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    if (isInsideCachedBounds(lat, lon, rangeKm)) return;
+    const reqRange = Math.min(300, Math.max(5, Math.round(rangeKm * 2)));
+    const run = async () => {
+      try {
+        const res = await api('GET', `/api/lora/map?lat=${encodeURIComponent(lat.toFixed(5))}&lon=${encodeURIComponent(lon.toFixed(5))}&range_km=${reqRange}`);
+        if (!res) return;
+        const dLat = reqRange / 111.32;
+        const cosLat = Math.max(0.15, Math.cos((lat * Math.PI) / 180));
+        const dLon = reqRange / (111.32 * cosLat);
+        mapCachedData = {
+          bounds: res.bounds || {
+            min_lat: lat - dLat,
+            max_lat: lat + dLat,
+            min_lon: lon - dLon,
+            max_lon: lon + dLon,
+            range_km: reqRange,
+            lat,
+            lon,
+          },
+          lines: res.lines || [],
+          towns: res.towns || [],
+          fetchedAt: Date.now(),
+        };
+        drawRadar(lastMapStatus);
+      } catch (_) {
+        /* Fallback cleanly if /api/lora/map fails */
+      }
+    };
+    if (mapFetchTimer) clearTimeout(mapFetchTimer);
+    if (immediate) {
+      mapFetchTimer = null;
+      run();
+    } else {
+      mapFetchTimer = setTimeout(() => {
+        mapFetchTimer = null;
+        run();
+      }, 360);
+    }
+  };
+
+  const formatTs = (ts) => {
+    if (!ts) return '—';
+    const d = new Date(ts > 1e12 ? ts : ts * 1000);
+    return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
+  };
+
+  const updateInspector = (status, force = false) => {
+    const nodes = getAllMapNodes(status);
+    const sel = mapSelectedKey ? nodes.find((n) => n.key === mapSelectedKey) : null;
+    if (!sel) {
+      if (!force && mapLastInspectorSig === 'none') return;
+      mapLastInspectorSig = 'none';
+      inspectorBox.replaceChildren(
+        h('p', { class: 'muted small', text: 'Click a node on the map or press Map on an advert to inspect details.' })
+      );
+      return;
+    }
+
+    const sig = JSON.stringify([
+      sel.key, sel.name, sel.node_type, sel.isStation, sel.isContact, sel.isAdvert, sel.isNeighbor,
+      sel.lat, sel.lon, sel.rssi_dbm, sel.snr_db, sel.snr_in_db, sel.snr_out_db, sel.hops,
+      sel.out_path_len, sel.age_s, sel.rx_ts, sel.adv_ts
+    ]);
+    if (!force && sig === mapLastInspectorSig) return;
+    mapLastInspectorSig = sig;
+
+    const loc = (status && status.location) || s.location;
+    const hasStationLoc = hasGps(loc);
+    const roleName = sel.isStation ? 'Station' : nodeTypeName(sel.node_type);
+    const badges = [
+      h('span', { class: `badge ${roleName.toLowerCase()}`, text: roleName }),
+      sel.isStation ? h('span', { class: 'badge', text: 'Local Station' }) : null,
+      sel.isContact ? h('span', { class: 'badge saved', text: 'Saved Contact' }) : null,
+      sel.isAdvert ? h('span', { class: 'badge', text: 'Advert' }) : null,
+      sel.isNeighbor ? h('span', { class: 'badge', text: 'Zero-Hop Neighbor' }) : null,
+    ].filter(Boolean);
+
+    let routeStr = 'FLOOD';
+    if (sel.out_path_len !== null && sel.out_path_len !== undefined && sel.out_path_len !== -1 && sel.out_path_len !== 255) {
+      const pl = sel.out_path_len & 0xff;
+      const hops = pl & 0x3f;
+      const hashSz = (pl >> 6) + 1;
+      if (hashSz <= 3) routeStr = `DIRECT (${hops} hops${hashSz > 1 ? `, ${hashSz}B` : ''})`;
+    }
+
+    let locText = 'No GPS';
+    let distText = '—';
+    let osmLink = null;
+    if (sel.has_loc && sel.lat !== null && sel.lon !== null) {
+      locText = `${sel.lat.toFixed(5)}, ${sel.lon.toFixed(5)}`;
+      if (hasStationLoc && !sel.isStation) {
+        const km = loraHaversineKm(loc.lat, loc.lon, sel.lat, sel.lon);
+        const brg = loraBearingDeg(loc.lat, loc.lon, sel.lat, sel.lon);
+        const dist = km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(1)} km`;
+        distText = `${dist} · ${Math.round(brg)}° ${loraCompass(brg)}`;
+      }
+      osmLink = h('a', {
+        href: `https://www.openstreetmap.org/?mlat=${sel.lat.toFixed(5)}&mlon=${sel.lon.toFixed(5)}#map=14/${sel.lat.toFixed(5)}/${sel.lon.toFixed(5)}`,
+        target: '_blank',
+        rel: 'noopener',
+        class: 'small',
+        text: 'Open in OpenStreetMap ↗',
+      });
+    }
+
+    const sigParts = [];
+    if (sel.rssi_dbm !== null && sel.rssi_dbm !== undefined) sigParts.push(`RSSI ${sel.rssi_dbm} dBm`);
+    if (sel.snr_db !== null && sel.snr_db !== undefined) sigParts.push(`SNR ${sel.snr_db} dB`);
+    if (sel.hops !== null && sel.hops !== undefined) sigParts.push(`Hops ${sel.hops}`);
+    const zhopParts = [];
+    if (sel.snr_in_db !== null && sel.snr_in_db !== undefined) zhopParts.push(`In ${sel.snr_in_db} dB`);
+    if (sel.snr_out_db !== null && sel.snr_out_db !== undefined) zhopParts.push(`Out ${sel.snr_out_db} dB`);
+
+    const actionBtns = [];
+    if (sel.pub_key) {
+      actionBtns.push(button('Copy Key', () => loraCopyText(sel.pub_key, 'Public key copied'), 'small'));
+      if (!sel.isStation) {
+        actionBtns.push(button('Message', () => openDmTab(sel.pub_key, sel.name, true), 'small'));
+        if (sel.isContact) {
+          actionBtns.push(button('Reset path', () => busy(nodesCard, importNote, async () => {
+            await api('POST', '/api/lora/contacts', { action: 'reset_path', pub_key: sel.pub_key });
+            toast('Path reset');
+            const fresh = await api('GET', '/api/status');
+            st = fresh;
+            showNodes(fresh);
+          }), 'small'));
+          actionBtns.push(button('Remove', () => busy(nodesCard, importNote, async () => {
+            await api('POST', '/api/lora/contacts', { action: 'delete', pub_key: sel.pub_key });
+            toast('Contact removed');
+            const fresh = await api('GET', '/api/status');
+            st = fresh;
+            showNodes(fresh);
+          }), 'small danger'));
+        } else {
+          actionBtns.push(button('+ Contact', () => busy(nodesCard, importNote, async () => {
+            await api('POST', '/api/lora/contacts', {
+              action: 'save',
+              pub_key: sel.pub_key,
+              name: sel.name || sel.pub_key.slice(0, 8),
+              type: sel.node_type || 1,
+              ...(sel.has_loc && sel.lat != null && sel.lon != null ? { lat: sel.lat, lon: sel.lon } : {}),
+            });
+            toast('Contact added');
+            const fresh = await api('GET', '/api/status');
+            st = fresh;
+            showNodes(fresh);
+          }), 'small'));
+        }
+        actionBtns.push(button('Copy meshcore:// URI', () => loraCopyText(loraBuildUri(sel.pub_key, sel.name, sel.node_type, sel), 'Contact URI copied'), 'small'));
+      }
+    }
+
+    inspectorBox.replaceChildren(
+      h('div', { class: 'row' },
+        h('strong', { text: sel.name || sel.pub_prefix || 'Unknown' }),
+        ' ',
+        ...badges
+      ),
+      sel.pub_key ? h('div', { class: 'muted small' },
+        `Key: `, h('code', { text: sel.pub_key }),
+        sel.pub_prefix ? [` · Prefix: `, h('code', { text: sel.pub_prefix })] : null
+      ) : null,
+      h('div', { class: 'map-inspector-grid' },
+        h('div', {}, h('span', { class: 'muted', text: 'Signal: ' }), sigParts.join(' · ') || '—'),
+        h('div', {}, h('span', { class: 'muted', text: 'Route: ' }), routeStr),
+        zhopParts.length ? h('div', {}, h('span', { class: 'muted', text: 'Zero-hop SNR: ' }), zhopParts.join(' / ')) : null,
+        h('div', {}, h('span', { class: 'muted', text: 'Location: ' }), locText, osmLink ? [' ', osmLink] : null),
+        h('div', {}, h('span', { class: 'muted', text: 'Distance / Azimuth: ' }), distText),
+        h('div', {}, h('span', { class: 'muted', text: 'Age: ' }), (sel.age_s !== null && sel.age_s !== undefined) ? duration(sel.age_s) : '—'),
+        sel.rx_ts ? h('div', {}, h('span', { class: 'muted', text: 'RX: ' }), formatTs(sel.rx_ts)) : null,
+        sel.adv_ts ? h('div', {}, h('span', { class: 'muted', text: 'Adv: ' }), formatTs(sel.adv_ts)) : null
+      ),
+      actionBtns.length ? h('div', { class: 'contact-actions' }, ...actionBtns) : null
+    );
+  };
+
+  const drawNodeShape = (ctx, x, y, role, color, selected) => {
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    if (role === 'station') {
+      for (let i = 0; i < 10; i++) {
+        const r = i % 2 === 0 ? 7 : 3.2;
+        const a = (i * Math.PI) / 5 - Math.PI / 2;
+        if (i === 0) ctx.moveTo(x + r * Math.cos(a), y + r * Math.sin(a));
+        else ctx.lineTo(x + r * Math.cos(a), y + r * Math.sin(a));
+      }
+      ctx.closePath();
+    } else if (role === 2) {
+      ctx.moveTo(x, y - 6);
+      ctx.lineTo(x + 5.5, y + 4.5);
+      ctx.lineTo(x - 5.5, y + 4.5);
+      ctx.closePath();
+    } else if (role === 3) {
+      ctx.rect(x - 4.5, y - 4.5, 9, 9);
+    } else if (role === 4) {
+      ctx.moveTo(x, y - 6);
+      ctx.lineTo(x + 5.5, y);
+      ctx.lineTo(x, y + 6);
+      ctx.lineTo(x - 5.5, y);
+      ctx.closePath();
+    } else {
+      ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.stroke();
+    if (selected) {
+      ctx.strokeStyle = '#2563eb';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, 9, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+
+  const syncMapSize = () => {
+    if (typeof radarCanvas.getBoundingClientRect === 'function') {
+      const rect = radarCanvas.getBoundingClientRect();
+      if (rect && rect.width > 0) {
+        if (Math.round(rect.width) === 560 && Math.round(rect.height) === 360) {
+          mapW = 560;
+          mapH = 360;
+        } else {
+          mapW = Math.max(280, Math.min(900, Math.round(rect.width)));
+          mapH = Math.max(260, Math.round(mapW * 0.64));
+        }
+      }
+    }
+  };
+
+  const drawLabel = (ctx, textStr, x, y, align, occupied, font, fillStyle) => {
+    if (!textStr) return false;
+    ctx.font = font;
+    ctx.textAlign = align;
+    const w = typeof ctx.measureText === 'function' ? ctx.measureText(textStr).width : textStr.length * 6;
+    const x1 = align === 'center' ? x - w / 2 : (align === 'right' ? x - w : x);
+    const box = { x1: x1 - 2, y1: y - 10, x2: x1 + w + 2, y2: y + 3 };
+    for (const o of occupied) {
+      if (box.x1 < o.x2 && box.x2 > o.x1 && box.y1 < o.y2 && box.y2 > o.y1) return false;
+    }
+    occupied.push(box);
+    if (typeof ctx.strokeText === 'function') {
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+      ctx.lineWidth = 3;
+      ctx.strokeText(textStr, x, y);
+    }
+    ctx.fillStyle = fillStyle;
+    ctx.fillText(textStr, x, y);
+    return true;
+  };
+
+  const updateNoGpsStrip = (nodes) => {
+    const noGpsNodes = nodes.filter((n) => !n.has_loc);
+    const sig = noGpsNodes.map((n) => `${n.key}:${n.name || ''}:${n.key === mapSelectedKey ? 1 : 0}`).join('|');
+    if (sig === mapLastNoGpsSig) return;
+    mapLastNoGpsSig = sig;
+    if (noGpsNodes.length === 0) {
+      noGpsStrip.hidden = true;
+      noGpsStrip.replaceChildren();
+      return;
+    }
+    noGpsStrip.hidden = false;
+    noGpsStrip.replaceChildren(
+      h('span', { class: 'muted small', text: `No GPS (${noGpsNodes.length}):` }),
+      ...noGpsNodes.map((n) => {
+        const btn = h('button', {
+          type: 'button',
+          class: `map-nogps-chip${n.key === mapSelectedKey ? ' active' : ''}`,
+          text: n.name || n.pub_prefix || n.key.slice(0, 8),
+        });
+        btn.addEventListener('click', () => {
+          mapSelectedKey = n.key;
+          drawRadar(lastMapStatus);
+          updateInspector(lastMapStatus, true);
+        });
+        return btn;
+      })
+    );
+  };
+
+  const drawRadar = (status) => {
+    lastMapStatus = status || lastMapStatus;
+    if (!radarCanvas || typeof radarCanvas.getContext !== 'function') return;
+    const ctx = radarCanvas.getContext('2d');
+    if (!ctx) return;
+
+    syncMapSize();
+    const W = mapW;
+    const H = mapH;
+    const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) ? Math.min(2, Math.max(1, window.devicePixelRatio)) : 1;
+    if (radarCanvas.width !== W * dpr) radarCanvas.width = W * dpr;
+    if (radarCanvas.height !== H * dpr) radarCanvas.height = H * dpr;
+
+    ctx.save();
+    if (typeof ctx.scale === 'function') ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, W, H);
+
+    const nodes = getAllMapNodes(lastMapStatus);
+    const anyGps = nodes.some((n) => n.has_loc);
+    if (!mapViewMode) mapViewMode = anyGps ? 'geo' : 'radar';
+
+    if (typeof modeBtn !== 'undefined') modeBtn.textContent = mapViewMode === 'geo' ? 'Geo Map' : 'Polar Radar';
+    if (typeof rangeBadge !== 'undefined') rangeBadge.textContent = `±${Math.round(mapRangeKm)} km`;
+    if (radarCanvas.style) radarCanvas.style.cursor = mapViewMode === 'geo' ? 'grab' : 'default';
+
+    if (mapViewMode === 'geo' && anyGps) {
+      if (mapCenterLat === null || mapCenterLon === null) {
+        const gpsNode = nodes.find((n) => n.isStation && n.has_loc) || nodes.find((n) => n.has_loc);
+        mapCenterLat = gpsNode.lat;
+        mapCenterLon = gpsNode.lon;
+      }
+      fetchMapVectors(mapCenterLat, mapCenterLon, mapRangeKm, !mapCachedData);
+    }
+
+    const cx = W / 2;
+    const cy = H / 2;
+    const maxR = Math.min(cx, cy) - 24;
+    mapHitTargets = [];
+    const occupied = [];
+
+    if (mapViewMode === 'geo' && mapCenterLat !== null && mapCenterLon !== null) {
+      const cosLat = Math.max(0.15, Math.cos((mapCenterLat * Math.PI) / 180));
+      const kmPerPx = (mapRangeKm * 2) / Math.min(W, H);
+      const project = (lat, lon) => {
+        const dxKm = (lon - mapCenterLon) * 111.32 * cosLat;
+        const dyKm = (lat - mapCenterLat) * 111.32;
+        return { x: cx + dxKm / kmPerPx, y: cy - dyKm / kmPerPx };
+      };
+
+      /* Subtle grid */
+      ctx.strokeStyle = 'rgba(128,128,128,0.18)';
+      ctx.lineWidth = 1;
+      for (let gx = 40; gx < W; gx += 80) {
+        ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke();
+      }
+      for (let gy = 40; gy < H; gy += 80) {
+        ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke();
+      }
+
+      /* Cached Natural Earth / PL vectors */
+      if (mapCachedData && Array.isArray(mapCachedData.lines)) {
+        for (const line of mapCachedData.lines) {
+          if (!Array.isArray(line) || line.length < 2) continue;
+          if (Array.isArray(line[0])) {
+            ctx.strokeStyle = 'rgba(100,116,139,0.45)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            line.forEach((pt, idx) => {
+              const p = project(pt[0], pt[1]);
+              if (idx === 0) ctx.moveTo(p.x, p.y);
+              else ctx.lineTo(p.x, p.y);
+            });
+            ctx.stroke();
+            continue;
+          }
+          if (line.length < 5) continue;
+          const kind = line[0];
+          if (kind === 0) {
+            ctx.strokeStyle = 'rgba(71, 85, 105, 0.78)';
+            ctx.lineWidth = 1.8;
+            ctx.setLineDash([]);
+          } else if (kind === 1) {
+            ctx.strokeStyle = 'rgba(37, 99, 235, 0.50)';
+            ctx.lineWidth = 1.4;
+            ctx.setLineDash([]);
+          } else {
+            ctx.strokeStyle = 'rgba(100, 116, 139, 0.45)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 3]);
+          }
+          ctx.beginPath();
+          for (let i = 1; i + 1 < line.length; i += 2) {
+            const p = project(line[i], line[i + 1]);
+            if (i === 1) ctx.moveTo(p.x, p.y);
+            else ctx.lineTo(p.x, p.y);
+          }
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+      }
+
+      const gpsNodes = nodes.filter((n) => n.has_loc).sort((a, b) => {
+        const pa = (a.isStation ? 2 : 0) + (a.key === mapSelectedKey ? 1 : 0);
+        const pb = (b.isStation ? 2 : 0) + (b.key === mapSelectedKey ? 1 : 0);
+        return pb - pa;
+      });
+      for (const n of gpsNodes) {
+        const p = project(n.lat, n.lon);
+        const x = p.x;
+        const y = p.y;
+        const role = n.isStation ? 'station' : n.node_type;
+        const color = n.isStation ? '#2563eb' : (role === 2 ? '#16a34a' : role === 3 ? '#8b5cf6' : role === 4 ? '#06b6d4' : '#f59e0b');
+        drawNodeShape(ctx, x, y, role, color, n.key === mapSelectedKey);
+        if (n.name) {
+          drawLabel(ctx, n.name.slice(0, 14), x, y - 9, 'center', occupied, '10px sans-serif', '#475569');
+        }
+        mapHitTargets.push({ key: n.key, x, y, r: 12, node: n });
+      }
+
+      if (mapCachedData && Array.isArray(mapCachedData.towns)) {
+        const towns = [...mapCachedData.towns].sort((a, b) => (b.pop || 0) - (a.pop || 0));
+        for (const t of towns) {
+          if (t.lat === undefined || t.lon === undefined) continue;
+          const p = project(t.lat, t.lon);
+          if (p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H) {
+            drawLabel(ctx, t.name || '', p.x + 4, p.y + 3, 'left', occupied, '10px sans-serif', '#64748b');
+          }
+        }
+      }
+      updateNoGpsStrip(nodes);
+    } else {
+      /* Polar Radar */
+      ctx.strokeStyle = 'rgba(128,128,128,0.35)';
+      ctx.lineWidth = 1;
+      for (const frac of [0.33, 0.66, 1]) {
+        ctx.beginPath(); ctx.arc(cx, cy, maxR * frac, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = '#888';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(`${Math.round(mapRangeKm * frac)} km`, cx + 4, cy - maxR * frac + 11);
+      }
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - maxR); ctx.lineTo(cx, cy + maxR);
+      ctx.moveTo(cx - maxR, cy); ctx.lineTo(cx + maxR, cy);
+      ctx.stroke();
+      ctx.fillStyle = '#888';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('N', cx, cy - maxR - 6);
+      ctx.fillText('S', cx, cy + maxR + 14);
+      ctx.fillText('E', cx + maxR + 10, cy + 4);
+      ctx.fillText('W', cx - maxR - 10, cy + 4);
+
+      const loc = (lastMapStatus && lastMapStatus.location) || s.location;
+      const hasStationLoc = hasGps(loc);
+
+      for (const n of nodes) {
+        let x, y;
+        if (n.isStation) {
+          x = cx; y = cy;
+        } else if (hasStationLoc && n.has_loc) {
+          const km = loraHaversineKm(loc.lat, loc.lon, n.lat, n.lon);
+          const brg = (loraBearingDeg(loc.lat, loc.lon, n.lat, n.lon) - 90) * (Math.PI / 180);
+          const r = Math.min(maxR, Math.max(12, (km / mapRangeKm) * maxR));
+          x = cx + r * Math.cos(brg);
+          y = cy + r * Math.sin(brg);
+        } else {
+          const rssi = n.rssi_dbm !== null && n.rssi_dbm !== undefined ? n.rssi_dbm : -100;
+          const norm = Math.min(1, Math.max(0.15, (-rssi - 40) / 85));
+          const r = norm * maxR;
+          let hash = 0;
+          for (let i = 0; i < n.key.length; i++) hash = (hash * 31 + n.key.charCodeAt(i)) & 0xffff;
+          const ang = (hash / 0xffff) * Math.PI * 2;
+          x = cx + r * Math.cos(ang);
+          y = cy + r * Math.sin(ang);
+        }
+        const role = n.isStation ? 'station' : n.node_type;
+        const color = n.isStation ? '#2563eb' : (role === 2 ? '#16a34a' : role === 3 ? '#8b5cf6' : role === 4 ? '#06b6d4' : '#f59e0b');
+        drawNodeShape(ctx, x, y, role, color, n.key === mapSelectedKey);
+        if (n.name) {
+          drawLabel(ctx, n.name.slice(0, 14), x, y - 9, 'center', occupied, '10px sans-serif', '#475569');
+        }
+        mapHitTargets.push({ key: n.key, x, y, r: 12, node: n });
+      }
+      updateNoGpsStrip([]);
+    }
+    ctx.restore();
+  };
+
+  const getCanvasPoint = (ev) => {
+    if (typeof radarCanvas.getBoundingClientRect === 'function') {
+      const rect = radarCanvas.getBoundingClientRect();
+      const scaleX = rect.width ? (mapW / rect.width) : 1;
+      const scaleY = rect.height ? (mapH / rect.height) : 1;
+      return {
+        x: ((ev.clientX ?? 0) - rect.left) * scaleX,
+        y: ((ev.clientY ?? 0) - rect.top) * scaleY,
+      };
+    }
+    return { x: ev.offsetX ?? ev.clientX ?? 0, y: ev.offsetY ?? ev.clientY ?? 0 };
+  };
+
+  const selectMapNodeAt = (x, y) => {
+    let best = null;
+    let bestDist = Infinity;
+    for (const t of mapHitTargets) {
+      const d = Math.hypot(t.x - x, t.y - y);
+      if (d <= t.r && d < bestDist) {
+        best = t;
+        bestDist = d;
+      }
+    }
+    if (best) {
+      mapSelectedKey = best.key;
+      drawRadar(lastMapStatus);
+      updateInspector(lastMapStatus, true);
+    }
+  };
+
+  radarCanvas.addEventListener('click', (ev) => {
+    if (mapDidDrag) { mapDidDrag = false; return; }
+    const pt = getCanvasPoint(ev);
+    selectMapNodeAt(pt.x, pt.y);
+  });
+
+  radarCanvas.addEventListener('pointerdown', (ev) => {
+    mapDragStart = { x: ev.clientX ?? 0, y: ev.clientY ?? 0, lat: mapCenterLat, lon: mapCenterLon };
+    mapDidDrag = false;
+  });
+  radarCanvas.addEventListener('pointermove', (ev) => {
+    if (!mapDragStart || mapViewMode !== 'geo' || mapCenterLat === null || mapCenterLon === null) return;
+    let dx = (ev.clientX ?? 0) - mapDragStart.x;
+    let dy = (ev.clientY ?? 0) - mapDragStart.y;
+    if (typeof radarCanvas.getBoundingClientRect === 'function') {
+      const rect = radarCanvas.getBoundingClientRect();
+      if (rect && rect.width > 0 && rect.height > 0) {
+        dx *= mapW / rect.width;
+        dy *= mapH / rect.height;
+      }
+    }
+    if (Math.hypot(dx, dy) >= 5) {
+      mapDidDrag = true;
+      const kmPerPx = (mapRangeKm * 2) / Math.min(mapW, mapH);
+      const cosLat = Math.max(0.15, Math.cos((mapDragStart.lat * Math.PI) / 180));
+      mapCenterLat = mapDragStart.lat + (dy * kmPerPx) / 111.32;
+      mapCenterLon = mapDragStart.lon - (dx * kmPerPx) / (111.32 * cosLat);
+      drawRadar(lastMapStatus);
+      fetchMapVectors(mapCenterLat, mapCenterLon, mapRangeKm);
+    }
+  });
+  radarCanvas.addEventListener('pointerup', () => { mapDragStart = null; });
+  radarCanvas.addEventListener('pointercancel', () => { mapDragStart = null; });
+
+  if (typeof ResizeObserver !== 'undefined') {
+    const ro = new ResizeObserver(() => {
+      const run = () => {
+        syncMapSize();
+        drawRadar(lastMapStatus);
+      };
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+      else run();
+    });
+    ro.observe(radarCanvas);
+  }
+
+  radarCanvas.addEventListener('wheel', (ev) => {
+    if (typeof ev.preventDefault === 'function') ev.preventDefault();
+    const factor = (ev.deltaY || 0) < 0 ? 0.8 : 1.25;
+    mapRangeKm = Math.min(300, Math.max(2, mapRangeKm * factor));
+    drawRadar(lastMapStatus);
+    if (mapViewMode === 'geo' && mapCenterLat !== null && mapCenterLon !== null) {
+      fetchMapVectors(mapCenterLat, mapCenterLon, mapRangeKm);
+    }
+  });
+
+  const modeBtn = button('Geo Map', () => {
+    mapViewMode = mapViewMode === 'geo' ? 'radar' : 'geo';
+    drawRadar(lastMapStatus);
+  }, 'small');
+  const zoomInBtn = button('+', () => {
+    mapRangeKm = Math.max(2, mapRangeKm * 0.75);
+    drawRadar(lastMapStatus);
+    if (mapViewMode === 'geo' && mapCenterLat !== null && mapCenterLon !== null) {
+      fetchMapVectors(mapCenterLat, mapCenterLon, mapRangeKm);
+    }
+  }, 'small');
+  const zoomOutBtn = button('−', () => {
+    mapRangeKm = Math.min(300, mapRangeKm * 1.35);
+    drawRadar(lastMapStatus);
+    if (mapViewMode === 'geo' && mapCenterLat !== null && mapCenterLon !== null) {
+      fetchMapVectors(mapCenterLat, mapCenterLon, mapRangeKm);
+    }
+  }, 'small');
+  const fitBtn = button('Fit', () => {
+    const gpsNodes = getAllMapNodes(lastMapStatus).filter((n) => n.has_loc);
+    if (gpsNodes.length === 0) return;
+    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    for (const n of gpsNodes) {
+      if (n.lat < minLat) minLat = n.lat;
+      if (n.lat > maxLat) maxLat = n.lat;
+      if (n.lon < minLon) minLon = n.lon;
+      if (n.lon > maxLon) maxLon = n.lon;
+    }
+    mapCenterLat = (minLat + maxLat) / 2;
+    mapCenterLon = (minLon + maxLon) / 2;
+    const spanKm = loraHaversineKm(minLat, minLon, maxLat, maxLon);
+    mapRangeKm = Math.min(300, Math.max(5, spanKm * 0.7));
+    mapViewMode = 'geo';
+    drawRadar(lastMapStatus);
+    fetchMapVectors(mapCenterLat, mapCenterLon, mapRangeKm, true);
+  }, 'small');
+  const centerBtn = button('Center', () => {
+    const loc = (lastMapStatus && lastMapStatus.location) || s.location;
+    if (hasGps(loc)) {
+      mapCenterLat = Number(loc.lat);
+      mapCenterLon = Number(loc.lon);
+      drawRadar(lastMapStatus);
+      fetchMapVectors(mapCenterLat, mapCenterLon, mapRangeKm, true);
+    }
+  }, 'small');
+
+  const rangeBadge = h('span', { class: 'map-range-badge muted small', text: `±${Math.round(mapRangeKm)} km` });
+  const mapToolbar = h('div', { class: 'map-toolbar' }, modeBtn, zoomInBtn, zoomOutBtn, fitBtn, centerBtn, rangeBadge);
+  const mapLegend = h('div', { class: 'map-legend' },
+    h('span', { text: '★ Station' }),
+    h('span', { text: '▲ Repeater' }),
+    h('span', { text: '● Chat' }),
+    h('span', { text: '■ Room' }),
+    h('span', { text: '◆ Sensor' }),
+    h('span', { class: 'muted', text: 'PL dense city coverage · Natural Earth' })
+  );
+
   const showNodes = (status) => {
     const l = (status && status.lora) || {};
+    const loc = (status && status.location) || s.location;
+    const hasStationLoc = loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lon) && (loc.lat !== 0 || loc.lon !== 0);
+
+    const contacts = l.contacts || [];
+    const advs = l.adverts || [];
     const nbrs = l.neighbors || [];
     if (nbrs.length === 0) {
       nbrBox.replaceChildren(h('p', { class: 'muted' }, 'No repeaters discovered yet'));
     } else {
       const list = h('ul', { class: 'list' });
       for (const n of nbrs) {
-        const typeBadge = h('span', { class: `badge ${nodeTypeName(n.node_type).toLowerCase()}`, text: nodeTypeName(n.node_type) });
+        const pfx = (n.pub_key || '').toLowerCase();
+        const matchNode = pfx
+          ? (contacts.find((c) => (c.pub_key || '').toLowerCase().startsWith(pfx)) ||
+             advs.find((a) => (a.pub_key || '').toLowerCase().startsWith(pfx)))
+          : null;
+        const resolvedName = n.name || (matchNode && matchNode.name) || '';
+        const resolvedType = n.node_type || (matchNode && (matchNode.type || matchNode.node_type)) || 2;
+        const typeBadge = h('span', { class: `badge ${nodeTypeName(resolvedType).toLowerCase()}`, text: nodeTypeName(resolvedType) });
         const ageStr = (n.age_s !== undefined && n.age_s !== null) ? `${Math.round(n.age_s)}s ago` : '—';
-        const meta = `SNR Out ${n.snr_out_db} dB · In ${n.snr_in_db} dB · RSSI ${n.rssi_dbm} dBm · ${ageStr}`;
+        const snrOutStr = (n.snr_out_db !== undefined && n.snr_out_db !== null) ? `SNR Out ${n.snr_out_db} dB · ` : '';
+        const meta = `${snrOutStr}In ${n.snr_in_db} dB · RSSI ${n.rssi_dbm} dBm · ${ageStr}`;
         list.append(h('li', {},
           h('div', { class: 'grow' },
-            h('strong', { text: n.name || n.pub_key || 'Unknown' }), ' ',
+            h('strong', { text: resolvedName || n.pub_key || 'Unknown' }), ' ',
+            resolvedName && n.pub_key ? [h('code', { class: 'badge', text: n.pub_key.slice(0, 8) }), ' '] : null,
             typeBadge,
             h('div', { class: 'muted small', text: meta })
           )
@@ -1313,32 +2612,149 @@ async function loraPage() {
       nbrBox.replaceChildren(list);
     }
 
-    const advs = l.adverts || [];
+    const q = (contactFilterQuery || '').trim().toLowerCase();
+    contactFilterInput.hidden = contacts.length === 0 && !q;
+    const filteredContacts = !q
+      ? contacts
+      : contacts.filter((c) => {
+          const cType = nodeTypeName(c.type !== undefined ? c.type : c.node_type).toLowerCase();
+          return (c.name || '').toLowerCase().includes(q) ||
+                 (c.pub_key || '').toLowerCase().includes(q) ||
+                 cType.includes(q);
+        });
+    contactsHeading.textContent = q
+      ? `Saved Contacts (${filteredContacts.length} / ${contacts.length} of 64)`
+      : `Saved Contacts (${contacts.length} / 64)`;
+
+    const prevContactsScroll = contactsBox.scrollTop || 0;
+    if (contacts.length === 0) {
+      contactsBox.replaceChildren(h('p', { class: 'muted' }, 'No saved contacts yet'));
+    } else if (filteredContacts.length === 0) {
+      contactsBox.replaceChildren(h('p', { class: 'muted' }, 'No contacts match filter'));
+    } else {
+      contactsBox.replaceChildren(...filteredContacts.map((c) => {
+        const cType = c.type !== undefined ? c.type : c.node_type;
+        const typeBadge = h('span', { class: `badge ${nodeTypeName(cType).toLowerCase()}`, text: nodeTypeName(cType) });
+        let pathStr = 'FLOOD';
+        if (c.out_path_len !== undefined && c.out_path_len !== null && c.out_path_len !== -1 && c.out_path_len !== 255) {
+          const pl = c.out_path_len & 0xff;
+          const hops = pl & 0x3f;
+          const hashSz = (pl >> 6) + 1;
+          if (hashSz <= 3) {
+            pathStr = `DIRECT (${hops} hops${hashSz > 1 ? `, ${hashSz}B` : ''})`;
+          }
+        }
+        let distStr = '';
+        if (hasStationLoc && c.lat && c.lon && (c.lat !== 0 || c.lon !== 0)) {
+          const km = loraHaversineKm(loc.lat, loc.lon, c.lat, c.lon);
+          const brg = loraBearingDeg(loc.lat, loc.lon, c.lat, c.lon);
+          distStr = km < 1 ? `${Math.round(km * 1000)} m ${loraCompass(brg)}` : `${km.toFixed(1)} km ${loraCompass(brg)}`;
+        }
+        const ageStr = (c.age_s !== undefined && c.age_s !== null) ? duration(c.age_s) : '—';
+        const meta = [pathStr, distStr, ageStr].filter(Boolean).join(' · ');
+        return h('div', { class: 'contact-row' },
+          h('div', { class: 'contact-main' },
+            h('strong', { text: c.name || (c.pub_key ? c.pub_key.slice(0, 12) : 'Unknown') }), ' ',
+            typeBadge,
+            h('div', { class: 'muted small', text: meta })
+          ),
+          h('div', { class: 'contact-actions' },
+            button('Message', () => openDmTab(c.pub_key, c.name, true), 'small'),
+            button('Reset path', () => busy(nodesCard, importNote, async () => {
+              await api('POST', '/api/lora/contacts', { action: 'reset_path', pub_key: c.pub_key });
+              toast('Path reset');
+              const fresh = await api('GET', '/api/status');
+              st = fresh;
+              showNodes(fresh);
+            }), 'small'),
+            button('Copy URI', () => loraCopyText(loraBuildUri(c.pub_key, c.name, c.type !== undefined ? c.type : c.node_type, c), 'Contact URI copied'), 'small'),
+            button('Remove', () => busy(nodesCard, importNote, async () => {
+              await api('POST', '/api/lora/contacts', { action: 'delete', pub_key: c.pub_key });
+              toast('Contact removed');
+              const fresh = await api('GET', '/api/status');
+              st = fresh;
+              showNodes(fresh);
+            }), 'small danger')
+          )
+        );
+      }));
+      contactsBox.scrollTop = prevContactsScroll;
+    }
+
     if (advs.length === 0) {
       advBox.replaceChildren(h('p', { class: 'muted' }, 'No adverts heard yet'));
     } else {
+      const contactKeys = new Set(contacts.map((c) => (c.pub_key || '').toLowerCase()));
       const list = h('ul', { class: 'list' });
       for (const a of advs) {
         const typeBadge = h('span', { class: `badge ${nodeTypeName(a.node_type).toLowerCase()}`, text: nodeTypeName(a.node_type) });
         const locStr = a.has_loc && a.lat !== null && a.lat !== undefined ? `GPS: ${Number(a.lat).toFixed(4)}, ${Number(a.lon).toFixed(4)} · ` : '';
         const ageStr = (a.age_s !== undefined && a.age_s !== null) ? `${Math.round(a.age_s)}s ago` : '—';
         const meta = `${a.hops ?? 0} hops · ${a.rssi_dbm} dBm / ${a.snr_db} dB · ${locStr}${ageStr}`;
+        const isSaved = a.pub_key && contactKeys.has(a.pub_key.toLowerCase());
         list.append(h('li', {},
           h('div', { class: 'grow' },
             h('strong', { text: a.name || a.pub_key || 'Unknown' }), ' ',
             typeBadge,
             h('div', { class: 'muted small', text: meta })
-          )
+          ),
+          a.pub_key ? h('div', { class: 'contact-actions' },
+            button('Map', () => {
+              if (loraActiveTab !== 'all' && loraActiveTab !== 'map') setLoraTab('map');
+              mapSelectedKey = (a.pub_key || a.name || '').toLowerCase();
+              if (a.has_loc && hasGps(a)) {
+                mapCenterLat = Number(a.lat);
+                mapCenterLon = Number(a.lon);
+                mapViewMode = 'geo';
+              }
+              drawRadar(st);
+              updateInspector(st, true);
+            }, 'small'),
+            button('Message', () => openDmTab(a.pub_key, a.name, true), 'small'),
+            isSaved
+              ? h('span', { class: 'badge saved', text: 'Saved' })
+              : button('+ Contact', () => busy(nodesCard, importNote, async () => {
+                await api('POST', '/api/lora/contacts', {
+                  action: 'save',
+                  pub_key: a.pub_key,
+                  name: a.name || a.pub_key.slice(0, 8),
+                  type: a.node_type || 1,
+                  ...(a.has_loc && a.lat != null && a.lon != null ? { lat: a.lat, lon: a.lon } : {}),
+                });
+                toast('Contact added');
+                const fresh = await api('GET', '/api/status');
+                st = fresh;
+                showNodes(fresh);
+              }), 'small')
+          ) : null
         ));
       }
       advBox.replaceChildren(list);
     }
+
+    drawRadar(status);
+    updateInspector(status);
   };
+  contactFilterInput.addEventListener('input', () => {
+    contactFilterQuery = contactFilterInput.value || '';
+    showNodes(st);
+  });
   showNodes(st);
 
   const nodesCard = card('Neighbors & heard nodes',
+    h('h3', { text: 'Interactive Geo Map / Polar Radar' }),
+    mapToolbar,
+    radarCanvas,
+    noGpsStrip,
+    mapLegend,
+    inspectorBox,
     h('h3', { text: 'Zero-Hop Repeaters' }),
     nbrBox,
+    contactsHeading,
+    contactFilterInput,
+    contactsBox,
+    actions(importToggleBtn),
+    importPanel,
     h('h3', { text: 'Recent Adverts' }),
     advBox
   );
@@ -1419,7 +2835,7 @@ async function loraPage() {
   pathHash.name = 'path_hash_mode';
 
   const afVal = lora.airtime_factor_x10 !== undefined ? (lora.airtime_factor_x10 / 10).toFixed(1) : (lora.airtime_factor !== undefined ? Number(lora.airtime_factor).toFixed(1) : '1.0');
-  const airtimeFactor = h('input', { type: 'number', name: 'airtime_factor', min: '0', max: '9', step: '0.1', value: afVal });
+  const airtimeFactor = h('input', { type: 'text', inputmode: 'decimal', name: 'airtime_factor', value: afVal });
   airtimeFactor.name = 'airtime_factor';
 
   const wakeOnRx = h('input', { type: 'checkbox', name: 'wake_on_rx', checked: !!lora.wake_on_rx });
@@ -1432,6 +2848,7 @@ async function loraPage() {
     cr.value = String(crVal);
     if (pwrVal !== undefined) txPower.value = String(pwrVal);
     syncWord.value = swVal;
+    updateComposerMeta();
   };
 
   const presetActions = actions(
@@ -1445,6 +2862,62 @@ async function loraPage() {
     button('Meshtastic EU868 LongFast', () => applyPreset(869.525, 11, 250, 5, 22, '2B24')),
   );
 
+  /* Channels 0-7 subsection */
+  const channelsList = (st.lora && st.lora.channels) || [];
+  const chRows = [];
+  for (let i = 0; i < 8; i++) {
+    const ch = channelsList.find((c) => c.index === i) || { index: i, enabled: i === 0, name: i === 0 ? 'Public' : '' };
+    const chEn = h('input', { type: 'checkbox', checked: !!(ch.enabled || i === 0), disabled: i === 0 });
+    const chNameIn = h('input', { type: 'text', maxLength: '23', value: ch.name || (i === 0 ? 'Public' : '') });
+    const chKeyMode = choose([['keep', 'keep'], ['public', 'public'], ['passphrase', 'passphrase'], ['base64', 'base64'], ['hex', 'hex']], (ch.enabled || i === 0) ? 'keep' : 'passphrase');
+    const chKeyIn = h('input', { type: 'text', placeholder: 'Key / passphrase', disabled: (chKeyMode.value === 'keep' || chKeyMode.value === 'public') });
+    chKeyMode.addEventListener('change', () => {
+      const m = chKeyMode.value;
+      chKeyIn.disabled = (m === 'keep' || m === 'public');
+    });
+    const saveSlotBtn = button('Save slot', () => busy(radioCard, note, async () => {
+      await api('POST', '/api/lora/channels', {
+        index: i,
+        enabled: i === 0 ? true : chEn.checked,
+        name: chNameIn.value.trim(),
+        key_mode: chKeyMode.value,
+        key: chKeyIn.value,
+      });
+      if (i === 0) channelName.value = chNameIn.value.trim();
+      toast(`Channel #${i} saved`);
+      const fresh = await api('GET', '/api/status');
+      st = fresh;
+      showChat(fresh);
+    }), 'small');
+    chRows.push(h('tr', {},
+      h('td', { 'data-label': '#', text: `#${i}` }),
+      h('td', { 'data-label': 'Enabled' }, chEn),
+      h('td', { 'data-label': 'Name' }, chNameIn),
+      h('td', { 'data-label': 'Key mode' }, chKeyMode),
+      h('td', { 'data-label': 'Key' }, chKeyIn),
+      h('td', { 'data-label': 'Action' }, saveSlotBtn)
+    ));
+  }
+  const channelsTable = h('div', {
+    class: 'channels-table-wrap',
+    tabindex: '0',
+    role: 'region',
+    'aria-label': 'Channels 0 to 7',
+  },
+    h('table', { id: 'lora-channels-table', class: 'channels-table' },
+      h('thead', {}, h('tr', {},
+        h('th', { text: '#' }),
+        h('th', { text: 'Enabled' }),
+        h('th', { text: 'Name' }),
+        h('th', { text: 'Key mode' }),
+        h('th', { text: 'Key' }),
+        h('th', { text: '' })
+      )),
+      h('tbody', {}, ...chRows)
+    )
+  );
+
+  const gridField = (...a) => h('div', {}, ...field(...a));
   const note = h('p');
   const radioCard = card('LoRa & MeshCore settings',
     presetActions,
@@ -1455,17 +2928,19 @@ async function loraPage() {
     field('Channel name', channelName, 'Up to 23 characters.'),
     channelPsk.el,
     actions(usePublicBtn),
-    field('Frequency (MHz)', freq, '430.000 to 928.000 MHz.'),
-    field('Spreading factor', sf),
-    field('Bandwidth', bw),
-    field('Coding rate', cr),
-    field('TX power (dBm)', txPower, '-9 to +22 dBm.'),
-    field('Sync word', syncWord, 'Hexadecimal (e.g. 1424 or 0x1424).'),
+    h('div', { class: 'lora-settings-grid' },
+      gridField('Frequency (MHz)', freq, '430.000 to 928.000 MHz.'),
+      gridField('Spreading factor', sf),
+      gridField('Bandwidth', bw),
+      gridField('Coding rate', cr),
+      gridField('TX power (dBm)', txPower, '-9 to +22 dBm.'),
+      gridField('Sync word', syncWord, 'Hexadecimal (e.g. 1424 or 0x1424).'),
+      gridField('Path hash size', pathHash),
+      gridField('Airtime factor (0–9)', airtimeFactor, 'Airtime factor for duty cycle regulation (0.0 to 9.0).')
+    ),
     h('label', { class: 'check' }, rxBoosted, 'RX boosted gain'),
     h('label', { class: 'check' }, cadEnabled, 'CAD (listen before talk)'),
     h('label', { class: 'check' }, clientRepeat, 'Client repeat (forward flood)'),
-    field('Path hash size', pathHash),
-    field('Airtime factor (0–9)', airtimeFactor, 'Airtime factor for duty cycle regulation (0.0 to 9.0).'),
     h('label', { class: 'check' }, wakeOnRx, 'Wake from sleep on packet'),
     note,
     actions(button('Save', () => busy(radioCard, note, async () => {
@@ -1480,7 +2955,11 @@ async function loraPage() {
       const sw = parseInt(swStr, 16);
       const bwKhzNum = Number(bw.value);
       const bwHzNum = Math.round(bwKhzNum * 1000);
-      const afNum = Number(airtimeFactor.value) || 0;
+      const afRaw = (airtimeFactor.value || '').trim().replace(',', '.');
+      const afNum = afRaw === '' ? 1.0 : Number(afRaw);
+      if (!Number.isFinite(afNum) || afNum < 0 || afNum > 9) {
+        throw new ApiError('Airtime factor must be between 0.0 and 9.0.');
+      }
       const afX10 = Math.round(afNum * 10);
       const txPwr = Number(txPower.value);
 
@@ -1537,6 +3016,8 @@ async function loraPage() {
         showNodes(freshStatus);
       } catch (_) {}
     }), 'primary')),
+    h('h3', { text: 'Channels 0–7 (MeshCore Companion Slots)' }),
+    channelsTable
   );
 
   /* Card 5: MeshCore CLI */
@@ -1574,7 +3055,7 @@ async function loraPage() {
     if (ev.key === 'Enter') runCli(cliInput.value);
   });
 
-  const quickCmds = ['ver', 'get radio', 'stats-radio', 'stats-packets', 'neighbors', 'help'];
+  const quickCmds = ['ver', 'get radio', 'stats-radio', 'stats-packets', 'neighbors', 'contacts', 'channels', 'help'];
   const cliQuickActions = actions(
     ...quickCmds.map((cmd) => button(cmd, () => {
       cliInput.value = cmd;
@@ -1589,27 +3070,145 @@ async function loraPage() {
     cliOutput
   );
 
-  main.replaceChildren(h('h1', { text: 'LoRa' }), nowCard, chatCard, nodesCard, radioCard, cliCard);
+  const subtabDefs = [
+    { id: 'all', label: 'All sections' },
+    { id: 'chat', label: 'Chat' },
+    { id: 'map', label: 'Map & Nodes' },
+    { id: 'settings', label: 'Settings & Channels' },
+    { id: 'cli', label: 'CLI' },
+  ];
+  const panelMap = { chat: chatCard, map: nodesCard, settings: radioCard, cli: cliCard };
+  const subtabButtons = {};
+  const setLoraTab = (id, moveFocus = false) => {
+    loraActiveTab = id;
+    for (const def of subtabDefs) {
+      const btn = subtabButtons[def.id];
+      const active = def.id === id;
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+      btn.setAttribute('tabindex', active ? '0' : '-1');
+      if (active && moveFocus && typeof btn.focus === 'function') btn.focus();
+    }
+    for (const [pid, panel] of Object.entries(panelMap)) {
+      const visible = id === 'all' || id === pid;
+      if (visible) {
+        if (typeof panel.removeAttribute === 'function') panel.removeAttribute('hidden');
+        else if (panel.attrs) delete panel.attrs.hidden;
+        panel.hidden = false;
+      } else {
+        panel.setAttribute('hidden', 'until-found');
+        panel.hidden = true;
+      }
+    }
+  };
+  const subtabBar = h('div', { class: 'lora-subtabs', role: 'tablist', 'aria-label': 'LoRa sections' });
+  subtabBar.setAttribute('role', 'tablist');
+  subtabBar.setAttribute('aria-label', 'LoRa sections');
+  subtabDefs.forEach((def, idx) => {
+    const btn = h('button', {
+      type: 'button',
+      id: `lora-subtab-${def.id}`,
+      class: 'lora-subtab',
+      role: 'tab',
+      'aria-selected': 'false',
+      tabindex: '-1',
+      text: def.label,
+    });
+    btn.setAttribute('role', 'tab');
+    btn.setAttribute('id', `lora-subtab-${def.id}`);
+    btn.addEventListener('click', () => setLoraTab(def.id));
+    btn.addEventListener('keydown', (ev) => {
+      if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+        ev.preventDefault();
+        const nextIdx = ev.key === 'ArrowRight'
+          ? (idx + 1) % subtabDefs.length
+          : (idx - 1 + subtabDefs.length) % subtabDefs.length;
+        setLoraTab(subtabDefs[nextIdx].id, true);
+      }
+    });
+    subtabButtons[def.id] = btn;
+    subtabBar.append(btn);
+  });
+  for (const [pid, panel] of Object.entries(panelMap)) {
+    panel.setAttribute('role', 'tabpanel');
+    panel.setAttribute('aria-labelledby', `lora-subtab-${pid}`);
+    panel.addEventListener('beforematch', () => setLoraTab(pid));
+  }
+  setLoraTab(loraActiveTab);
+
+  showChat(st);
+  updateComposerMeta();
+  main.replaceChildren(h('h1', { text: 'LoRa' }), subtabBar, nowCard, chatCard, nodesCard, radioCard, cliCard);
 
   let pollBusy = false;
   const scheduleLoraPoll = () => {
+    if (loraPollTimer !== null) {
+      clearTimeout(loraPollTimer);
+      loraPollTimer = null;
+    }
     if (pollBusy) return;
     pollBusy = true;
     loraPollTimer = setTimeout(async () => {
+      loraPollTimer = null;
       if (location.hash !== '#lora') {
         pollBusy = false;
         return;
       }
+      let stopPoll = false;
       try {
-        const fresh = await api('GET', '/api/status');
-        st = fresh;
-        showNow(fresh);
-        showChat(fresh);
-        showNodes(fresh);
-      } catch (_) {}
+        let fresh;
+        const curLora = (st && st.lora) || {};
+        const hasSeq = curLora.msg_seq !== undefined && curLora.advert_seq !== undefined && Array.isArray(curLora.contacts);
+        const chatUrl = hasSeq
+          ? `/api/lora/chat?msg_seq=${curLora.msg_seq}&adv_seq=${curLora.advert_seq}&contacts=${curLora.contacts.length}`
+          : '/api/lora/chat';
+        try {
+          fresh = await api('GET', chatUrl);
+        } catch (e) {
+          if (e.status === 404) fresh = await api('GET', '/api/status');
+          else throw e;
+        }
+        if (fresh && fresh.unchanged && fresh.lora) {
+          st = { ...st, lora: { ...(st.lora || {}), ...fresh.lora } };
+          showNow(st);
+        } else {
+          const merged = fresh && fresh.lora
+            ? { ...st, ...fresh, lora: { ...(st.lora || {}), ...fresh.lora } }
+            : { ...st, lora: { ...(st.lora || {}), ...(fresh || {}) } };
+          const newMsgs = (merged.lora && merged.lora.messages) || [];
+          let gotNewIncoming = false;
+          for (const m of newMsgs) {
+            if (m.id && m.id > loraSeenMaxId) {
+              loraSeenMaxId = m.id;
+              if (!m.outgoing) {
+                if (m.direct && m.peer_pub) {
+                  const pKey = String(m.peer_pub).toLowerCase();
+                  if (!loraDmTargets.some((t) => t.pub_key.toLowerCase() === pKey)) {
+                    loraDmTargets.push({ pub_key: pKey, name: m.sender || pKey.slice(0, 8) });
+                  }
+                }
+                const key = loraMsgKey(m);
+                if (loraActiveTarget !== key && loraActiveTarget !== 'all') {
+                  loraUnreadByKey[key] = (loraUnreadByKey[key] || 0) + 1;
+                }
+                gotNewIncoming = true;
+              }
+            }
+          }
+          if (gotNewIncoming) {
+            updateTitleUnread();
+            if (loraSoundEnabled) loraPlayBeep();
+          }
+          st = merged;
+          showNow(merged);
+          showChat(merged);
+          showNodes(merged);
+        }
+      } catch (e) {
+        if (e && e.relogin) stopPoll = true;
+      }
       pollBusy = false;
-      if (location.hash === '#lora') scheduleLoraPoll();
-    }, 5000);
+      if (!stopPoll && location.hash === '#lora') scheduleLoraPoll();
+    }, 2500);
   };
   scheduleLoraPoll();
 }

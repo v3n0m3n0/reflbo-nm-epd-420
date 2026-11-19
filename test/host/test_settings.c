@@ -1101,6 +1101,38 @@ static void test_the_lora_ble_pin_validation(void)
     TEST_ASSERT_EQUAL_UINT32(482915, s_out.lora.ble_pin);
 }
 
+static void test_the_weather_radar_source_parses_round_trips_and_resets(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(SETTINGS_WX_RADAR_AUTO, s_defaults.wx_source);
+
+    char out[4096];
+    TEST_ASSERT_TRUE(settings_from_json("{\"schema\":1,\"radar\":{\"weather\":{\"source\":\"rainviewer\"}}}", &s_defaults, &s_out, s_err, sizeof(s_err)));
+    TEST_ASSERT_EQUAL_UINT8(SETTINGS_WX_RADAR_RAINVIEWER, s_out.wx_source);
+    TEST_ASSERT_GREATER_THAN_UINT32(0, (uint32_t)settings_to_json(&s_out, NULL, out, sizeof(out)));
+    TEST_ASSERT_NOT_NULL(strstr(out, "\"rainviewer\""));
+
+    TEST_ASSERT_TRUE(settings_from_json("{\"schema\":1,\"radar\":{\"weather\":{\"source\":\"dwd\"}}}", &s_defaults, &s_out, s_err, sizeof(s_err)));
+    TEST_ASSERT_EQUAL_UINT8(SETTINGS_WX_RADAR_DWD, s_out.wx_source);
+    TEST_ASSERT_GREATER_THAN_UINT32(0, (uint32_t)settings_to_json(&s_out, NULL, out, sizeof(out)));
+    TEST_ASSERT_NOT_NULL(strstr(out, "\"dwd\""));
+
+    TEST_ASSERT_TRUE(settings_from_json("{\"schema\":1,\"radar\":{\"weather\":{\"source\":\"auto\"}}}", &s_defaults, &s_out, s_err, sizeof(s_err)));
+    TEST_ASSERT_EQUAL_UINT8(SETTINGS_WX_RADAR_AUTO, s_out.wx_source);
+    TEST_ASSERT_GREATER_THAN_UINT32(0, (uint32_t)settings_to_json(&s_out, NULL, out, sizeof(out)));
+    const char *wx = strstr(out, "\"weather\"");
+    const char *fl = strstr(out, "\"flights\"");
+    const char *src = wx ? strstr(wx, "\"source\"") : NULL;
+    TEST_ASSERT_NOT_NULL(wx);
+    TEST_ASSERT_NOT_NULL(fl);
+    TEST_ASSERT_TRUE(src == NULL || src > fl);
+
+    TEST_ASSERT_FALSE(settings_from_json("{\"schema\":1,\"radar\":{\"weather\":{\"source\":\"invalid\"}}}", &s_defaults, &s_out, s_err, sizeof(s_err)));
+    TEST_ASSERT_TRUE(s_err[0] != '\0');
+
+    TEST_ASSERT_TRUE(settings_from_json("{\"schema\":1,\"radar\":{\"weather\":{\"source\":null}}}", &s_defaults, &s_out, s_err, sizeof(s_err)));
+    TEST_ASSERT_EQUAL_UINT8(SETTINGS_WX_RADAR_AUTO, s_out.wx_source);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1152,5 +1184,6 @@ int main(void)
     RUN_TEST(test_the_pc_settings_parse_clamp_and_round_trip);
     RUN_TEST(test_an_older_files_steps_run_the_pc_step);
     RUN_TEST(test_the_largest_settings_fit_the_file_buffer);
+    RUN_TEST(test_the_weather_radar_source_parses_round_trips_and_resets);
     return UNITY_END();
 }

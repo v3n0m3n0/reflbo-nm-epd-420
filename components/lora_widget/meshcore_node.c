@@ -54,6 +54,7 @@ void meshcore_node_init(meshcore_node_state_t *st)
 {
     if (!st) return;
     memset(st, 0, sizeof(*st));
+    st->next_msg_id = 1U;
 }
 
 void meshcore_node_reset(meshcore_node_state_t *st, lora_stats_t *stats)
@@ -79,6 +80,7 @@ void meshcore_node_reset(meshcore_node_state_t *st, lora_stats_t *stats)
     }
     if (st) {
         memset(st, 0, sizeof(*st));
+        st->next_msg_id = 1U;
     }
 }
 
@@ -213,15 +215,87 @@ bool meshcore_node_is_dup_message(const meshcore_node_state_t *st, const lora_st
 void meshcore_node_append_message(meshcore_node_state_t *st, lora_stats_t *stats, const meshcore_msg_t *msg)
 {
     if (!st || !stats || !msg) return;
+    meshcore_msg_t entry = *msg;
+
+    if (entry.id == 0) {
+        if (st->next_msg_id == 0) st->next_msg_id = 1U;
+        entry.id = st->next_msg_id++;
+    } else if (entry.id >= st->next_msg_id) {
+        st->next_msg_id = entry.id + 1U;
+    }
+
+    if (entry.body[0] == '\0' && entry.text[0] != '\0') {
+        const char *src = entry.text;
+        if (strncmp(src, "[#", 2) == 0) {
+            const char *bracket = strstr(src, "] ");
+            if (bracket) {
+                src = bracket + 2;
+            }
+        }
+        const char *sep = strstr(src, ": ");
+        if (sep) {
+            if (entry.sender[0] == '\0') {
+                size_t slen = (size_t)(sep - src);
+                if (slen >= sizeof(entry.sender)) {
+                    slen = sizeof(entry.sender) - 1;
+                }
+                memcpy(entry.sender, src, slen);
+                entry.sender[slen] = '\0';
+            }
+            snprintf(entry.body, sizeof(entry.body), "%s", sep + 2);
+        } else {
+            snprintf(entry.body, sizeof(entry.body), "%s", entry.text);
+        }
+    }
+
     stats->msg_seq++;
     if (stats->msg_count < MESHCORE_MAX_MESSAGES) {
-        st->messages[stats->msg_count++] = *msg;
+        st->messages[stats->msg_count++] = entry;
     } else {
         for (uint8_t i = 0; i < MESHCORE_MAX_MESSAGES - 1; i++) {
             st->messages[i] = st->messages[i + 1];
         }
-        st->messages[MESHCORE_MAX_MESSAGES - 1] = *msg;
+        st->messages[MESHCORE_MAX_MESSAGES - 1] = entry;
     }
+}
+
+bool meshcore_node_confirm_msg_ack(meshcore_node_state_t *st, lora_stats_t *stats,
+                                 const uint8_t ack_tag[4], uint16_t rtt_ms)
+{
+    if (!st || !stats || !ack_tag || stats->msg_count == 0) return false;
+    int start = (stats->msg_count < MESHCORE_MAX_MESSAGES)
+                    ? (int)stats->msg_count - 1
+                    : MESHCORE_MAX_MESSAGES - 1;
+    for (int i = start; i >= 0; i--) {
+        meshcore_msg_t *m = &st->messages[i];
+        if (m->is_direct && m->outgoing && m->ack_status == MESHCORE_ACK_PENDING &&
+            memcmp(m->ack_tag, ack_tag, 4) == 0) {
+            m->ack_status = MESHCORE_ACK_DELIVERED;
+            m->ack_rtt_ms = rtt_ms;
+            stats->msg_seq++;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool meshcore_node_timeout_msg_ack(meshcore_node_state_t *st, lora_stats_t *stats,
+                                 const uint8_t ack_tag[4])
+{
+    if (!st || !stats || !ack_tag || stats->msg_count == 0) return false;
+    int start = (stats->msg_count < MESHCORE_MAX_MESSAGES)
+                    ? (int)stats->msg_count - 1
+                    : MESHCORE_MAX_MESSAGES - 1;
+    for (int i = start; i >= 0; i--) {
+        meshcore_msg_t *m = &st->messages[i];
+        if (m->is_direct && m->outgoing && m->ack_status == MESHCORE_ACK_PENDING &&
+            memcmp(m->ack_tag, ack_tag, 4) == 0) {
+            m->ack_status = MESHCORE_ACK_TIMEOUT;
+            stats->msg_seq++;
+            return true;
+        }
+    }
+    return false;
 }
 
 size_t meshcore_node_build_discover_resp(const meshcore_packet_t *req_pkt, int8_t snr_q4,
@@ -269,7 +343,7 @@ size_t meshcore_node_build_ack(const uint8_t *plain_after_hdr, size_t plain_len,
     meshcore_packet_t ack_pkt;
     memset(&ack_pkt, 0, sizeof(ack_pkt));
     bool use_direct = false;
-    if (peer_out_path && peer_out_path_len > 0) {
+    if (peer_out_path && peer_out_path_len != -1) {
         uint8_t pl = (uint8_t)peer_out_path_len;
         uint8_t hash_size = (uint8_t)((pl >> 6) + 1U);
         uint8_t hop_cnt = (uint8_t)(pl & 0x3FU);
@@ -364,7 +438,7 @@ size_t meshcore_node_build_direct_txt(const uint8_t self_pub_key[32],
     pkt.payload_len = 2U + (size_t)enc_len;
 
     bool use_direct = false;
-    if (peer_out_path && peer_out_path_len > 0) {
+    if (peer_out_path && peer_out_path_len != -1) {
         uint8_t pl = (uint8_t)peer_out_path_len;
         uint8_t hash_size = (uint8_t)((pl >> 6) + 1U);
         uint8_t hop_cnt = (uint8_t)(pl & 0x3FU);
@@ -387,35 +461,86 @@ size_t meshcore_node_build_direct_txt(const uint8_t self_pub_key[32],
 void meshcore_node_expect_ack(meshcore_node_state_t *st, const uint8_t ack_tag[4], uint32_t sent_ms)
 {
     if (!st || !ack_tag) return;
-    st->pending_ack.active = true;
-    memcpy(st->pending_ack.ack_tag, ack_tag, 4);
-    st->pending_ack.sent_ms = sent_ms;
+    /* Update existing slot if same ack_tag is already tracked */
+    for (size_t i = 0; i < MESHCORE_MAX_PENDING_ACKS; i++) {
+        if (st->pending_acks[i].active && memcmp(st->pending_acks[i].ack_tag, ack_tag, 4) == 0) {
+            st->pending_acks[i].sent_ms = sent_ms;
+            return;
+        }
+    }
+    /* Find first inactive slot */
+    for (size_t i = 0; i < MESHCORE_MAX_PENDING_ACKS; i++) {
+        if (!st->pending_acks[i].active) {
+            st->pending_acks[i].active = true;
+            memcpy(st->pending_acks[i].ack_tag, ack_tag, 4);
+            st->pending_acks[i].sent_ms = sent_ms;
+            return;
+        }
+    }
+    /* All slots active: overwrite round-robin slot */
+    size_t idx = st->pending_ack_next % MESHCORE_MAX_PENDING_ACKS;
+    st->pending_ack_next = (idx + 1U) % MESHCORE_MAX_PENDING_ACKS;
+    st->pending_acks[idx].active = true;
+    memcpy(st->pending_acks[idx].ack_tag, ack_tag, 4);
+    st->pending_acks[idx].sent_ms = sent_ms;
+}
+
+void meshcore_node_cancel_ack(meshcore_node_state_t *st, const uint8_t ack_tag[4])
+{
+    if (!st || !ack_tag) return;
+    for (size_t i = 0; i < MESHCORE_MAX_PENDING_ACKS; i++) {
+        if (st->pending_acks[i].active && memcmp(st->pending_acks[i].ack_tag, ack_tag, 4) == 0) {
+            st->pending_acks[i].active = false;
+        }
+    }
 }
 
 bool meshcore_node_check_ack(meshcore_node_state_t *st, const meshcore_packet_t *pkt,
                              uint32_t now_ms, uint8_t out_ack_tag[4], uint32_t *out_rtt_ms)
 {
-    if (!st || !pkt || !st->pending_ack.active) {
+    if (!st || !pkt) {
         return false;
     }
     if (meshcore_packet_get_payload_type(pkt) != MESHCORE_PAYLOAD_ACK || pkt->payload_len < 4U) {
         return false;
     }
-    if (memcmp(pkt->payload, st->pending_ack.ack_tag, 4) != 0) {
-        return false;
+    for (size_t i = 0; i < MESHCORE_MAX_PENDING_ACKS; i++) {
+        if (st->pending_acks[i].active && memcmp(pkt->payload, st->pending_acks[i].ack_tag, 4) == 0) {
+            uint32_t rtt = now_ms - st->pending_acks[i].sent_ms;
+            if (rtt == 0U) {
+                rtt = 1U;
+            }
+            if (out_ack_tag) {
+                memcpy(out_ack_tag, st->pending_acks[i].ack_tag, 4);
+            }
+            if (out_rtt_ms) {
+                *out_rtt_ms = rtt;
+            }
+            st->pending_acks[i].active = false;
+            return true;
+        }
     }
-    uint32_t rtt = now_ms - st->pending_ack.sent_ms;
-    if (rtt == 0U) {
-        rtt = 1U;
+    return false;
+}
+
+size_t meshcore_node_expire_acks(meshcore_node_state_t *st, lora_stats_t *stats,
+                                 uint32_t now_ms, uint32_t timeout_ms)
+{
+    if (!st) return 0U;
+    size_t expired = 0U;
+    for (size_t i = 0; i < MESHCORE_MAX_PENDING_ACKS; i++) {
+        if (st->pending_acks[i].active &&
+            (uint32_t)(now_ms - st->pending_acks[i].sent_ms) >= timeout_ms) {
+            uint8_t tag[4];
+            memcpy(tag, st->pending_acks[i].ack_tag, 4);
+            st->pending_acks[i].active = false;
+            if (stats) {
+                (void)meshcore_node_timeout_msg_ack(st, stats, tag);
+            }
+            expired++;
+        }
     }
-    if (out_ack_tag) {
-        memcpy(out_ack_tag, st->pending_ack.ack_tag, 4);
-    }
-    if (out_rtt_ms) {
-        *out_rtt_ms = rtt;
-    }
-    st->pending_ack.active = false;
-    return true;
+    return expired;
 }
 
 bool meshcore_node_prepare_client_repeat(const meshcore_packet_t *rx_pkt,
@@ -608,7 +733,10 @@ void meshcore_node_exec_cli(meshcore_node_state_t *st, lora_config_t *current_cf
         } else if (strcasecmp(p, "channel") == 0) {
             snprintf(reply, reply_sz, "%s\n", current_cfg->channel_name);
         } else if (strcasecmp(p, "psk") == 0) {
-            snprintf(reply, reply_sz, "%s\n", current_cfg->channel_psk);
+            bool is_pub = (current_cfg->channel_psk[0] == '\0' ||
+                           strcmp(current_cfg->channel_psk, LORA_DEFAULT_PUBLIC_PSK) == 0);
+            snprintf(reply, reply_sz, "%s (hash 0x%02X)\n",
+                     is_pub ? "Public" : "<set>", stats->channel_hash);
         } else if (strcasecmp(p, "loc") == 0) {
             snprintf(reply, reply_sz, "%s\n", current_cfg->share_loc ? "on" : "off");
         } else if (strcasecmp(p, "public.key") == 0) {
@@ -812,7 +940,10 @@ void meshcore_node_exec_cli(meshcore_node_state_t *st, lora_config_t *current_cf
                 }
                 if (cfg_changed) *cfg_changed = true;
             }
-            snprintf(reply, reply_sz, "%s\n", current_cfg->channel_psk);
+            bool is_pub = (current_cfg->channel_psk[0] == '\0' ||
+                           strcmp(current_cfg->channel_psk, LORA_DEFAULT_PUBLIC_PSK) == 0);
+            snprintf(reply, reply_sz, "%s (hash 0x%02X)\n",
+                     is_pub ? "Public" : "<set>", stats->channel_hash);
         } else if (strcasecmp(sparam, "loc") == 0) {
             if (sval[0] != '\0' && cfg_inout) {
                 cfg_inout->share_loc = parse_on_off(sval, cfg_inout->share_loc);
@@ -880,6 +1011,8 @@ void meshcore_node_exec_cli(meshcore_node_state_t *st, lora_config_t *current_cf
                  "  nodes / peers        - List heard node adverts\n"
                  "  msg / send <text>    - Send group channel text message\n"
                  "  messages             - Show recent chat messages\n"
+                 "  contacts             - List saved contacts\n"
+                 "  channels             - List configured channels\n"
                  "  reset-identity       - Generate new random Ed25519 keypair and default PIN\n");
     } else if (strcasecmp(op, "adv") == 0 || strcasecmp(op, "advert") == 0) {
         bool ok = (env && env->send_advert) ? env->send_advert(env->user_data, true) : false;
@@ -934,8 +1067,10 @@ void meshcore_node_exec_cli(meshcore_node_state_t *st, lora_config_t *current_cf
             }
             if (cfg_changed) *cfg_changed = true;
         }
+        bool is_pub = (current_cfg->channel_psk[0] == '\0' ||
+                       strcmp(current_cfg->channel_psk, LORA_DEFAULT_PUBLIC_PSK) == 0);
         snprintf(reply, reply_sz, "Channel PSK: %s (hash 0x%02X)\n",
-                 current_cfg->channel_psk, stats->channel_hash);
+                 is_pub ? "Public" : "<set>", stats->channel_hash);
     } else if (strcasecmp(op, "repeat") == 0) {
         if (arg[0] != '\0' && cfg_inout) {
             cfg_inout->client_repeat = parse_on_off(arg, cfg_inout->client_repeat);
@@ -1013,19 +1148,25 @@ void meshcore_node_exec_cli(meshcore_node_state_t *st, lora_config_t *current_cf
         snprintf(reply, reply_sz, "Bandwidth: %lu Hz (%u kHz)\n",
                  (unsigned long)cfg_effective_bw_hz(current_cfg), current_cfg->bw_khz);
     } else if (strcasecmp(op, "stats") == 0 || strcasecmp(op, "status") == 0) {
+        char nf_buf[24];
+        if (stats->noise_floor_dbm == 0) {
+            snprintf(nf_buf, sizeof(nf_buf), "--");
+        } else {
+            snprintf(nf_buf, sizeof(nf_buf), "%d dBm", stats->noise_floor_dbm);
+        }
         snprintf(reply, reply_sz,
                  "LoRa Statistics:\n"
                  "  Enabled: %s, Init: %s\n"
                  "  RX Packets: %lu (Flood: %lu, Direct: %lu, Errors: %lu)\n"
                  "  TX Packets: %lu (Flood: %lu, Direct: %lu)\n"
-                 "  Signal: Last RSSI %d dBm, SNR %.2f dB, Noise %d dBm\n"
+                 "  Signal: Last RSSI %d dBm, SNR %.2f dB, Noise %s\n"
                  "  Airtime: TX %lu ms, RX %lu ms\n",
                  stats->enabled ? "YES" : "NO", stats->initialized ? "YES" : "NO",
                  (unsigned long)stats->packet_count, (unsigned long)stats->recv_flood,
                  (unsigned long)stats->recv_direct, (unsigned long)stats->recv_errors,
                  (unsigned long)stats->packets_sent, (unsigned long)stats->sent_flood,
                  (unsigned long)stats->sent_direct,
-                 stats->last_rssi_dbm, (double)stats->last_snr_q4 / 4.0, stats->noise_floor_dbm,
+                 stats->last_rssi_dbm, (double)stats->last_snr_q4 / 4.0, nf_buf,
                  (unsigned long)stats->tx_air_ms, (unsigned long)stats->rx_air_ms);
     } else if (strcasecmp(op, "nodes") == 0 || strcasecmp(op, "adverts") == 0 || strcasecmp(op, "peers") == 0) {
         size_t off = 0;
@@ -1047,29 +1188,150 @@ void meshcore_node_exec_cli(meshcore_node_state_t *st, lora_config_t *current_cf
         if (hdr > 0 && (size_t)hdr < reply_sz) off = (size_t)hdr;
         if (st) {
             for (uint8_t i = 0; i < stats->neighbor_count && i < MESHCORE_MAX_NEIGHBORS && off + 64 < reply_sz; i++) {
-                int n = snprintf(reply + off, reply_sz - off,
+                const char *nb_name = st->neighbors[i].name;
+                if (nb_name[0] == '\0') {
+                    for (uint8_t ai = 0; ai < stats->advert_count && ai < MESHCORE_MAX_ADVERTS; ai++) {
+                        if (memcmp(st->adverts[ai].pub_key, st->neighbors[i].pub_key_prefix, 8) == 0 &&
+                            st->adverts[ai].name[0] != '\0') {
+                            nb_name = st->adverts[ai].name;
+                            break;
+                        }
+                    }
+                }
+                int n;
+                if (nb_name[0] != '\0') {
+                    n = snprintf(reply + off, reply_sz - off,
+                                 "  [%u] %s (prefix %02x%02x%02x%02x), RSSI %d dBm, SNR in %.2f dB\n",
+                                 (unsigned)(i + 1), nb_name,
+                                 st->neighbors[i].pub_key_prefix[0], st->neighbors[i].pub_key_prefix[1],
+                                 st->neighbors[i].pub_key_prefix[2], st->neighbors[i].pub_key_prefix[3],
+                                 st->neighbors[i].rssi_dbm, (double)st->neighbors[i].snr_in_q4 / 4.0);
+                } else {
+                    n = snprintf(reply + off, reply_sz - off,
                                  "  [%u] prefix %02x%02x%02x%02x, RSSI %d dBm, SNR in %.2f dB\n",
                                  (unsigned)(i + 1),
                                  st->neighbors[i].pub_key_prefix[0], st->neighbors[i].pub_key_prefix[1],
                                  st->neighbors[i].pub_key_prefix[2], st->neighbors[i].pub_key_prefix[3],
                                  st->neighbors[i].rssi_dbm, (double)st->neighbors[i].snr_in_q4 / 4.0);
+                }
                 if (n <= 0 || (size_t)n >= reply_sz - off) break;
                 off += (size_t)n;
             }
         }
     } else if (strcasecmp(op, "messages") == 0) {
-        size_t off = 0;
-        int hdr = snprintf(reply, reply_sz, "Recent Messages (%u):\n", stats->msg_count);
-        if (hdr > 0 && (size_t)hdr < reply_sz) off = (size_t)hdr;
-        if (st) {
-            for (uint8_t i = 0; i < stats->msg_count && i < MESHCORE_MAX_MESSAGES && off + 128 < reply_sz; i++) {
-                int n = snprintf(reply + off, reply_sz - off,
-                                 "  %s [%s]\n",
-                                 st->messages[i].text,
-                                 st->messages[i].outgoing ? "TX" : "RX");
-                if (n <= 0 || (size_t)n >= reply_sz - off) break;
-                off += (size_t)n;
+        size_t total = (stats->msg_count < MESHCORE_MAX_MESSAGES) ? stats->msg_count : MESHCORE_MAX_MESSAGES;
+        size_t req_limit = 20U;
+        if (arg[0] != '\0') {
+            if (strcasecmp(arg, "all") == 0) {
+                req_limit = MESHCORE_MAX_MESSAGES;
+            } else {
+                unsigned long parsed_n = strtoul(arg, NULL, 10);
+                if (parsed_n > 0UL) {
+                    req_limit = (parsed_n > MESHCORE_MAX_MESSAGES) ? MESHCORE_MAX_MESSAGES : (size_t)parsed_n;
+                }
             }
+        }
+        size_t start_idx = (total > req_limit) ? (total - req_limit) : 0U;
+        size_t off = 0;
+        int hdr = snprintf(reply, reply_sz, "Recent Messages (%u):\n", (unsigned)total);
+        if (hdr > 0 && (size_t)hdr < reply_sz) off = (size_t)hdr;
+        if (st && total > 0U) {
+            if (start_idx > 0U && off + 36U < reply_sz) {
+                int om = snprintf(reply + off, reply_sz - off, "  ... (%u older omitted)\n", (unsigned)start_idx);
+                if (om > 0 && (size_t)om < reply_sz - off) off += (size_t)om;
+            }
+            for (size_t i = start_idx; i < total; i++) {
+                const meshcore_msg_t *m = &st->messages[i];
+                char route_buf[LORA_CHANNEL_NAME_LEN];
+                bool omit_route = false;
+                if (m->is_direct) {
+                    snprintf(route_buf, sizeof(route_buf), "DM");
+                } else {
+                    const char *ch_label = NULL;
+                    if (env && env->channel_names && m->channel_idx < env->channel_names_count &&
+                        env->channel_names[m->channel_idx][0] != '\0') {
+                        ch_label = env->channel_names[m->channel_idx];
+                    } else if (m->channel_idx == 0) {
+                        ch_label = (current_cfg && current_cfg->channel_name[0] != '\0')
+                                       ? current_cfg->channel_name
+                                       : "Public";
+                    }
+                    if (ch_label != NULL) {
+                        snprintf(route_buf, sizeof(route_buf), "%s", ch_label);
+                    } else {
+                        snprintf(route_buf, sizeof(route_buf), "#%u", (unsigned)m->channel_idx);
+                    }
+                }
+                char ack_buf[24] = "";
+                if (m->is_direct && m->outgoing) {
+                    if (m->ack_status == MESHCORE_ACK_PENDING) {
+                        snprintf(ack_buf, sizeof(ack_buf), " [WAIT]");
+                    } else if (m->ack_status == MESHCORE_ACK_DELIVERED) {
+                        snprintf(ack_buf, sizeof(ack_buf), " [ACK %ums]", (unsigned)m->ack_rtt_ms);
+                    } else if (m->ack_status == MESHCORE_ACK_TIMEOUT) {
+                        snprintf(ack_buf, sizeof(ack_buf), " [NOACK]");
+                    }
+                }
+                char content[220];
+                if (m->body[0] != '\0') {
+                    if (m->sender[0] != '\0') {
+                        snprintf(content, sizeof(content),
+                                 (m->is_direct && m->outgoing) ? "-> %s: %s" : "%s: %s",
+                                 m->sender, m->body);
+                    } else {
+                        snprintf(content, sizeof(content), "%s", m->body);
+                    }
+                } else {
+                    const char *raw_txt = m->text;
+                    if (strncmp(raw_txt, "[#", 2) == 0) {
+                        const char *br = strstr(raw_txt, "] ");
+                        if (br) raw_txt = br + 2;
+                    }
+                    snprintf(content, sizeof(content), "%s", raw_txt);
+                }
+                char line[280];
+                int ln;
+                if (omit_route) {
+                    ln = snprintf(line, sizeof(line), "  #%lu %s [%s]%s\n",
+                                  (unsigned long)m->id, content,
+                                  m->outgoing ? "TX" : "RX", ack_buf);
+                } else {
+                    ln = snprintf(line, sizeof(line), "  #%lu [%s] %s [%s]%s\n",
+                                  (unsigned long)m->id, route_buf, content,
+                                  m->outgoing ? "TX" : "RX", ack_buf);
+                }
+                if (ln <= 0) continue;
+                size_t line_len = (size_t)ln < sizeof(line) ? (size_t)ln : sizeof(line) - 1U;
+                size_t reserve = (total - i - 1U > 0U) ? 28U : 1U;
+                if (off + line_len + reserve > reply_sz) {
+                    if (off + 28U <= reply_sz) {
+                        int fn = snprintf(reply + off, reply_sz - off, "  ... (%u more)\n", (unsigned)(total - i));
+                        if (fn > 0) off += (size_t)fn;
+                    } else if (reply_sz > off + 1U) {
+                        size_t fit = reply_sz - off - 1U;
+                        while (fit > 0U && (((unsigned char)line[fit] & 0xC0U) == 0x80U)) fit--;
+                        memcpy(reply + off, line, fit);
+                        off += fit;
+                        reply[off] = '\0';
+                    }
+                    break;
+                }
+                memcpy(reply + off, line, line_len);
+                off += line_len;
+                reply[off] = '\0';
+            }
+        }
+    } else if (strcasecmp(op, "contacts") == 0) {
+        if (env && env->list_contacts) {
+            env->list_contacts(env->user_data, reply, reply_sz);
+        } else {
+            snprintf(reply, reply_sz, "Contacts unavailable.\n");
+        }
+    } else if (strcasecmp(op, "channels") == 0) {
+        if (env && env->list_channels) {
+            env->list_channels(env->user_data, reply, reply_sz);
+        } else {
+            snprintf(reply, reply_sz, "Channels unavailable.\n");
         }
     } else {
         snprintf(reply, reply_sz, "Unknown command '%s'. Try 'help'.\n", op);

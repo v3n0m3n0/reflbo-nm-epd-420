@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "gfx_fonts.h"
 #include "lang.h"
@@ -30,7 +31,7 @@ static void format_snr(int8_t snr_q4, char *out, size_t size)
     snprintf(out, size, "%c%d.%d dB", (snr_q4 < 0) ? '-' : '+', whole, frac);
 }
 
-static void format_lora_msg(const ui_lora_msg_t *msg, char *out, size_t out_sz)
+static void format_lora_msg(const ui_lora_t *lora, const ui_lora_msg_t *msg, char *out, size_t out_sz)
 {
     char time_str[16];
     if (msg->timestamp >= 1577836800u) {
@@ -42,24 +43,84 @@ static void format_lora_msg(const ui_lora_msg_t *msg, char *out, size_t out_sz)
         snprintf(time_str, sizeof(time_str), "%s", msg->outgoing ? "[TX]" : "[RX]");
     }
 
-    if (msg->outgoing) {
-        if (msg->sender[0] != '\0') {
-            snprintf(out, out_sz, "%s > %s: %s",
-                     time_str, msg->sender, msg->text);
+    const char *ch_label = NULL;
+    char ch_fallback[8];
+    if (!msg->is_direct) {
+        if (msg->channel_name[0] != '\0') {
+            ch_label = msg->channel_name;
+        } else if (msg->channel_idx == 0) {
+            ch_label = (lora && lora->channel_name[0]) ? lora->channel_name : "Public";
         } else {
-            snprintf(out, out_sz, "%s > %s",
-                     time_str, msg->text);
-        }
-    } else {
-        const char *dir = msg->is_direct ? "< [DM]" : "<";
-        if (msg->sender[0] != '\0') {
-            snprintf(out, out_sz, "%s %s %s: %s",
-                     time_str, dir, msg->sender, msg->text);
-        } else {
-            snprintf(out, out_sz, "%s %s %s",
-                     time_str, dir, msg->text);
+            snprintf(ch_fallback, sizeof(ch_fallback), "#%u", (unsigned)msg->channel_idx);
+            ch_label = ch_fallback;
         }
     }
+
+    if (msg->outgoing) {
+        if (msg->is_direct) {
+            const char *ack_str = "";
+            if (msg->ack_status == 1) {
+                ack_str = " [...]";
+            } else if (msg->ack_status == 2) {
+                ack_str = " [OK]";
+            } else if (msg->ack_status == 3) {
+                ack_str = " [!]";
+            }
+            if (msg->sender[0] != '\0') {
+                snprintf(out, out_sz, "%s > @%s: %s%s",
+                         time_str, msg->sender, msg->text, ack_str);
+            } else {
+                snprintf(out, out_sz, "%s > [DM] %s%s",
+                         time_str, msg->text, ack_str);
+            }
+        } else {
+            if (msg->sender[0] != '\0') {
+                snprintf(out, out_sz, "%s > [%s] %s: %s",
+                         time_str, ch_label, msg->sender, msg->text);
+            } else {
+                snprintf(out, out_sz, "%s > [%s] %s",
+                         time_str, ch_label, msg->text);
+            }
+        }
+    } else {
+        if (msg->is_direct) {
+            if (msg->sender[0] != '\0') {
+                snprintf(out, out_sz, "%s < [DM] %s: %s",
+                         time_str, msg->sender, msg->text);
+            } else {
+                snprintf(out, out_sz, "%s < [DM] %s",
+                         time_str, msg->text);
+            }
+        } else {
+            if (msg->sender[0] != '\0') {
+                snprintf(out, out_sz, "%s < [%s] %s: %s",
+                         time_str, ch_label, msg->sender, msg->text);
+            } else {
+                snprintf(out, out_sz, "%s < [%s] %s",
+                         time_str, ch_label, msg->text);
+            }
+        }
+    }
+}
+
+static void flatten_newlines(const char *src, char *dst, size_t dst_sz)
+{
+    if (dst_sz == 0) return;
+    size_t di = 0;
+    bool prev_space = false;
+    for (size_t si = 0; src[si] != '\0' && di + 1 < dst_sz; si++) {
+        char c = src[si];
+        if (c == '\r' || c == '\n') {
+            if (!prev_space && di > 0) {
+                dst[di++] = ' ';
+                prev_space = true;
+            }
+        } else {
+            dst[di++] = c;
+            prev_space = (c == ' ');
+        }
+    }
+    dst[di] = '\0';
 }
 
 static int wrap_lora_msg_lines(const gfx_font_t *font, const char *text, int16_t max_w,
@@ -93,15 +154,17 @@ static int wrap_lora_msg_lines(const gfx_font_t *font, const char *text, int16_t
         }
 
         if (line_idx == LORA_MSG_MAX_LINES - 1) {
-            if (gfx_text_width(font, text) <= max_w) {
-                snprintf(lines[line_idx], LORA_MSG_LINE_BUF_SZ, "%.*s", LORA_MSG_LINE_BUF_SZ - 1, text);
+            char flat[LORA_MSG_LINE_BUF_SZ * 2];
+            flatten_newlines(text, flat, sizeof(flat));
+            if (gfx_text_width(font, flat) <= max_w) {
+                snprintf(lines[line_idx], LORA_MSG_LINE_BUF_SZ, "%.*s", LORA_MSG_LINE_BUF_SZ - 1, flat);
             } else {
-                gfx_text_ellipsize(font, text, max_w, lines[line_idx], LORA_MSG_LINE_BUF_SZ);
+                gfx_text_ellipsize(font, flat, max_w, lines[line_idx], LORA_MSG_LINE_BUF_SZ);
             }
             return LORA_MSG_MAX_LINES;
         }
 
-        if (gfx_text_width(font, text) <= max_w) {
+        if (strpbrk(text, "\r\n") == NULL && gfx_text_width(font, text) <= max_w) {
             snprintf(lines[line_idx], LORA_MSG_LINE_BUF_SZ, "%.*s", LORA_MSG_LINE_BUF_SZ - 1, text);
             return line_idx + 1;
         }
@@ -110,8 +173,18 @@ static int wrap_lora_msg_lines(const gfx_font_t *font, const char *text, int16_t
         const char *last_char_p = text;
         const char *last_space_p = NULL;
         const char *next_after_space_p = NULL;
+        bool hard_newline = false;
 
         while (*p != '\0') {
+            if (*p == '\r' || *p == '\n') {
+                last_space_p = p;
+                next_after_space_p = p + 1;
+                if (*p == '\r' && *(p + 1) == '\n') {
+                    next_after_space_p++;
+                }
+                hard_newline = true;
+                break;
+            }
             const char *prev = p;
             gfx_utf8_next(&p);
             size_t len = (size_t)(p - text);
@@ -125,7 +198,7 @@ static int wrap_lora_msg_lines(const gfx_font_t *font, const char *text, int16_t
                 break;
             }
             last_char_p = p;
-            if (*prev == ' ' || *prev == '\n' || *prev == '\r') {
+            if (*prev == ' ') {
                 last_space_p = prev;
                 next_after_space_p = p;
             }
@@ -134,7 +207,10 @@ static int wrap_lora_msg_lines(const gfx_font_t *font, const char *text, int16_t
         size_t break_len = 0;
         const char *next_text = NULL;
 
-        if (last_space_p != NULL && last_space_p > text) {
+        if (hard_newline) {
+            break_len = (size_t)(last_space_p - text);
+            next_text = next_after_space_p;
+        } else if (last_space_p != NULL && last_space_p > text) {
             break_len = (size_t)(last_space_p - text);
             next_text = next_after_space_p;
         } else {
@@ -216,24 +292,65 @@ void ui_draw_lora_view(gfx_fb_t *fb, gfx_rect_t below, const ui_context_t *ctx)
     gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 8, 23, 260, 16 }, GFX_ALIGN_LEFT, left_str, GFX_BLACK);
     gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 268, 23, 124, 16 }, GFX_ALIGN_RIGHT, right_str, GFX_BLACK);
 
-    /* Line 2 (y = 41) */
-    const char *ch = lora->channel_name[0] ? lora->channel_name : "Public";
-    snprintf(left_str, sizeof(left_str), "Ch: %s \xC2\xB7 RX: %lu \xC2\xB7 TX: %lu \xC2\xB7 Fwd: %lu",
-             ch, (unsigned long)lora->packet_count, (unsigned long)lora->packets_sent,
-             (unsigned long)lora->sent_flood);
-
-    if (lora->packet_count > 0) {
-        char snr_str[16];
-        format_snr(lora->last_snr_q4, snr_str, sizeof(snr_str));
-        snprintf(right_str, sizeof(right_str), "RSSI %d dBm \xC2\xB7 %s \xC2\xB7 NF %d",
-                 lora->last_rssi_dbm, snr_str, lora->noise_floor_dbm);
+    /* Line 2 (y = 40) */
+    const char *ch = (lora->active_channel_count > 1)
+                         ? "All"
+                         : (lora->channel_name[0] ? lora->channel_name : "Public");
+    if (lora->client_repeat) {
+        snprintf(left_str, sizeof(left_str), "Ch: %s \xC2\xB7 RX: %lu \xC2\xB7 TX: %lu \xC2\xB7 Fwd: %lu",
+                 ch, (unsigned long)lora->packet_count, (unsigned long)lora->packets_sent,
+                 (unsigned long)lora->forwarded_count);
     } else {
-        snprintf(right_str, sizeof(right_str), "TX %+d dBm \xC2\xB7 NF %d dBm",
-                 lora->tx_power_dbm, lora->noise_floor_dbm);
+        snprintf(left_str, sizeof(left_str), "Ch: %s \xC2\xB7 RX: %lu \xC2\xB7 TX: %lu \xC2\xB7 Rpt: off",
+                 ch, (unsigned long)lora->packet_count, (unsigned long)lora->packets_sent);
     }
 
-    gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 8, 40, 240, 16 }, GFX_ALIGN_LEFT, left_str, GFX_BLACK);
-    gfx_text_in_rect(fb, font_sm, (gfx_rect_t){ 248, 40, 144, 16 }, GFX_ALIGN_RIGHT, right_str, GFX_BLACK);
+    char snr_str[16];
+    if (lora->packet_count > 0) {
+        format_snr(lora->last_snr_q4, snr_str, sizeof(snr_str));
+        if (lora->noise_floor_dbm == 0) {
+            snprintf(right_str, sizeof(right_str), "RSSI %d dBm \xC2\xB7 %s",
+                     lora->last_rssi_dbm, snr_str);
+        } else {
+            snprintf(right_str, sizeof(right_str), "RSSI %d dBm \xC2\xB7 %s \xC2\xB7 NF %d",
+                     lora->last_rssi_dbm, snr_str, lora->noise_floor_dbm);
+        }
+    } else {
+        if (lora->noise_floor_dbm == 0) {
+            snprintf(right_str, sizeof(right_str), "TX %+d dBm",
+                     lora->tx_power_dbm);
+        } else {
+            snprintf(right_str, sizeof(right_str), "TX %+d dBm \xC2\xB7 NF %d dBm",
+                     lora->tx_power_dbm, lora->noise_floor_dbm);
+        }
+    }
+
+    int left_w = gfx_text_width(font_sm, left_str);
+    int right_w = gfx_text_width(font_sm, right_str);
+    if (left_w + 8 + right_w > 384 && lora->packet_count > 0) {
+        if (lora->noise_floor_dbm == 0) {
+            snprintf(right_str, sizeof(right_str), "RSSI %d \xC2\xB7 %s",
+                     lora->last_rssi_dbm, snr_str);
+        } else {
+            snprintf(right_str, sizeof(right_str), "RSSI %d \xC2\xB7 %s \xC2\xB7 NF %d",
+                     lora->last_rssi_dbm, snr_str, lora->noise_floor_dbm);
+        }
+        right_w = gfx_text_width(font_sm, right_str);
+    }
+
+    int right_box_w = right_w + 2;
+    if (right_box_w > 240) {
+        right_box_w = 240;
+    }
+    gfx_rect_t right_rect = { 392 - right_box_w, 40, right_box_w, 16 };
+    int left_box_w = right_rect.x - 14;
+    if (left_box_w < 40) {
+        left_box_w = 40;
+    }
+    gfx_rect_t left_rect = { 8, 40, left_box_w, 16 };
+
+    gfx_text_in_rect(fb, font_sm, left_rect, GFX_ALIGN_LEFT, left_str, GFX_BLACK);
+    gfx_text_in_rect(fb, font_sm, right_rect, GFX_ALIGN_RIGHT, right_str, GFX_BLACK);
 
     /* Horizontal separator at y = 58 */
     gfx_hline(fb, 8, 58, 384, GFX_BLACK);
@@ -269,7 +386,7 @@ void ui_draw_lora_view(gfx_fb_t *fb, gfx_rect_t below, const ui_context_t *ctx)
 
         for (int i = count - 1; i >= 0; i--) {
             char full_msg[256];
-            format_lora_msg(&lora->msgs[i], full_msg, sizeof(full_msg));
+            format_lora_msg(lora, &lora->msgs[i], full_msg, sizeof(full_msg));
             wrapped[i].line_count = wrap_lora_msg_lines(font_sm, full_msg, LORA_MSG_LINE_W, wrapped[i].lines);
             int msg_h = wrapped[i].line_count * LORA_MSG_LINE_H + 3;
             if (i == count - 1) {
@@ -452,9 +569,11 @@ bool ui_resolve_lora(const ui_context_t *ctx, ui_field_id_t field, ui_value_t *o
         }
         int count = lora->msg_count > UI_LORA_MAX_MSGS ? UI_LORA_MAX_MSGS : lora->msg_count;
         const ui_lora_msg_t *m = &lora->msgs[count - 1];
+        char flat[sizeof(m->text)];
+        flatten_newlines(m->text, flat, sizeof(flat));
         out->state = UI_VALUE_FRESH;
-        copy_utf8(out->text, sizeof(out->text), m->text, sizeof(out->text) - 1);
-        copy_utf8(out->short_text, sizeof(out->short_text), m->text, 12);
+        copy_utf8(out->text, sizeof(out->text), flat, sizeof(out->text) - 1);
+        copy_utf8(out->short_text, sizeof(out->short_text), flat, 12);
         if (m->outgoing) {
             snprintf(out->extra, sizeof(out->extra), "TX");
         } else {

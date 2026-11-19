@@ -12,19 +12,19 @@
 
 /* RainViewer's Universal Blue colours from 20 dBZ up (rainviewer.com/files/rainviewer_api_colors_table.csv,
  * checked 2026-10-01; every scheme number returns it since 2026), sorted by RGB, with their level:
- * light below 35 dBZ, moderate below 45, heavy from there. */
+ * light below ~27 dBZ (~2 mm/h), moderate below ~39 dBZ (~10 mm/h), heavy from there (aligned with DWD). */
 static const struct {
     uint32_t rgb;
     uint8_t level;
 } k_colours[] = {
-    { 0x004768, 1 }, { 0x004a70, 1 }, { 0x004e78, 1 }, { 0x005180, 1 }, { 0x005588, 1 }, { 0x005b8e, 1 },
-    { 0x006295, 1 }, { 0x00699c, 1 }, { 0x0070a3, 1 }, { 0x0077aa, 1 }, { 0x007fb4, 1 }, { 0x0088bf, 1 },
+    { 0x004768, 2 }, { 0x004a70, 2 }, { 0x004e78, 2 }, { 0x005180, 2 }, { 0x005588, 2 }, { 0x005b8e, 2 },
+    { 0x006295, 2 }, { 0x00699c, 2 }, { 0x0070a3, 2 }, { 0x0077aa, 2 }, { 0x007fb4, 2 }, { 0x0088bf, 1 },
     { 0x0091ca, 1 }, { 0x009ad5, 1 }, { 0x00a3e0, 1 }, { 0x00ff00, 3 }, { 0x1baee2, 1 }, { 0x36bae5, 1 },
     { 0x51c5e8, 1 }, { 0x5d0000, 3 }, { 0x6cd1eb, 1 }, { 0x760000, 3 }, { 0x88ddee, 1 }, { 0x8f0000, 3 },
     { 0xa80000, 3 }, { 0xc10000, 3 }, { 0xcd0d00, 3 }, { 0xd91b00, 3 }, { 0xe62800, 3 }, { 0xf23600, 3 },
     { 0xff4400, 3 }, { 0xff4eff, 3 }, { 0xff58ff, 3 }, { 0xff62ff, 3 }, { 0xff6cff, 3 }, { 0xff77ff, 3 },
-    { 0xff8100, 2 }, { 0xff81ff, 3 }, { 0xff8b00, 2 }, { 0xff8bff, 3 }, { 0xff9500, 2 }, { 0xff95ff, 3 },
-    { 0xff9f00, 2 }, { 0xff9fff, 3 }, { 0xffaa00, 2 }, { 0xffaaff, 3 }, { 0xffb700, 2 }, { 0xffc500, 2 },
+    { 0xff8100, 3 }, { 0xff81ff, 3 }, { 0xff8b00, 3 }, { 0xff8bff, 3 }, { 0xff9500, 3 }, { 0xff95ff, 3 },
+    { 0xff9f00, 3 }, { 0xff9fff, 3 }, { 0xffaa00, 3 }, { 0xffaaff, 3 }, { 0xffb700, 3 }, { 0xffc500, 2 },
     { 0xffd200, 2 }, { 0xffe000, 2 }, { 0xffee00, 2 }, { 0xffffff, 3 },
 };
 
@@ -81,11 +81,12 @@ static radar_level_t level_of_rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
         return best_lvl;
     }
 
-    /* Fallback for < 20 dBZ light rain/clouds and intermediate blues/yellows/reds. */
-    if (r >= 170 && (int)r > (int)g + 35) {
+    /* Fallback for < 20 dBZ light rain/clouds and intermediate blues/yellows/oranges/reds. */
+    if ((r >= 170 && (int)r > (int)g + 35) || (r >= 220 && g >= 130 && g < 190 && b <= 40)) {
         return RADAR_HEAVY;
     }
-    if ((r >= 170 && g >= 100 && b <= 90) || (b >= 120 && r <= 30 && g <= 90)) {
+    if ((r >= 170 && g >= 100 && b <= 90) ||
+        (r <= 25 && b >= 100 && g <= 135 && (int)b >= (int)g + 25)) {
         return RADAR_MODERATE;
     }
     return RADAR_LIGHT;

@@ -854,7 +854,29 @@ static void draw_tiny(gfx_fb_t *fb, gfx_rect_t r, const ui_value_t *v)
     }
 }
 
-static void draw_labelled(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v)
+static bool pick_body_icon(const ui_value_t *v, int max_icon_size, const gfx_bitmap_t **out_icon, int *out_ix0,
+                           int *out_iy0, int *out_iy1, int *out_ink_w, int *out_ink_h, int *out_gap)
+{
+    const gfx_bitmap_t *cand = field_icon(v, max_icon_size);
+    if (cand == NULL) {
+        return false;
+    }
+    int cx0, cy0, cx1, cy1;
+    bitmap_ink_box(cand, &cx0, &cy0, &cx1, &cy1);
+    if (cx1 < cx0 || cy1 < cy0) {
+        return false;
+    }
+    *out_icon = cand;
+    *out_ix0 = cx0;
+    *out_iy0 = cy0;
+    *out_iy1 = cy1;
+    *out_ink_w = cx1 - cx0 + 1;
+    *out_ink_h = cy1 - cy0 + 1;
+    *out_gap = (cand->width >= 48) ? 8 : 6;
+    return true;
+}
+
+static void draw_labelled(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, bool with_icon)
 {
     const ui_fonts_t *f = &k_fonts[size];
     int top = r.y + 6;
@@ -893,6 +915,34 @@ static void draw_labelled(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_v
             }
         }
         gfx_text_ellipsize(tf, value, body.w - 12, fit, sizeof(fit));
+        if (with_icon && v->state == UI_VALUE_MISSING) {
+            static const int k_sizes[] = { 48, 24 };
+            int text_w = gfx_text_width(tf, fit);
+            for (int si = 0; si < 2; si++) {
+                const gfx_bitmap_t *icon = NULL;
+                int ix0 = 0, iy0 = 0, iy1 = 0, ink_w = 0, ink_h = 0, gap = 0;
+                if (!pick_body_icon(v, k_sizes[si], &icon, &ix0, &iy0, &iy1, &ink_w, &ink_h, &gap)) {
+                    continue;
+                }
+                if (ink_w + gap + text_w > body.w - 8) {
+                    continue;
+                }
+                int total_w = ink_w + gap + text_w;
+                int start_x = body.x + (body.w - total_w) / 2;
+                int val_cy = body.y + body.h / 2;
+                int icon_y = val_cy - ink_h / 2 - iy0;
+                if (icon_y + iy0 < body.y + 1) {
+                    icon_y = body.y + 1 - iy0;
+                }
+                if (icon_y + iy1 > r.y + r.h - 2) {
+                    icon_y = r.y + r.h - 2 - iy1;
+                }
+                gfx_bitmap(fb, start_x - ix0, icon_y, icon, GFX_BLACK);
+                gfx_rect_t tr = { (int16_t)(start_x + ink_w + gap), body.y, (int16_t)text_w, body.h };
+                gfx_text_in_rect(fb, tf, tr, GFX_ALIGN_CENTER, fit, GFX_BLACK);
+                return;
+            }
+        }
         gfx_text_in_rect(fb, tf, body, GFX_ALIGN_CENTER, fit, GFX_BLACK);
         return;
     }
@@ -913,11 +963,64 @@ static void draw_labelled(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_v
         int count;
     } k_fit[] = { [UI_SIZE_M] = { k_fit_m, 3 }, [UI_SIZE_L] = { k_fit_l, 3 }, [UI_SIZE_XL] = { k_fit_xl, 4 } };
     int extra_lines = v->kind == UI_FK_BATTERY ? f->unit->line_height : 0;
-    const gfx_font_t *vf = fit_number(f, k_fit[size].fonts, k_fit[size].count, &shown, &value, body.w - 6, extra_w,
-                                      body.h - extra_lines, fit, sizeof(fit));
+    const gfx_bitmap_t *icon = NULL;
+    int ix0 = 0, iy0 = 0, iy1 = 0, ink_w = 0, ink_h = 0, gap = 0;
+    if (with_icon) {
+        static const int k_sizes[] = { 48, 24 };
+        for (int si = 0; si < 2; si++) {
+            const gfx_bitmap_t *cand = NULL;
+            int cx0 = 0, cy0 = 0, cy1 = 0, cw = 0, ch = 0, cgap = 0;
+            if (!pick_body_icon(&shown, k_sizes[si], &cand, &cx0, &cy0, &cy1, &cw, &ch, &cgap)) {
+                continue;
+            }
+            if (si == 0) {
+                bool fits_48 =
+                    group_width(f, &gfx_font_num_cb_48, &shown, value) + extra_w + cw + cgap <= body.w - 8 ||
+                    (shown.short_text[0] &&
+                     group_width(f, &gfx_font_num_cb_48, &shown, shown.short_text) + extra_w + cw + cgap <=
+                         body.w - 8);
+                if (!fits_48) {
+                    continue;
+                }
+            } else {
+                const gfx_font_t *smallest = k_fit[size].fonts[k_fit[size].count - 1];
+                bool fits_any =
+                    group_width(f, smallest, &shown, value) + extra_w + cw + cgap <= body.w - 6 ||
+                    (shown.short_text[0] &&
+                     group_width(f, smallest, &shown, shown.short_text) + extra_w + cw + cgap <= body.w - 6);
+                if (!fits_any) {
+                    continue;
+                }
+            }
+            icon = cand;
+            ix0 = cx0;
+            iy0 = cy0;
+            iy1 = cy1;
+            ink_w = cw;
+            ink_h = ch;
+            gap = cgap;
+            break;
+        }
+    }
+    int icon_w = icon != NULL ? ink_w + gap : 0;
+    const gfx_font_t *vf = fit_number(f, k_fit[size].fonts, k_fit[size].count, &shown, &value, body.w - 6,
+                                      extra_w + icon_w, body.h - extra_lines, fit, sizeof(fit));
     int w = group_width(f, vf, &shown, value);
-    int x = body.x + (body.w - w - extra_w) / 2;
     int baseline = body.y + (body.h + digit_height(vf) - extra_lines) / 2;
+    int x = body.x + (body.w - w - extra_w) / 2;
+    if (icon != NULL) {
+        int start_x = body.x + (body.w - (ink_w + gap + w + extra_w)) / 2;
+        int val_cy = baseline - digit_height(vf) / 2;
+        int icon_y = val_cy - ink_h / 2 - iy0;
+        if (icon_y + iy0 < body.y + 1) {
+            icon_y = body.y + 1 - iy0;
+        }
+        if (icon_y + iy1 > r.y + r.h - 2) {
+            icon_y = r.y + r.h - 2 - iy1;
+        }
+        gfx_bitmap(fb, start_x - ix0, icon_y, icon, GFX_BLACK);
+        x = start_x + ink_w + gap;
+    }
     draw_group(fb, f, vf, &shown, value, x, baseline);
     if (v->kind == UI_FK_TIME) {
         int sx = x + w + 6;
@@ -950,8 +1053,8 @@ bool ui_widget_labelled(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_val
     return labelled;
 }
 
-bool ui_widget_draw(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, ui_stale_policy_t policy,
-                    const lang_t *lang)
+static bool draw_widget(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, ui_stale_policy_t policy,
+                        const lang_t *lang, bool with_icon)
 {
     if (ui_widget_hidden(v, policy)) {
         return false;
@@ -978,7 +1081,7 @@ bool ui_widget_draw(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t
     } else if (size == UI_SIZE_S) {
         draw_small(fb, r, &shown);
     } else {
-        draw_labelled(fb, r, size, &shown);
+        draw_labelled(fb, r, size, &shown, with_icon);
     }
     /* XS and a short S cell have no room beside the value; the status bar's stale warning covers them */
     if (shown.state == UI_VALUE_STALE && size != UI_SIZE_XS && !(size == UI_SIZE_S && r.h < 80)) {
@@ -986,6 +1089,18 @@ bool ui_widget_draw(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t
     }
     fb->clip = saved;
     return labelled;
+}
+
+bool ui_widget_draw(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, ui_stale_policy_t policy,
+                    const lang_t *lang)
+{
+    return draw_widget(fb, r, size, v, policy, lang, false);
+}
+
+bool ui_widget_draw_iconic(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, ui_stale_policy_t policy,
+                           const lang_t *lang)
+{
+    return draw_widget(fb, r, size, v, policy, lang, true);
 }
 
 void ui_draw_battery(gfx_fb_t *fb, int x, int y, int w, int h, int pct)

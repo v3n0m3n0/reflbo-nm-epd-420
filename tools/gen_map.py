@@ -28,6 +28,7 @@ NE = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geoj
 SOURCES = {
     "borders": NE + "ne_10m_admin_0_boundary_lines_land.geojson",
     "coast": NE + "ne_50m_coastline.geojson",
+    "admin1": NE + "ne_10m_admin_1_states_provinces_lines.geojson",
     "places": NE + "ne_10m_populated_places_simple.geojson",
     "airports": "https://davidmegginson.github.io/ourairports-data/airports.csv",
     "geonames": "https://download.geonames.org/export/dump/cities1000.zip",
@@ -38,17 +39,19 @@ HEADER = struct.Struct("<4sHHI10I")  # magic, version, reserved, crc32, then the
 LINE = struct.Struct("<4hIHBx")      # bbox in 0.01 deg (lat_min, lat_max, lon_min, lon_max), point pos, count, kind
 TOWN = struct.Struct("<iiII")        # lat_e4, lon_e4, population, name pos
 AIRPORT = struct.Struct("<ii3s4sB")  # lat_e4, lon_e4, IATA, ICAO, kind (0 large, 1 medium)
-KIND_BORDER, KIND_COAST = 0, 1
+KIND_BORDER, KIND_COAST, KIND_ADMIN1 = 0, 1, 2
 TOLERANCE_DEG = 0.002   # Douglas-Peucker, about 200 m (spec §11.1)
+ADMIN1_TOLERANCE_DEG = 0.005
 PIECE_POINTS = 128      # a line's points per record, so a render decodes only what lies near
 ESCAPE = -32768         # a delta pair (ESCAPE, ESCAPE) is followed by an absolute point
 
 # Natural Earth's own spelling, corrected where a Czech user would see it
 NAME_FIXES = {"Pizen": "Plzeň", "Usti Nad Labem": "Ústí nad Labem", "Breslau": "Wrocław", "Munchen": "München"}
 
-# GeoNames' places (D29) where Natural Earth names only a dozen Czech towns: ChMU's radar area (spec §11.2)
-GEONAMES_AREA = (48.07, 51.46, 11.26, 19.63)  # lat_min, lat_max, lon_min, lon_max
-GEONAMES_MIN_POPULATION = 1000
+# GeoNames' places: Poland at >= 20,000 inhabitants
+GEONAMES_AREA = (49.00, 54.90, 14.12, 24.15)  # lat_min, lat_max, lon_min, lon_max
+GEONAMES_MIN_POPULATION = 20000
+GEONAMES_EXTRA_AREAS = ()
 GEONAMES_SKIP = {"PPLX", "PPLH", "PPLQ", "PPLW", "PPLCH"}  # sections of towns; historical, abandoned, destroyed
 SAME_TOWN_KM = 10.0  # a Natural Earth town's own GeoNames entry: a place this close that goes by its name
 PART_OF_KM = 0.0142  # km per square root of inhabitants: how far a larger place's districts reach
@@ -67,6 +70,16 @@ def line_parts(geojson):
         parts = [geometry["coordinates"]] if geometry["type"] == "LineString" else geometry["coordinates"]
         out.extend([[(float(x), float(y)) for x, y, *_ in part] for part in parts if len(part) >= 2])
     return out
+
+
+def admin1_poland_lines(geojson):
+    """Extract admin-1 boundary lines for Poland (ADM0_A3 == 'POL')."""
+    poland = []
+    for feature in geojson["features"]:
+        props = feature.get("properties") or {}
+        if (props.get("ADM0_A3") or props.get("adm0_a3")) == "POL":
+            poland.append(feature)
+    return line_parts({"features": poland})
 
 
 def _key(point):
@@ -189,11 +202,14 @@ def towns(geojson):
     return out
 
 
-def geonames_places(text, area=GEONAMES_AREA):
-    """cities1000.txt -> [Place]: the places inside `area` of 1000 inhabitants or more that aren't
-    sections of towns, the largest first; the name in ASCII when the fonts lack its letters. Each keeps
-    the names it goes by, to find Natural Earth's towns among them, and its country and admin1-4 codes,
-    to tell a town's districts from its neighbours."""
+def geonames_places(text, area=GEONAMES_AREA, min_population=GEONAMES_MIN_POPULATION, extra_areas=None):
+    """cities1000.txt -> [Place]: the places inside `area` of `min_population` inhabitants or more (or inside
+    any `(extra_area, extra_min_pop)` in `extra_areas`) that aren't sections of towns, the largest first;
+    the name in ASCII when the fonts lack its letters. Each keeps the names it goes by, to find Natural
+    Earth's towns among them, and its country and admin1-4 codes, to tell a town's districts from its
+    neighbours."""
+    if extra_areas is None:
+        extra_areas = GEONAMES_EXTRA_AREAS if area == GEONAMES_AREA else ()
     out = []
     for line in text.splitlines():
         fields = line.split("\t")
@@ -201,9 +217,11 @@ def geonames_places(text, area=GEONAMES_AREA):
             continue
         lat, lon, population = float(fields[4]), float(fields[5]), int(fields[14] or 0)
         name = fields[1] if latin(fields[1]) else fields[2]
-        if population < GEONAMES_MIN_POPULATION or not name:
+        if not name:
             continue
-        if not (area[0] <= lat <= area[1] and area[2] <= lon <= area[3]):
+        in_main = area[0] <= lat <= area[1] and area[2] <= lon <= area[3] and population >= min_population
+        in_extra = any(ea[0] <= lat <= ea[1] and ea[2] <= lon <= ea[3] and population >= ep for ea, ep in extra_areas)
+        if not (in_main or in_extra):
             continue
         names = frozenset(n.casefold() for n in (fields[1], fields[2], *fields[3].split(",")) if n)
         out.append(Place(round(lat * 1e4), round(lon * 1e4), population, name, names, fields[8], tuple(fields[10:14])))
@@ -274,12 +292,16 @@ def airports(csv_text):
     return out
 
 
-def lines_of(border_lines, coast_lines, tolerance=TOLERANCE_DEG):
-    """[(kind, points)] for map.bin: the borders chained, both simplified and split into pieces."""
+def lines_of(border_lines, coast_lines, admin1_lines=(), tolerance=TOLERANCE_DEG):
+    """[(kind, points)] for map.bin: borders, coasts, then admin1, chained, simplified and split."""
     out = []
-    for kind, lines in ((KIND_BORDER, chain(border_lines)), (KIND_COAST, chain(coast_lines))):
+    for kind, lines, tol in (
+        (KIND_BORDER, chain(border_lines), tolerance),
+        (KIND_COAST, chain(coast_lines), tolerance),
+        (KIND_ADMIN1, chain(admin1_lines), ADMIN1_TOLERANCE_DEG),
+    ):
         for line in lines:
-            for piece in split(simplify(line, tolerance)):
+            for piece in split(simplify(line, tol)):
                 out.append((kind, piece))
     return out
 
@@ -332,7 +354,8 @@ def main(argv=None):
     cache = pathlib.Path(args.cache)
     paths = {name: fetch(name, cache) for name in SOURCES}
     lines = lines_of(line_parts(json.loads(paths["borders"].read_text())),
-                     line_parts(json.loads(paths["coast"].read_text())))
+                     line_parts(json.loads(paths["coast"].read_text())),
+                     admin1_poland_lines(json.loads(paths["admin1"].read_text())))
     with zipfile.ZipFile(paths["geonames"]) as z:
         places = geonames_places(z.read("cities1000.txt").decode("utf-8"))
     town_list = merge_towns(towns(json.loads(paths["places"].read_text())), places)

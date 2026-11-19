@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "lang.h"
 #include "lora_widget.h"
+#include "meshcore_companion.h"
 #include "netmgr.h"
 #include "power.h"
 #include "sdkconfig.h"
@@ -35,13 +36,16 @@ EXT_RAM_BSS_ATTR static char s_settings_base[SETTINGS_FILE_MAX]; /* settings.jso
 static char s_err[UI_PRESET_ERR_LEN];
 static char s_toast[64];
 static int64_t s_toast_until_ms;
+static int64_t s_toast_pending_ms;
 static ui_lora_t s_lora_ui;
 static uint32_t s_last_lora_pkt_count;
 static uint32_t s_last_lora_sent_count;
 static uint32_t s_last_lora_msg_count;
 static uint32_t s_last_lora_msg_seq;
 static uint32_t s_last_lora_adv_seq;
+static uint32_t s_last_toasted_msg_id;
 static bool s_last_lora_ble;
+static bool s_lora_seq_seeded;
 static bool s_focus_synced;
 static bool s_focus_sync_queued;
 
@@ -98,6 +102,7 @@ void app_ui_defaults(void)
     ui_presets_defaults(&s_presets);
     s_focus_synced = app_focus_mode_active();
     s_focus_sync_queued = false;
+    s_lora_seq_seeded = false;
     sensors_set_battery_cal_save_cb(save_battery_cal_cb);
 }
 
@@ -314,9 +319,32 @@ void app_ui_context(ui_context_t *ctx)
     s_lora_ui.packet_count = st.packet_count;
     s_lora_ui.packets_sent = st.packets_sent;
     s_lora_ui.sent_flood = st.sent_flood;
+    s_lora_ui.client_repeat = st.client_repeat;
+    s_lora_ui.forwarded_count = st.forwarded_count;
     s_lora_ui.last_rssi_dbm = st.last_rssi_dbm;
     s_lora_ui.last_snr_q4 = st.last_snr_q4;
     s_lora_ui.noise_floor_dbm = st.noise_floor_dbm;
+
+    char ch_names[COMPANION_MAX_CHANNELS][24] = {{0}};
+    uint8_t active_ch_count = 0;
+    char first_ch_name[24] = {0};
+    for (uint8_t c = 0; c < COMPANION_MAX_CHANNELS; c++) {
+        companion_channel_t ch;
+        if (lora_widget_get_channel(c, &ch) == ESP_OK && ch.valid && ch.name[0] != '\0') {
+            snprintf(ch_names[c], sizeof(ch_names[c]), "%.*s",
+                     (int)(sizeof(ch_names[c]) - 1), ch.name);
+            if (active_ch_count == 0) {
+                snprintf(first_ch_name, sizeof(first_ch_name), "%s", ch_names[c]);
+            }
+            active_ch_count++;
+        }
+    }
+    if (active_ch_count == 1 && first_ch_name[0] != '\0') {
+        snprintf(s_lora_ui.channel_name, sizeof(s_lora_ui.channel_name), "%s", first_ch_name);
+    }
+    s_lora_ui.active_channel_count = (active_ch_count > 0)
+                                         ? active_ch_count
+                                         : (s_lora_ui.channel_name[0] != '\0' ? 1 : 0);
 
     size_t total_msgs = st.msg_count;
     size_t start_msg_idx = (total_msgs > UI_LORA_MAX_MSGS) ? (total_msgs - UI_LORA_MAX_MSGS) : 0;
@@ -329,13 +357,27 @@ void app_ui_context(ui_context_t *ctx)
         }
         ui_lora_msg_t *dst = &s_lora_ui.msgs[s_lora_ui.msg_count++];
         dst->timestamp = msg.timestamp;
+        const char *body = (msg.body[0] != '\0') ? msg.body : msg.text;
         snprintf(dst->text, sizeof(dst->text), "%.*s",
-                 (int)(sizeof(dst->text) - 1), msg.text);
+                 (int)(sizeof(dst->text) - 1), body);
         dst->snr_q4 = msg.snr_q4;
         dst->hop_count = msg.hops;
         dst->outgoing = msg.outgoing;
-        dst->is_direct = false;
-        dst->sender[0] = '\0';
+        dst->is_direct = msg.is_direct;
+        dst->channel_idx = msg.channel_idx;
+        if (!msg.is_direct) {
+            if (msg.channel_idx < COMPANION_MAX_CHANNELS && ch_names[msg.channel_idx][0] != '\0') {
+                snprintf(dst->channel_name, sizeof(dst->channel_name), "%.*s",
+                         (int)(sizeof(dst->channel_name) - 1), ch_names[msg.channel_idx]);
+            } else if (msg.channel_idx == 0) {
+                const char *def_ch = st.channel_name[0] ? st.channel_name : "Public";
+                snprintf(dst->channel_name, sizeof(dst->channel_name), "%.*s",
+                         (int)(sizeof(dst->channel_name) - 1), def_ch);
+            }
+        }
+        dst->ack_status = msg.ack_status;
+        snprintf(dst->sender, sizeof(dst->sender), "%.*s",
+                 (int)(sizeof(dst->sender) - 1), msg.sender);
     }
 
     meshcore_advert_t all_advs[MESHCORE_MAX_ADVERTS];
@@ -427,12 +469,19 @@ void app_ui_render(void)
         ui_presets_titles(&s_presets, s_presets.active, &titles);
         ui_draw_dashboard(fb, &ctx, &s_presets.presets[s_presets.active], &titles);
     }
-    if (app_ui_toast_active()) {
+    bool drew_toast = app_ui_toast_active();
+    if (drew_toast) {
         ui_draw_toast(fb, s_toast);
     }
     esp_err_t err = display_commit(false);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "display: %s", esp_err_to_name(err));
+    }
+    if (drew_toast && s_toast_pending_ms > 0) {
+        int64_t dur = s_toast_pending_ms;
+        s_toast_pending_ms = 0;
+        s_toast_until_ms = app_uptime_ms() + dur;
+        power_hold_awake_ms(dur);
     }
 }
 
@@ -452,12 +501,19 @@ void app_ui_seed_previous(uint8_t partial_count)
     display_seed_previous(partial_count);
 }
 
-void app_ui_toast_arm(const char *text)
+void app_ui_toast_arm_ms(const char *text, int64_t duration_ms)
 {
     snprintf(s_toast, sizeof(s_toast), "%s", text);
-    s_toast_until_ms = app_uptime_ms() + TOAST_MS;
-    power_hold_awake_ms(TOAST_MS); /* a sleep would leave it on screen until the next wake */
+    s_toast_pending_ms = duration_ms;
+    /* Safety fallback if no render follows; replaced post-commit in app_ui_render(). */
+    s_toast_until_ms = app_uptime_ms() + duration_ms + 3000;
+    power_hold_awake_ms(duration_ms + 3000); /* a sleep would leave it on screen until the next wake */
     ESP_LOGI(TAG, "toast: %s", text);
+}
+
+void app_ui_toast_arm(const char *text)
+{
+    app_ui_toast_arm_ms(text, TOAST_MS);
 }
 
 void app_ui_toast(const char *text)
@@ -480,6 +536,7 @@ void app_ui_toast_expire(void)
 {
     if (s_toast[0] != '\0' && !app_ui_toast_active()) {
         s_toast[0] = '\0';
+        s_toast_pending_ms = 0;
         app_ui_render();
     }
 }
@@ -752,6 +809,7 @@ void app_ui_select(int index, bool persist)
     }
     ESP_LOGI(TAG, "preset %s", s_presets.presets[index].id);
     app_ui_render();
+    app_radar_maybe_refresh(&s_presets.presets[index]);
     if (is_focus != s_focus_synced && !s_focus_sync_queued) {
         s_focus_sync_queued = true;
         if (app_post(focus_sync_on_app, NULL) != ESP_OK) {
@@ -881,19 +939,84 @@ time_t app_ui_tick(bool force)
             app_seal_snapshot();
             return now;
         }
-        if (s.settings.lora.enabled && s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
+        if (s.settings.lora.enabled) {
             lora_stats_t st = lora_widget_get_stats();
-            if (st.msg_seq != s_last_lora_msg_seq ||
-                st.msg_count != s_last_lora_msg_count ||
-                st.advert_seq != s_last_lora_adv_seq ||
-                st.ble_connected != s_last_lora_ble) {
+            if (!s_lora_seq_seeded) {
                 s_last_lora_msg_seq = st.msg_seq;
                 s_last_lora_msg_count = st.msg_count;
                 s_last_lora_adv_seq = st.advert_seq;
                 s_last_lora_ble = st.ble_connected;
                 s_last_lora_pkt_count = st.packet_count;
                 s_last_lora_sent_count = st.packets_sent;
-                render = true;
+                if (st.msg_count > 0) {
+                    meshcore_msg_t newest;
+                    if (lora_widget_get_message(st.msg_count - 1, &newest)) {
+                        s_last_toasted_msg_id = newest.id;
+                    }
+                }
+                s_lora_seq_seeded = true;
+            } else if (s_presets.presets[s_presets.active].layout == UI_LAYOUT_LORA) {
+                if (st.msg_seq != s_last_lora_msg_seq ||
+                    st.msg_count != s_last_lora_msg_count ||
+                    st.advert_seq != s_last_lora_adv_seq ||
+                    st.ble_connected != s_last_lora_ble) {
+                    s_last_lora_msg_seq = st.msg_seq;
+                    s_last_lora_msg_count = st.msg_count;
+                    s_last_lora_adv_seq = st.advert_seq;
+                    s_last_lora_ble = st.ble_connected;
+                    s_last_lora_pkt_count = st.packet_count;
+                    s_last_lora_sent_count = st.packets_sent;
+                    if (st.msg_count > 0) {
+                        meshcore_msg_t newest;
+                        if (lora_widget_get_message(st.msg_count - 1, &newest) &&
+                            newest.id > s_last_toasted_msg_id) {
+                            s_last_toasted_msg_id = newest.id;
+                        }
+                    }
+                    render = true;
+                }
+            } else if (st.msg_seq != s_last_lora_msg_seq) {
+                s_last_lora_msg_seq = st.msg_seq;
+                s_last_lora_msg_count = st.msg_count;
+                s_last_lora_adv_seq = st.advert_seq;
+                s_last_lora_ble = st.ble_connected;
+                s_last_lora_pkt_count = st.packet_count;
+                s_last_lora_sent_count = st.packets_sent;
+                if (st.msg_count > 0) {
+                    const meshcore_msg_t *dm_to_toast = NULL;
+                    meshcore_msg_t candidate;
+                    meshcore_msg_t latest_dm = {0};
+                    uint32_t max_seen_id = s_last_toasted_msg_id;
+                    for (size_t mi = 0; mi < st.msg_count; mi++) {
+                        if (!lora_widget_get_message(mi, &candidate)) {
+                            continue;
+                        }
+                        if (candidate.id > max_seen_id) {
+                            max_seen_id = candidate.id;
+                        }
+                        if (candidate.id > s_last_toasted_msg_id &&
+                            !candidate.outgoing && candidate.is_direct) {
+                            latest_dm = candidate;
+                            dm_to_toast = &latest_dm;
+                        }
+                    }
+                    s_last_toasted_msg_id = max_seen_id;
+                    if (dm_to_toast != NULL) {
+                        const char *body = (dm_to_toast->body[0] != '\0') ? dm_to_toast->body : dm_to_toast->text;
+                        char clean_body[48];
+                        size_t bi = 0;
+                        for (size_t si = 0; body[si] != '\0' && bi + 1 < sizeof(clean_body); si++) {
+                            char ch = body[si];
+                            clean_body[bi++] = (ch == '\r' || ch == '\n') ? ' ' : ch;
+                        }
+                        clean_body[bi] = '\0';
+                        char toast[64];
+                        snprintf(toast, sizeof(toast), "[DM] %.*s: %.*s",
+                                 16, dm_to_toast->sender, 40, clean_body);
+                        app_ui_toast_arm(toast);
+                        render = true;
+                    }
+                }
             }
         }
     }
@@ -971,6 +1094,7 @@ esp_err_t app_ui_replace_settings(const char *json, char *err, size_t err_size)
                          parsed.wx_lat_e4 != s.settings.wx_lat_e4 ||
                          parsed.wx_lon_e4 != s.settings.wx_lon_e4 ||
                          parsed.wx_zoom_q != s.settings.wx_zoom_q ||
+                         parsed.wx_source != s.settings.wx_source ||
                          ((parsed.sync_steps ^ s.settings.sync_steps) & SETTINGS_STEP_RADAR) != 0;
     settings_replaced(&parsed, &s.settings); /* a page that turns `always` on: BOOT double returns */
     s.settings = parsed;

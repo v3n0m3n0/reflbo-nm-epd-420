@@ -19,7 +19,7 @@
 
 static const char *TAG = "app_config";
 
-/* Config mode binds KEY short (the other QR code) and BOOT long (exit), both at once (spec §5.6). */
+/* Config mode binds KEY short (exit), BOOT short (other QR code / setup screen) and BOOT long (exit). */
 static const gesture_config_t k_config_buttons[BOARD_BUTTON_COUNT] = {
     [BOARD_BUTTON_KEY] = { .long_ms = 1000, .double_enabled = false },
     [BOARD_BUTTON_BOOT] = { .long_ms = 1000, .double_enabled = false },
@@ -135,7 +135,8 @@ void app_config_exit(void)
         return;
     }
     s_on = false;
-    if (app_sync_holds_wifi() || app_sync_active()) {
+    bool wifi_stays = app_sync_holds_wifi() || app_sync_active();
+    if (wifi_stays) {
         netmgr_ap_off(); /* spec §9.3: the station stays for the sync or sync mode `always` */
     } else {
         netmgr_stop();
@@ -143,7 +144,11 @@ void app_config_exit(void)
     app_net_refresh();
     board_buttons_set_config(k_app_dashboard_buttons);
     ESP_LOGI(TAG, "config mode off");
-    app_ui_toast(lang_str(lang_get(app_settings()->language), LS_T_WIFI_OFF));
+    if (wifi_stays) {
+        app_ui_render();
+    } else {
+        app_ui_toast(lang_str(lang_get(app_settings()->language), LS_T_WIFI_OFF));
+    }
 }
 
 bool app_config_active(void)

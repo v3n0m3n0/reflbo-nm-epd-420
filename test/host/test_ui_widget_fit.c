@@ -923,6 +923,18 @@ static void test_the_grid_shows_which_way_its_power_goes(void)
     TEST_ASSERT_FALSE(inked(pen + 1, m.x + m.w - 1, m.y, m.y + 6 + gfx_font_sans_12.line_height)); /* no arrow */
 }
 
+static void test_weather_s1_s2_slots_fit_cleanly(void)
+{
+    static const char *const k_fixtures[] = {
+        "weather", "weather_now", "weather_frost_cs", "weather_hot_f", "weather_stale"
+    };
+    for (size_t i = 0; i < sizeof(k_fixtures) / sizeof(k_fixtures[0]); ++i) {
+        render(k_fixtures[i]);
+        check_fits(k_fixtures[i], UI_LAYOUT_WEATHER, "s1");
+        check_fits(k_fixtures[i], UI_LAYOUT_WEATHER, "s2");
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -946,5 +958,6 @@ int main(void)
     RUN_TEST(test_short_s_cells_show_a_short_form_before_cutting);
     RUN_TEST(test_the_solar_fields_show_their_symbols);
     RUN_TEST(test_the_grid_shows_which_way_its_power_goes);
+    RUN_TEST(test_weather_s1_s2_slots_fit_cleanly);
     return UNITY_END();
 }

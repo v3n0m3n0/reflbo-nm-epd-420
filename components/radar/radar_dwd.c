@@ -81,11 +81,11 @@ static radar_level_t iconeu_level_rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t 
     if (same_rgb(r, g, b, 254, 254, 192) || same_rgb(r, g, b, 254, 254, 91)) {
         return RADAR_MODERATE;
     }
-    /* Exclude pure transparent-white or neutral non-swatch greys outside the legend. */
-    if (same_rgb(r, g, b, 255, 255, 255) || same_rgb(r, g, b, 0, 0, 0)) {
+    /* Exclude neutral/near-neutral greys, black, white (map backgrounds, borders, grid lines). */
+    if (chan_diff(r, g) < 15 && chan_diff(g, b) < 15 && chan_diff(r, b) < 15) {
         return RADAR_NONE;
     }
-    /* Remaining palette entries (>= 10 mm/1h): lime, greens, cyan, blue, purples, reds, dark grey. */
+    /* Remaining palette entries (>= 10 mm/1h): lime, greens, cyan, blue, purples, reds. */
     return RADAR_HEAVY;
 }
 

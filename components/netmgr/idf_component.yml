@@ -1,2 +1,2 @@
 dependencies:
-  espressif/mdns: "==1.13.1"
+  espressif/mdns: "==1.15.1"

@@ -10,6 +10,7 @@
 #define SYNC_EPOCH_VALID_MIN 1577836800L /* 2020-01-01 00:00:00 UTC: uncalibrated clock (e.g. 1970) has no quiet hours */
 
 static const int k_retry_min[SYNC_RETRY_COUNT] = { 15, 30, 60 };
+static const int k_time_retry_min[SYNC_RETRY_COUNT + 1] = { 1, 15, 30, 60 };
 
 /* The local calendar date `days` after the one `t` falls on. */
 static bool local_date(time_t t, int days, int *y, int *mo, int *d)
@@ -145,8 +146,8 @@ sync_due_t sync_next_due_needing(const sync_schedule_t *s, const sync_history_t 
             return (sync_due_t){ .at = now };
         }
         time_t base = h->failed_at < now ? h->failed_at : now; /* a clock moved back counts from now */
-        int step = h->retries < SYNC_RETRY_COUNT ? h->retries : SYNC_RETRY_COUNT - 1;
-        time_t retry = base + (time_t)k_retry_min[step] * 60;
+        int step = h->retries <= SYNC_RETRY_COUNT ? h->retries : SYNC_RETRY_COUNT;
+        time_t retry = base + (time_t)k_time_retry_min[step] * 60;
         return (sync_due_t){ .at = retry < now ? now : retry, .retry = true };
     }
     if ((need == SYNC_NEED_FORECAST || need == SYNC_NEED_WIFI) && s->mode != SYNC_MODE_MANUAL && h->failed_at == 0) {

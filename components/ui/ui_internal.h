@@ -44,6 +44,9 @@ int ui_ink_below(const gfx_font_t *f, const char *text);
 /* Draws `v` in r at `size`; returns whether it drew its label (ui_label()). */
 bool ui_widget_draw(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, ui_stale_policy_t policy,
                     const lang_t *lang);
+/* Like ui_widget_draw(), but draws the field's icon beside the value in M+ labelled slots when it fits. */
+bool ui_widget_draw_iconic(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, ui_stale_policy_t policy,
+                           const lang_t *lang);
 /* Whether ui_widget_draw() with these arguments would draw `v`'s label (spec §5.4, D42): a dry run into `fb` with
  * nothing to draw on, so its pixels stay as they are. */
 bool ui_widget_labelled(gfx_fb_t *fb, gfx_rect_t r, ui_size_t size, const ui_value_t *v, ui_stale_policy_t policy,

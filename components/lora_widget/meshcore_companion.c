@@ -1,4 +1,6 @@
 #include "meshcore_companion.h"
+#include "util_base64.h"
+#include <stdio.h>
 #include <string.h>
 
 static const uint8_t k_public_psk[16] = {
@@ -335,6 +337,16 @@ size_t meshcore_companion_handle_cmd(companion_context_t *ctx,
             ctx->channels[idx].valid = false;
         } else {
             ctx->channels[idx].valid = true;
+        }
+
+        if (idx == 0 && ctx->channels[0].valid) {
+            if (cfg) {
+                copy_cstr(cfg->channel_name, sizeof(cfg->channel_name), ctx->channels[0].name);
+                util_base64_encode(ctx->channels[0].secret, 16, cfg->channel_psk, sizeof(cfg->channel_psk));
+            }
+            if (cfg_changed) {
+                *cfg_changed = true;
+            }
         }
 
         if (env && env->on_channels_changed) {

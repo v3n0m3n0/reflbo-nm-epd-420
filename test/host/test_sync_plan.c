@@ -392,7 +392,7 @@ static void test_a_lost_clock_syncs_at_once_then_waits_between_tries(void)
     time_t t = utc(2000, 1, 1, 0, 0, 0); /* D9: the RTC restarted from its reset value */
     sync_due_t due = sync_next_due_needing(&s, &h, t, false, SYNC_NEED_TIME);
     TEST_ASSERT_EQUAL_INT64(t, due.at);
-    static const int k_waits_min[] = { 15, 30, 60, 60, 60 }; /* and every hour after the third */
+    static const int k_waits_min[] = { 1, 15, 30, 60, 60 }; /* fast first retry on cold boot, then 15/30/60 */
     for (int i = 0; i < 5; i++) {
         sync_history_record(&h, due, false, t);
         due = sync_next_due_needing(&s, &h, t, true, SYNC_NEED_TIME); /* the battery doesn't stop it */

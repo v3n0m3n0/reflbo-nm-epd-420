@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "app_internal.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "map_data.h"
@@ -36,6 +37,8 @@ static uint8_t s_loop_at, s_loop_count; /* the loop (D28): the frame shown of ho
 static int64_t s_loop_next_ms;          /* app_uptime_ms() of its next frame */
 static radar_frame_t s_demo_frame;
 static bool s_demo;
+RTC_DATA_ATTR static time_t s_auto_try_rtc;
+static int64_t s_auto_try_ms = -1;
 
 static void ready(void)
 {
@@ -48,8 +51,19 @@ static void ready(void)
 static uint8_t source_now(void)
 {
     const settings_t *set = app_settings();
-    return radar_dwd_covers(set->wx_lat_e4 / 1e4, set->wx_lon_e4 / 1e4) ? RADAR_SOURCE_DWD
-                                                                        : RADAR_SOURCE_RAINVIEWER;
+    double lat = set->wx_lat_e4 / 1e4;
+    double lon = set->wx_lon_e4 / 1e4;
+    if (set->wx_source == SETTINGS_WX_RADAR_RAINVIEWER) {
+        return RADAR_SOURCE_RAINVIEWER;
+    }
+    if (set->wx_source == SETTINGS_WX_RADAR_DWD) {
+        return radar_dwd_covers(lat, lon) ? RADAR_SOURCE_DWD : RADAR_SOURCE_RAINVIEWER;
+    }
+    map_view_t v;
+    map_view_init(&v, set->wx_lat_e4, set->wx_lon_e4, set->wx_zoom_q / 4.0f, RADAR_VIEW_W, RADAR_VIEW_H);
+    return (radar_dwd_covers(lat, lon) && radar_dwd_layer_for_view(&v) == RADAR_DWD_LAYER_RV)
+               ? RADAR_SOURCE_DWD
+               : RADAR_SOURCE_RAINVIEWER;
 }
 
 /* One frame, or in sync mode `always` the loop's hour (D28): 12 of DWD RV, 6 of ICON-EU/RainViewer. */
@@ -83,8 +97,8 @@ uint32_t app_radar_step_s(void)
 static bool fits(const radar_frame_t *f)
 {
     const settings_t *set = app_settings();
-    bool dwd = source_now() == RADAR_SOURCE_DWD;
-    if (f->source != RADAR_SOURCE_RAINVIEWER && !(f->source == RADAR_SOURCE_DWD && dwd)) {
+    bool dwd_ok = radar_dwd_covers(set->wx_lat_e4 / 1e4, set->wx_lon_e4 / 1e4);
+    if (f->source != RADAR_SOURCE_RAINVIEWER && !(f->source == RADAR_SOURCE_DWD && dwd_ok)) {
         return false;
     }
     map_view_t v;
@@ -175,6 +189,7 @@ void app_radar_request(radar_fetch_req_t *out)
     out->lat_e4 = set->wx_lat_e4;
     out->lon_e4 = set->wx_lon_e4;
     out->zoom_q = set->wx_zoom_q;
+    out->source = source_now();
     out->want = (uint8_t)keep_count();
     for (int i = 0; i < s_store.count; i++) {
         out->have[out->have_count++] = s_store.frames[i].time;
@@ -225,6 +240,8 @@ void app_radar_invalidate(void)
     s_loaded = false;
     remove(FRAME_PATH);
     memset(&s_status, 0, sizeof(s_status));
+    s_auto_try_ms = -1;
+    s_auto_try_rtc = 0;
 }
 
 void app_radar_status(app_radar_status_t *out)
@@ -308,18 +325,55 @@ static bool shows_weather(const ui_preset_t *p)
     return false;
 }
 
-void app_radar_prepare(const ui_preset_t *p)
+const map_data_t *app_radar_map(void)
 {
-    bool weather = shows_weather(p);
-    if (s_map_state == 0 && (weather || p->layout == UI_LAYOUT_FLIGHTS)) {
+    if (s_map_state == 0) {
         /* the image's own checksum covers it: only its header is checked (map_data_verify is the host's) */
         s_map_state = map_data_open(&s_map, k_map_start, (size_t)(k_map_end - k_map_start)) ? 1 : -1;
         if (s_map_state < 0) {
             ESP_LOGE(TAG, "the built-in map doesn't open");
         }
     }
+    return s_map_state > 0 ? &s_map : NULL;
+}
+
+void app_radar_prepare(const ui_preset_t *p)
+{
+    bool weather = shows_weather(p);
+    if (weather || p->layout == UI_LAYOUT_FLIGHTS) {
+        (void)app_radar_map();
+    }
     if (weather) {
         load();
+    }
+}
+
+void app_radar_maybe_refresh(const ui_preset_t *p)
+{
+    const settings_t *set = app_settings();
+    if (!shows_weather(p) || s_demo || !(set->sync_steps & SETTINGS_STEP_RADAR) ||
+        app_state()->critical || app_ui_night() || app_config_active() ||
+        app_focus_mode_active()) {
+        return;
+    }
+    load();
+    const radar_frame_t *newest = radar_store_newest(&s_store);
+    time_t now = time(NULL);
+    int64_t up_ms = app_uptime_ms();
+    bool stale = (newest == NULL) ||
+                 (timekeeping_valid() && now > (time_t)newest->time &&
+                  (now - (time_t)newest->time) >= 1200);
+    bool cooled_down = (s_auto_try_ms < 0 || (up_ms - s_auto_try_ms) >= 300000) &&
+                       (!timekeeping_valid() || s_auto_try_rtc == 0 || now < s_auto_try_rtc ||
+                        (now - s_auto_try_rtc) >= 300) &&
+                       (s_status.fetched_at == 0 || !timekeeping_valid() ||
+                        now < s_status.fetched_at || (now - s_status.fetched_at) >= 300);
+    if (stale && cooled_down) {
+        s_auto_try_ms = up_ms;
+        if (timekeeping_valid()) {
+            s_auto_try_rtc = now;
+        }
+        app_sync_radar_due_now();
     }
 }
 

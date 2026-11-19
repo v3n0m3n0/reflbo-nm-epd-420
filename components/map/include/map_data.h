@@ -28,6 +28,7 @@
 typedef enum {
     MAP_LINE_BORDER,
     MAP_LINE_COAST,
+    MAP_LINE_ADMIN1 = 2,
 } map_line_kind_t;
 
 typedef struct {

@@ -364,10 +364,11 @@ static void apply(void *arg)
     apply_radar(r);
     apply_solar(r);
     app_pc_feed(false); /* M7: the charts of the fields a sync brings */
-    time_t started = now - (time_t)((esp_timer_get_time() - s_started_mono) / 1000000);
+    time_t elapsed = (time_t)((esp_timer_get_time() - s_started_mono) / 1000000);
+    time_t started = now > elapsed ? now - elapsed : 1;
     save_summary(r, started);
     bool ok = !app_sync_failed();
-    sync_history_record(&st()->history, s_started_by, ok, now);
+    sync_history_record(&st()->history, s_started_by, ok, now > 0 ? now : 1);
     if (ok) {
         st()->ok_at = (uint32_t)started; /* the status bar's time (spec §5.2, D43), as Info ▸ Last sync counts it */
     }
@@ -641,13 +642,16 @@ static bool start_radar_refresh(void)
 {
     const settings_t *set = app_settings();
     if (!(set->sync_steps & SETTINGS_STEP_RADAR) || app_focus_mode_active() ||
-        app_state()->critical || app_ui_night() || !app_net_ready() || s_active) {
+        app_state()->critical || app_ui_night() || s_active) {
         return false;
     }
     netmgr_status_t ns;
     netmgr_status(&ns);
-    if (ns.state != NETMGR_STATION || ns.ip[0] == '\0') {
-        return false;
+    bool joined = ns.state == NETMGR_STATION && ns.ip[0] != '\0';
+    if (!joined) {
+        if (app_config_active() || app_net_init() != ESP_OK || !networks_saved()) {
+            return false;
+        }
     }
     time_t now = time(NULL);
     if (now <= 0) {

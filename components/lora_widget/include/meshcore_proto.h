@@ -70,7 +70,7 @@ extern "C" {
 /* Cache & ring buffer capacity */
 #define MESHCORE_MAX_ADVERTS         12
 #define MESHCORE_MAX_NEIGHBORS       12
-#define MESHCORE_MAX_MESSAGES        16
+#define MESHCORE_MAX_MESSAGES        64
 
 /* Decoded MeshCore advertisement record */
 typedef struct {
@@ -98,7 +98,15 @@ typedef struct {
     uint32_t rx_time_s;
 } meshcore_neighbor_t;
 
-/* Group channel chat message */
+/* ACK status for outgoing direct messages */
+typedef enum {
+    MESHCORE_ACK_NONE = 0,
+    MESHCORE_ACK_PENDING = 1,
+    MESHCORE_ACK_DELIVERED = 2,
+    MESHCORE_ACK_TIMEOUT = 3
+} meshcore_ack_status_t;
+
+/* Group channel / direct chat message */
 typedef struct {
     char     text[160];
     uint32_t timestamp;
@@ -107,6 +115,16 @@ typedef struct {
     int8_t   snr_q4;
     uint8_t  hops;
     bool     outgoing;
+    uint32_t id;
+    char     sender[MESHCORE_NAME_LEN];
+    char     body[160];
+    bool     is_direct;
+    uint8_t  channel_idx;
+    uint8_t  peer_pub[MESHCORE_PUB_KEY_SIZE];
+    uint8_t  ack_status;
+    uint8_t  ack_tag[4];
+    uint16_t ack_rtt_ms;
+    bool     route_direct;
 } meshcore_msg_t;
 
 /* MeshCore wire packet structure */

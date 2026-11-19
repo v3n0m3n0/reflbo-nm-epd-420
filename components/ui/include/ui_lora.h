@@ -18,6 +18,9 @@ typedef struct {
     uint8_t hop_count;
     bool is_direct;
     bool outgoing;
+    uint8_t channel_idx;
+    char channel_name[24];
+    uint8_t ack_status;
 } ui_lora_msg_t;
 
 typedef struct {
@@ -41,11 +44,14 @@ struct ui_lora {
     uint8_t cr;
     int8_t tx_power_dbm;
     char node_name[32];
-    char channel_name[16];
+    char channel_name[24];
+    uint8_t active_channel_count;
+    bool client_repeat;
     uint8_t pub_key_prefix[4];
     uint32_t packet_count;
     uint32_t packets_sent;
     uint32_t sent_flood;
+    uint32_t forwarded_count;
     int16_t last_rssi_dbm;
     int8_t last_snr_q4;
     int16_t noise_floor_dbm;

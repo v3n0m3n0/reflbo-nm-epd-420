@@ -112,6 +112,12 @@ typedef struct {
     int16_t azimuth; /* -180..180°: 0 south, -90 east, 90 west */
 } settings_plane_t;
 
+typedef enum {
+    SETTINGS_WX_RADAR_AUTO = 0,
+    SETTINGS_WX_RADAR_RAINVIEWER = 1,
+    SETTINGS_WX_RADAR_DWD = 2,
+} settings_wx_radar_source_t;
+
 typedef struct {
     char language[4];                    /* "en" */
     bool clock_24h;
@@ -138,6 +144,7 @@ typedef struct {
     uint16_t quiet_from, quiet_to;                      /* minutes after midnight */
     char ntp[SETTINGS_NTP_MAX][SETTINGS_HOST_LEN];      /* time.ntp; "" for an unused entry */
     bool wx_centre_set;           /* radar.weather.lat and .lon are given; else they follow the location */
+    uint8_t wx_source;            /* settings_wx_radar_source_t */
     int32_t wx_lat_e4, wx_lon_e4; /* the weather radar's centre */
     uint8_t wx_zoom_q;            /* radar.weather.zoom in quarters: 16..36 */
     bool fl_centre_set;           /* the same for radar.flights */

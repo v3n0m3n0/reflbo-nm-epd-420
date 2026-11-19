@@ -10,6 +10,7 @@
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_memory_utils.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "util_ticks.h"
@@ -83,18 +84,26 @@ static void send_data(uint8_t data)
     set_cs(1);
 }
 
+static DMA_ATTR uint8_t s_dma_bounce[2048];
+
 static void write_bytes(const uint8_t *buf, size_t len)
 {
     if (len == 0 || buf == NULL) return;
     set_dc(1);
     set_cs(0);
-    static const size_t k_chunk_bytes = 4096;
+    const bool is_dma = esp_ptr_dma_capable(buf);
+    const size_t k_chunk_bytes = is_dma ? 4096 : sizeof(s_dma_bounce);
     size_t offset = 0;
     while (offset < len) {
         size_t chunk = (len - offset < k_chunk_bytes) ? (len - offset) : k_chunk_bytes;
+        const uint8_t *tx_ptr = buf + offset;
+        if (!is_dma) {
+            memcpy(s_dma_bounce, tx_ptr, chunk);
+            tx_ptr = s_dma_bounce;
+        }
         spi_transaction_t t = {
             .length = 8 * chunk,
-            .tx_buffer = buf + offset,
+            .tx_buffer = tx_ptr,
         };
         esp_err_t err = spi_device_polling_transmit(s_spi, &t);
         if (err != ESP_OK) {
@@ -347,6 +356,9 @@ esp_err_t st7305_push(const uint8_t *canonical)
         send_command(0x21);
         send_data(0x00);
         send_data(0x00);
+
+        send_command(0x1A);
+        send_data(ssd1683_encode_temp_reg(s_ambient_c));
 
         send_command(0x22);
         send_data(0xFC);

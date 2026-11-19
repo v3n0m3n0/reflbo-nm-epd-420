@@ -1,3 +1,5 @@
+#include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +15,7 @@
 #include "esp_mac.h"
 #include "esp_system.h"
 #include "lora_widget.h"
+#include "map_data.h"
 #include "meshcore_companion.h"
 #include "netmgr.h"
 #include "power.h"
@@ -21,6 +24,8 @@
 #include "timekeeping.h"
 #include "ui_catalog.h"
 #include "ui_dashboard.h"
+#include "util_base64.h"
+#include "util_sha256.h"
 #include "util_time.h"
 #include "webui.h"
 
@@ -31,6 +36,36 @@ static const char *TAG = "app_web";
 
 #define MIN_EPOCH 1577836800 /* 2020-01-01: a phone's clock is at least this */
 #define MAX_EPOCH              4102444799 /* 2099-12-31 23:59:59: the RTC's last second */
+
+static void bytes_to_hex(const uint8_t *in, size_t len, char *out)
+{
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < len; i++) {
+        out[i * 2] = hex[(in[i] >> 4) & 0x0F];
+        out[i * 2 + 1] = hex[in[i] & 0x0F];
+    }
+    out[len * 2] = '\0';
+}
+
+static int hex_val(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool hex_to_bytes(const char *hex, uint8_t *out, size_t out_len)
+{
+    if (hex == NULL || strlen(hex) != out_len * 2) return false;
+    for (size_t i = 0; i < out_len; i++) {
+        int hi = hex_val(hex[i * 2]);
+        int lo = hex_val(hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
 
 static void reply_error(webui_reply_t *reply, uint8_t *out, size_t size, int status, const char *message)
 {
@@ -95,6 +130,230 @@ static void add_value(cJSON *o, const char *key, ds_field_t field, double scale)
         cJSON_AddNumberToObject(o, key, e.value / scale);
     } else {
         cJSON_AddNullToObject(o, key);
+    }
+}
+
+static void fill_lora_json(cJSON *lora, time_t now)
+{
+    lora_stats_t ls = lora_widget_get_stats();
+    cJSON_AddBoolToObject(lora, "enabled", ls.enabled);
+    cJSON_AddBoolToObject(lora, "initialized", ls.initialized);
+    cJSON_AddNumberToObject(lora, "ble_pin", ls.ble_pin);
+    cJSON_AddBoolToObject(lora, "ble_connected", ls.ble_connected);
+    cJSON_AddBoolToObject(lora, "legacy_identity", ls.legacy_identity);
+    cJSON_AddStringToObject(lora, "node_name", ls.node_name);
+    cJSON_AddStringToObject(lora, "pub_key", ls.pub_key_hex);
+    cJSON_AddNumberToObject(lora, "freq_khz", ls.freq_khz);
+    cJSON_AddNumberToObject(lora, "bw_hz", ls.bw_hz);
+    cJSON_AddNumberToObject(lora, "bw_khz", (double)ls.bw_hz / 1000.0);
+    cJSON_AddNumberToObject(lora, "sf", ls.sf);
+    cJSON_AddNumberToObject(lora, "cr", ls.cr);
+    cJSON_AddNumberToObject(lora, "tx_power_dbm", ls.tx_power_dbm);
+    cJSON_AddNumberToObject(lora, "sync_word", ls.sync_word);
+    cJSON_AddBoolToObject(lora, "rx_boosted", ls.rx_boosted);
+    cJSON_AddBoolToObject(lora, "cad_enabled", ls.cad_enabled);
+    cJSON_AddBoolToObject(lora, "client_repeat", ls.client_repeat);
+    cJSON_AddNumberToObject(lora, "path_hash_mode", ls.path_hash_mode);
+    cJSON_AddNumberToObject(lora, "airtime_factor", (double)ls.airtime_factor_x10 / 10.0);
+    cJSON_AddBoolToObject(lora, "wake_on_rx", ls.wake_on_rx);
+    cJSON_AddBoolToObject(lora, "share_loc", ls.share_loc);
+    cJSON_AddStringToObject(lora, "channel_name", ls.channel_name);
+    cJSON_AddNumberToObject(lora, "channel_hash", ls.channel_hash);
+    cJSON_AddNumberToObject(lora, "noise_floor_dbm", ls.noise_floor_dbm);
+    cJSON_AddNumberToObject(lora, "last_rssi_dbm", ls.last_rssi_dbm);
+    cJSON_AddNumberToObject(lora, "last_snr_db", (double)ls.last_snr_q4 / 4.0);
+    cJSON_AddNumberToObject(lora, "packet_count", ls.packet_count);
+    cJSON_AddNumberToObject(lora, "packets_sent", ls.packets_sent);
+    cJSON_AddNumberToObject(lora, "recv_flood", ls.recv_flood);
+    cJSON_AddNumberToObject(lora, "recv_direct", ls.recv_direct);
+    cJSON_AddNumberToObject(lora, "sent_flood", ls.sent_flood);
+    cJSON_AddNumberToObject(lora, "sent_direct", ls.sent_direct);
+    cJSON_AddNumberToObject(lora, "recv_errors", ls.recv_errors);
+    cJSON_AddNumberToObject(lora, "tx_air_ms", ls.tx_air_ms);
+    cJSON_AddNumberToObject(lora, "rx_air_ms", ls.rx_air_ms);
+    cJSON_AddNumberToObject(lora, "msg_seq", ls.msg_seq);
+    cJSON_AddNumberToObject(lora, "advert_seq", ls.advert_seq);
+    cJSON_AddNumberToObject(lora, "last_packet_at", ls.last_packet_time_s);
+    if (ls.last_packet_time_s != 0 && now >= (time_t)ls.last_packet_time_s) {
+        cJSON_AddNumberToObject(lora, "age_s", (double)(now - (time_t)ls.last_packet_time_s));
+    } else {
+        cJSON_AddNullToObject(lora, "age_s");
+    }
+
+    cJSON *advs = cJSON_AddArrayToObject(lora, "adverts");
+    for (size_t i = 0; i < ls.advert_count && i < MESHCORE_MAX_ADVERTS; i++) {
+        meshcore_advert_t adv;
+        if (!lora_widget_get_advert(i, &adv)) break;
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "name", adv.name);
+        cJSON_AddNumberToObject(item, "node_type", adv.node_type);
+        char pk_hex[65];
+        char pk_prefix[13];
+        bytes_to_hex(adv.pub_key, 32, pk_hex);
+        bytes_to_hex(adv.pub_key, 6, pk_prefix);
+        cJSON_AddStringToObject(item, "pub_key", pk_hex);
+        cJSON_AddStringToObject(item, "pub_prefix", pk_prefix);
+        cJSON_AddNumberToObject(item, "hops", adv.hops);
+        cJSON_AddNumberToObject(item, "rssi_dbm", adv.rssi_dbm);
+        cJSON_AddNumberToObject(item, "snr_db", (double)adv.snr_q4 / 4.0);
+        cJSON_AddBoolToObject(item, "has_loc", adv.has_loc);
+        if (adv.has_loc) {
+            cJSON_AddNumberToObject(item, "lat", (double)adv.lat_e6 / 1000000.0);
+            cJSON_AddNumberToObject(item, "lon", (double)adv.lon_e6 / 1000000.0);
+        } else {
+            cJSON_AddNullToObject(item, "lat");
+            cJSON_AddNullToObject(item, "lon");
+        }
+        if (adv.rx_time_s != 0 && now >= (time_t)adv.rx_time_s) {
+            cJSON_AddNumberToObject(item, "age_s", (double)(now - (time_t)adv.rx_time_s));
+        } else {
+            cJSON_AddNullToObject(item, "age_s");
+        }
+        cJSON_AddNumberToObject(item, "adv_ts", (double)adv.timestamp);
+        cJSON_AddNumberToObject(item, "rx_ts", (double)adv.rx_time_s);
+        cJSON_AddItemToArray(advs, item);
+    }
+
+    size_t n_contacts = lora_widget_get_contact_count();
+    cJSON *nbrs = cJSON_AddArrayToObject(lora, "neighbors");
+    for (size_t i = 0; i < ls.neighbor_count && i < MESHCORE_MAX_NEIGHBORS; i++) {
+        meshcore_neighbor_t nbr;
+        if (!lora_widget_get_neighbor(i, &nbr)) break;
+        if (nbr.name[0] == '\0') {
+            for (size_t ci = 0; ci < n_contacts && ci < COMPANION_MAX_CONTACTS; ci++) {
+                companion_contact_t c;
+                if (lora_widget_get_contact(ci, &c) != ESP_OK) break;
+                if (memcmp(c.pub_key, nbr.pub_key_prefix, 8) == 0 && c.name[0] != '\0') {
+                    snprintf(nbr.name, sizeof(nbr.name), "%s", c.name);
+                    if (nbr.node_type == 0 && c.type != 0) nbr.node_type = c.type;
+                    break;
+                }
+            }
+        }
+        if (nbr.name[0] == '\0') {
+            for (size_t ai = 0; ai < ls.advert_count && ai < MESHCORE_MAX_ADVERTS; ai++) {
+                meshcore_advert_t adv;
+                if (!lora_widget_get_advert(ai, &adv)) break;
+                if (memcmp(adv.pub_key, nbr.pub_key_prefix, 8) == 0 && adv.name[0] != '\0') {
+                    snprintf(nbr.name, sizeof(nbr.name), "%s", adv.name);
+                    if (nbr.node_type == 0 && adv.node_type != 0) nbr.node_type = adv.node_type;
+                    break;
+                }
+            }
+        }
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "name", nbr.name);
+        cJSON_AddNumberToObject(item, "node_type", nbr.node_type);
+        char pk_hex[17];
+        bytes_to_hex(nbr.pub_key_prefix, 8, pk_hex);
+        cJSON_AddStringToObject(item, "pub_key", pk_hex);
+        cJSON_AddNumberToObject(item, "snr_in_db", (double)nbr.snr_in_q4 / 4.0);
+        cJSON_AddNumberToObject(item, "snr_out_db", (double)nbr.snr_out_q4 / 4.0);
+        cJSON_AddNumberToObject(item, "rssi_dbm", nbr.rssi_dbm);
+        if (nbr.rx_time_s != 0 && now >= (time_t)nbr.rx_time_s) {
+            cJSON_AddNumberToObject(item, "age_s", (double)(now - (time_t)nbr.rx_time_s));
+        } else {
+            cJSON_AddNullToObject(item, "age_s");
+        }
+        cJSON_AddItemToArray(nbrs, item);
+    }
+
+    cJSON *msgs = cJSON_AddArrayToObject(lora, "messages");
+    for (size_t i = 0; i < ls.msg_count && i < MESHCORE_MAX_MESSAGES; i++) {
+        meshcore_msg_t m;
+        if (!lora_widget_get_message(i, &m)) break;
+        cJSON *item = cJSON_CreateObject();
+        if (m.sender[0] == '\0' || m.body[0] == '\0') {
+            cJSON_AddStringToObject(item, "text", m.text);
+        }
+        cJSON_AddNumberToObject(item, "rssi_dbm", m.rssi_dbm);
+        cJSON_AddNumberToObject(item, "snr_db", (double)m.snr_q4 / 4.0);
+        cJSON_AddNumberToObject(item, "hops", m.hops);
+        cJSON_AddBoolToObject(item, "outgoing", m.outgoing);
+        if (m.rx_time_s != 0 && now >= (time_t)m.rx_time_s) {
+            cJSON_AddNumberToObject(item, "age_s", (double)(now - (time_t)m.rx_time_s));
+        } else {
+            cJSON_AddNullToObject(item, "age_s");
+        }
+        cJSON_AddNumberToObject(item, "id", m.id);
+        cJSON_AddNumberToObject(item, "ts", m.timestamp);
+        cJSON_AddStringToObject(item, "sender", m.sender);
+        cJSON_AddStringToObject(item, "body", m.body[0] ? m.body : m.text);
+        cJSON_AddBoolToObject(item, "direct", m.is_direct);
+        cJSON_AddNumberToObject(item, "channel", m.channel_idx);
+        if (m.is_direct) {
+            char peer_hex[65];
+            bytes_to_hex(m.peer_pub, 32, peer_hex);
+            cJSON_AddStringToObject(item, "peer_pub", peer_hex);
+        }
+        cJSON_AddNumberToObject(item, "ack", m.ack_status);
+        cJSON_AddNumberToObject(item, "ack_rtt_ms", m.ack_rtt_ms);
+        cJSON_AddBoolToObject(item, "route_direct", m.route_direct);
+        cJSON_AddItemToArray(msgs, item);
+    }
+
+    uint8_t pub_psk[16];
+    bool has_pub_psk = (util_base64_decode(LORA_DEFAULT_PUBLIC_PSK, pub_psk, sizeof(pub_psk)) == 16);
+    cJSON *channels = cJSON_AddArrayToObject(lora, "channels");
+    for (uint8_t i = 0; i < COMPANION_MAX_CHANNELS; i++) {
+        companion_channel_t ch = {0};
+        lora_widget_get_channel(i, &ch);
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddNumberToObject(item, "index", i);
+        cJSON_AddBoolToObject(item, "enabled", ch.valid);
+        cJSON_AddStringToObject(item, "name", ch.name);
+        cJSON_AddBoolToObject(item, "has_key", ch.valid);
+        uint8_t secret32[32];
+        uint8_t ch_hash = 0;
+        if (ch.valid && meshcore_channel_key_from_secret(ch.secret, secret32, &ch_hash)) {
+            cJSON_AddNumberToObject(item, "channel_hash", ch_hash);
+        } else {
+            cJSON_AddNullToObject(item, "channel_hash");
+        }
+        bool is_public = ch.valid && has_pub_psk && memcmp(ch.secret, pub_psk, 16) == 0;
+        bool is_hashtag = false;
+        if (ch.valid && ch.name[0] == '#') {
+            uint8_t hash[UTIL_SHA256_LEN];
+            util_sha256(ch.name, strlen(ch.name), hash);
+            is_hashtag = (memcmp(hash, ch.secret, 16) == 0);
+        }
+        cJSON_AddBoolToObject(item, "is_public", is_public);
+        cJSON_AddBoolToObject(item, "is_hashtag", is_hashtag);
+        memset(&ch, 0, sizeof(ch));
+        memset(secret32, 0, sizeof(secret32));
+        cJSON_AddItemToArray(channels, item);
+    }
+
+    cJSON *contacts = cJSON_AddArrayToObject(lora, "contacts");
+    for (size_t i = 0; i < n_contacts && i < COMPANION_MAX_CONTACTS; i++) {
+        companion_contact_t c;
+        if (lora_widget_get_contact(i, &c) != ESP_OK) break;
+        cJSON *item = cJSON_CreateObject();
+        char pk_hex[65];
+        char pk_prefix[13];
+        bytes_to_hex(c.pub_key, 32, pk_hex);
+        bytes_to_hex(c.pub_key, 6, pk_prefix);
+        cJSON_AddStringToObject(item, "pub_key", pk_hex);
+        cJSON_AddStringToObject(item, "pub_prefix", pk_prefix);
+        cJSON_AddStringToObject(item, "name", c.name);
+        cJSON_AddNumberToObject(item, "type", c.type);
+        cJSON_AddNumberToObject(item, "flags", c.flags);
+        cJSON_AddNumberToObject(item, "out_path_len", c.out_path_len);
+        cJSON_AddNumberToObject(item, "last_advert_ts", c.last_advert_ts);
+        cJSON_AddNumberToObject(item, "lastmod", c.lastmod);
+        if (c.last_advert_ts != 0 && now >= (time_t)c.last_advert_ts) {
+            cJSON_AddNumberToObject(item, "age_s", (double)(now - (time_t)c.last_advert_ts));
+        } else {
+            cJSON_AddNullToObject(item, "age_s");
+        }
+        if (c.lat_e6 != 0 || c.lon_e6 != 0) {
+            cJSON_AddNumberToObject(item, "lat", (double)c.lat_e6 / 1000000.0);
+            cJSON_AddNumberToObject(item, "lon", (double)c.lon_e6 / 1000000.0);
+        } else {
+            cJSON_AddNullToObject(item, "lat");
+            cJSON_AddNullToObject(item, "lon");
+        }
+        cJSON_AddItemToArray(contacts, item);
     }
 }
 
@@ -296,121 +555,8 @@ static void get_status(uint8_t *out, size_t size, webui_reply_t *reply)
     cJSON_AddStringToObject(preset, "name", active->name);
     cJSON_AddBoolToObject(preset, "cycle", app_presets()->cycle_enabled);
 
-    lora_stats_t ls = lora_widget_get_stats();
     cJSON *lora = cJSON_AddObjectToObject(o, "lora");
-    cJSON_AddBoolToObject(lora, "enabled", ls.enabled);
-    cJSON_AddBoolToObject(lora, "initialized", ls.initialized);
-    cJSON_AddNumberToObject(lora, "ble_pin", ls.ble_pin);
-    cJSON_AddBoolToObject(lora, "ble_connected", ls.ble_connected);
-    cJSON_AddBoolToObject(lora, "legacy_identity", ls.legacy_identity);
-    cJSON_AddStringToObject(lora, "node_name", ls.node_name);
-    cJSON_AddStringToObject(lora, "pub_key", ls.pub_key_hex);
-    cJSON_AddNumberToObject(lora, "freq_khz", ls.freq_khz);
-    cJSON_AddNumberToObject(lora, "bw_hz", ls.bw_hz);
-    cJSON_AddNumberToObject(lora, "bw_khz", (double)ls.bw_hz / 1000.0);
-    cJSON_AddNumberToObject(lora, "sf", ls.sf);
-    cJSON_AddNumberToObject(lora, "cr", ls.cr);
-    cJSON_AddNumberToObject(lora, "tx_power_dbm", ls.tx_power_dbm);
-    cJSON_AddNumberToObject(lora, "sync_word", ls.sync_word);
-    cJSON_AddBoolToObject(lora, "rx_boosted", ls.rx_boosted);
-    cJSON_AddBoolToObject(lora, "cad_enabled", ls.cad_enabled);
-    cJSON_AddBoolToObject(lora, "client_repeat", ls.client_repeat);
-    cJSON_AddNumberToObject(lora, "path_hash_mode", ls.path_hash_mode);
-    cJSON_AddNumberToObject(lora, "airtime_factor", (double)ls.airtime_factor_x10 / 10.0);
-    cJSON_AddBoolToObject(lora, "wake_on_rx", ls.wake_on_rx);
-    cJSON_AddBoolToObject(lora, "share_loc", ls.share_loc);
-    cJSON_AddStringToObject(lora, "channel_name", ls.channel_name);
-    cJSON_AddNumberToObject(lora, "channel_hash", ls.channel_hash);
-    cJSON_AddNumberToObject(lora, "noise_floor_dbm", ls.noise_floor_dbm);
-    cJSON_AddNumberToObject(lora, "last_rssi_dbm", ls.last_rssi_dbm);
-    cJSON_AddNumberToObject(lora, "last_snr_db", (double)ls.last_snr_q4 / 4.0);
-    cJSON_AddNumberToObject(lora, "packet_count", ls.packet_count);
-    cJSON_AddNumberToObject(lora, "packets_sent", ls.packets_sent);
-    cJSON_AddNumberToObject(lora, "recv_flood", ls.recv_flood);
-    cJSON_AddNumberToObject(lora, "recv_direct", ls.recv_direct);
-    cJSON_AddNumberToObject(lora, "sent_flood", ls.sent_flood);
-    cJSON_AddNumberToObject(lora, "sent_direct", ls.sent_direct);
-    cJSON_AddNumberToObject(lora, "recv_errors", ls.recv_errors);
-    cJSON_AddNumberToObject(lora, "tx_air_ms", ls.tx_air_ms);
-    cJSON_AddNumberToObject(lora, "rx_air_ms", ls.rx_air_ms);
-    cJSON_AddNumberToObject(lora, "last_packet_at", ls.last_packet_time_s);
-    if (ls.last_packet_time_s != 0 && now >= (time_t)ls.last_packet_time_s) {
-        cJSON_AddNumberToObject(lora, "age_s", (double)(now - (time_t)ls.last_packet_time_s));
-    } else {
-        cJSON_AddNullToObject(lora, "age_s");
-    }
-
-    cJSON *advs = cJSON_AddArrayToObject(lora, "adverts");
-    for (size_t i = 0; i < ls.advert_count && i < MESHCORE_MAX_ADVERTS; i++) {
-        meshcore_advert_t adv;
-        if (!lora_widget_get_advert(i, &adv)) break;
-        cJSON *item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "name", adv.name);
-        cJSON_AddNumberToObject(item, "node_type", adv.node_type);
-        char pk_hex[17];
-        for (int j = 0; j < 8; j++) {
-            snprintf(pk_hex + j * 2, 3, "%02x", adv.pub_key[j]);
-        }
-        cJSON_AddStringToObject(item, "pub_key", pk_hex);
-        cJSON_AddNumberToObject(item, "hops", adv.hops);
-        cJSON_AddNumberToObject(item, "rssi_dbm", adv.rssi_dbm);
-        cJSON_AddNumberToObject(item, "snr_db", (double)adv.snr_q4 / 4.0);
-        cJSON_AddBoolToObject(item, "has_loc", adv.has_loc);
-        if (adv.has_loc) {
-            cJSON_AddNumberToObject(item, "lat", (double)adv.lat_e6 / 1000000.0);
-            cJSON_AddNumberToObject(item, "lon", (double)adv.lon_e6 / 1000000.0);
-        } else {
-            cJSON_AddNullToObject(item, "lat");
-            cJSON_AddNullToObject(item, "lon");
-        }
-        if (adv.rx_time_s != 0 && now >= (time_t)adv.rx_time_s) {
-            cJSON_AddNumberToObject(item, "age_s", (double)(now - (time_t)adv.rx_time_s));
-        } else {
-            cJSON_AddNullToObject(item, "age_s");
-        }
-        cJSON_AddItemToArray(advs, item);
-    }
-
-    cJSON *nbrs = cJSON_AddArrayToObject(lora, "neighbors");
-    for (size_t i = 0; i < ls.neighbor_count && i < MESHCORE_MAX_NEIGHBORS; i++) {
-        meshcore_neighbor_t nbr;
-        if (!lora_widget_get_neighbor(i, &nbr)) break;
-        cJSON *item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "name", nbr.name);
-        cJSON_AddNumberToObject(item, "node_type", nbr.node_type);
-        char pk_hex[17];
-        for (int j = 0; j < 8; j++) {
-            snprintf(pk_hex + j * 2, 3, "%02x", nbr.pub_key_prefix[j]);
-        }
-        cJSON_AddStringToObject(item, "pub_key", pk_hex);
-        cJSON_AddNumberToObject(item, "snr_in_db", (double)nbr.snr_in_q4 / 4.0);
-        cJSON_AddNumberToObject(item, "snr_out_db", (double)nbr.snr_out_q4 / 4.0);
-        cJSON_AddNumberToObject(item, "rssi_dbm", nbr.rssi_dbm);
-        if (nbr.rx_time_s != 0 && now >= (time_t)nbr.rx_time_s) {
-            cJSON_AddNumberToObject(item, "age_s", (double)(now - (time_t)nbr.rx_time_s));
-        } else {
-            cJSON_AddNullToObject(item, "age_s");
-        }
-        cJSON_AddItemToArray(nbrs, item);
-    }
-
-    cJSON *msgs = cJSON_AddArrayToObject(lora, "messages");
-    for (size_t i = 0; i < ls.msg_count && i < MESHCORE_MAX_MESSAGES; i++) {
-        meshcore_msg_t m;
-        if (!lora_widget_get_message(i, &m)) break;
-        cJSON *item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "text", m.text);
-        cJSON_AddNumberToObject(item, "rssi_dbm", m.rssi_dbm);
-        cJSON_AddNumberToObject(item, "snr_db", (double)m.snr_q4 / 4.0);
-        cJSON_AddNumberToObject(item, "hops", m.hops);
-        cJSON_AddBoolToObject(item, "outgoing", m.outgoing);
-        if (m.rx_time_s != 0 && now >= (time_t)m.rx_time_s) {
-            cJSON_AddNumberToObject(item, "age_s", (double)(now - (time_t)m.rx_time_s));
-        } else {
-            cJSON_AddNullToObject(item, "age_s");
-        }
-        cJSON_AddItemToArray(msgs, item);
-    }
+    fill_lora_json(lora, now);
 
     reply_cjson(reply, out, size, o);
 }
@@ -749,6 +895,191 @@ static void restore(const char *body, uint8_t *out, size_t size, webui_reply_t *
     reply_cjson(reply, out, size, o);
 }
 
+#define LORA_MAP_MAX_BYTES 30720
+#define LORA_MAP_MAX_TOWNS 45
+#define LORA_MAP_LINES_RESERVE 3200
+#define LORA_MAP_TAIL_RESERVE 32
+
+typedef struct {
+    char *buf;
+    size_t len;
+    size_t cap;
+    bool full;
+    bool in_line;
+    bool has_line;
+    map_line_kind_t last_kind;
+    double last_lat;
+    double last_lon;
+    int town_count;
+} lora_map_ctx_t;
+
+static bool lora_map_appendf(lora_map_ctx_t *ctx, size_t reserve, const char *fmt, ...)
+{
+    if (ctx->full || ctx->len + reserve >= ctx->cap) {
+        ctx->full = true;
+        return false;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(ctx->buf + ctx->len, ctx->cap - ctx->len - reserve, fmt, ap);
+    va_end(ap);
+    if (n < 0 || ctx->len + (size_t)n + reserve >= ctx->cap) {
+        ctx->buf[ctx->len] = '\0';
+        ctx->full = true;
+        return false;
+    }
+    ctx->len += (size_t)n;
+    return true;
+}
+
+static bool lora_map_append_json_str(lora_map_ctx_t *ctx, size_t reserve, const char *s)
+{
+    if (!lora_map_appendf(ctx, reserve, "\"")) return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p != '\0'; p++) {
+        if (*p == '"' || *p == '\\') {
+            if (!lora_map_appendf(ctx, reserve, "\\%c", *p)) return false;
+        } else if (*p < 0x20) {
+            if (!lora_map_appendf(ctx, reserve, "\\u%04x", *p)) return false;
+        } else {
+            if (!lora_map_appendf(ctx, reserve, "%c", *p)) return false;
+        }
+    }
+    return lora_map_appendf(ctx, reserve, "\"");
+}
+
+static void lora_map_seg_cb(void *arg, map_line_kind_t kind, double lat0, double lon0, double lat1, double lon1)
+{
+    lora_map_ctx_t *ctx = arg;
+    if (ctx->full) return;
+
+    if (ctx->in_line && kind == ctx->last_kind &&
+        fabs(lat0 - ctx->last_lat) < 1e-4 && fabs(lon0 - ctx->last_lon) < 1e-4) {
+        if (!lora_map_appendf(ctx, LORA_MAP_LINES_RESERVE, ",%.3f,%.3f", lat1, lon1)) {
+            return;
+        }
+    } else {
+        if (ctx->in_line) {
+            if (!lora_map_appendf(ctx, LORA_MAP_LINES_RESERVE, "]")) {
+                return;
+            }
+            ctx->in_line = false;
+        }
+        if (!lora_map_appendf(ctx, LORA_MAP_LINES_RESERVE, "%s[%d,%.3f,%.3f,%.3f,%.3f",
+                              ctx->has_line ? "," : "", (int)kind, lat0, lon0, lat1, lon1)) {
+            return;
+        }
+        ctx->in_line = true;
+        ctx->has_line = true;
+    }
+    ctx->last_kind = kind;
+    ctx->last_lat = lat1;
+    ctx->last_lon = lon1;
+}
+
+static bool lora_map_town_cb(void *arg, const map_town_t *t)
+{
+    lora_map_ctx_t *ctx = arg;
+    if (ctx->full || ctx->town_count >= LORA_MAP_MAX_TOWNS) return false;
+    size_t saved_len = ctx->len;
+    if (!lora_map_appendf(ctx, LORA_MAP_TAIL_RESERVE, "%s{\"name\":", ctx->town_count > 0 ? "," : "") ||
+        !lora_map_append_json_str(ctx, LORA_MAP_TAIL_RESERVE, t->name != NULL ? t->name : "") ||
+        !lora_map_appendf(ctx, LORA_MAP_TAIL_RESERVE, ",\"lat\":%.3f,\"lon\":%.3f,\"pop\":%u}",
+                          t->lat, t->lon, (unsigned)t->population)) {
+        ctx->len = saved_len;
+        ctx->buf[ctx->len] = '\0';
+        ctx->full = true;
+        return false;
+    }
+    ctx->town_count++;
+    return true;
+}
+
+static bool query_param_double(const char *query, const char *key, double *out)
+{
+    if (query == NULL || key == NULL) return false;
+    size_t klen = strlen(key);
+    const char *p = query;
+    while ((p = strstr(p, key)) != NULL) {
+        if ((p == query || p[-1] == '&') && p[klen] == '=') {
+            char *end = NULL;
+            double v = strtod(p + klen + 1, &end);
+            if (end != p + klen + 1 && isfinite(v)) {
+                *out = v;
+                return true;
+            }
+            return false;
+        }
+        p += klen;
+    }
+    return false;
+}
+
+static void lora_map_get(const char *query, uint8_t *out, size_t size, webui_reply_t *reply)
+{
+    const settings_t *s = app_settings();
+    double lat = s != NULL ? (double)s->lat_e4 / 10000.0 : 52.0;
+    double lon = s != NULL ? (double)s->lon_e4 / 10000.0 : 20.0;
+    double range_km = 50.0;
+
+    (void)query_param_double(query, "lat", &lat);
+    (void)query_param_double(query, "lon", &lon);
+    (void)query_param_double(query, "range_km", &range_km);
+
+    if (!isfinite(lat) || lat < -85.0) lat = -85.0;
+    if (lat > 85.0) lat = 85.0;
+    if (!isfinite(lon) || lon < -180.0) lon = -180.0;
+    if (lon > 180.0) lon = 180.0;
+    if (!isfinite(range_km) || range_km < 5.0) range_km = 5.0;
+    if (range_km > 300.0) range_km = 300.0;
+
+    double dlat = range_km / 111.32;
+    double cos_lat = cos(lat * 3.14159265358979323846 / 180.0);
+    if (cos_lat < 0.1) cos_lat = 0.1;
+    double dlon = range_km / (111.32 * cos_lat);
+
+    map_bounds_t bounds = {
+        .lat_min = lat - dlat < -85.0 ? -85.0 : lat - dlat,
+        .lat_max = lat + dlat > 85.0 ? 85.0 : lat + dlat,
+        .lon_min = lon - dlon < -180.0 ? -180.0 : lon - dlon,
+        .lon_max = lon + dlon > 180.0 ? 180.0 : lon + dlon,
+    };
+
+    lora_map_ctx_t ctx = {
+        .buf = (char *)out,
+        .len = 0,
+        .cap = size < LORA_MAP_MAX_BYTES ? size : LORA_MAP_MAX_BYTES,
+    };
+
+    if (!lora_map_appendf(&ctx, LORA_MAP_TAIL_RESERVE,
+                          "{\"bounds\":[%.3f,%.3f,%.3f,%.3f],\"lines\":[",
+                          bounds.lat_min, bounds.lat_max, bounds.lon_min, bounds.lon_max)) {
+        reply_error(reply, out, size, 500, "the reply doesn't fit");
+        return;
+    }
+
+    const map_data_t *map = app_radar_map();
+    if (map != NULL) {
+        map_data_segments(map, &bounds, lora_map_seg_cb, &ctx);
+        if (ctx.in_line) {
+            ctx.full = false;
+            (void)lora_map_appendf(&ctx, 16, "]");
+            ctx.in_line = false;
+        }
+        ctx.full = false;
+        (void)lora_map_appendf(&ctx, 8, "],\"towns\":[");
+        map_data_towns(map, &bounds, lora_map_town_cb, &ctx);
+    } else {
+        (void)lora_map_appendf(&ctx, 8, "],\"towns\":[");
+    }
+
+    ctx.full = false;
+    if (!lora_map_appendf(&ctx, 0, "]}")) {
+        reply_error(reply, out, size, 500, "the reply doesn't fit");
+        return;
+    }
+    reply_text(reply, out, size, ctx.len);
+}
+
 void app_web_api(const char *method, const char *path, const char *query, const char *body, uint8_t *out,
                  size_t size, webui_reply_t *reply)
 {
@@ -832,6 +1163,8 @@ void app_web_api(const char *method, const char *path, const char *query, const 
     } else if (strcmp(path, "/api/lora/reset") == 0 && strcmp(method, "POST") == 0) {
         lora_widget_reset_stats();
         reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
+    } else if (strcmp(path, "/api/lora/map") == 0 && get) {
+        lora_map_get(query, out, size, reply);
     } else if (strcmp(path, "/api/lora/stats") == 0 && get) {
         lora_stats_t ls = lora_widget_get_stats();
         cJSON *o = cJSON_CreateObject();
@@ -938,6 +1271,231 @@ void app_web_api(const char *method, const char *path, const char *query, const 
         } else {
             reply_error(reply, out, size, 500, "failed to send discover");
         }
+    } else if (strcmp(path, "/api/lora/chat") == 0 && get) {
+        time_t now = time(NULL);
+        lora_stats_t ls = lora_widget_get_stats();
+        size_t n_contacts = lora_widget_get_contact_count();
+        bool have_q = false;
+        uint32_t q_msg_seq = 0, q_adv_seq = 0, q_contacts = 0;
+        if (query != NULL && query[0] != '\0') {
+            const char *m_p = strstr(query, "msg_seq=");
+            const char *a_p = strstr(query, "adv_seq=");
+            const char *c_p = strstr(query, "contacts=");
+            if (m_p && a_p && c_p) {
+                q_msg_seq = (uint32_t)strtoul(m_p + 8, NULL, 10);
+                q_adv_seq = (uint32_t)strtoul(a_p + 8, NULL, 10);
+                q_contacts = (uint32_t)strtoul(c_p + 9, NULL, 10);
+                have_q = true;
+            }
+        }
+        cJSON *res = cJSON_CreateObject();
+        cJSON_AddBoolToObject(res, "ok", true);
+        if (have_q && ls.msg_seq == q_msg_seq && ls.advert_seq == q_adv_seq && (uint32_t)n_contacts == q_contacts) {
+            cJSON_AddBoolToObject(res, "unchanged", true);
+            cJSON *lora = cJSON_AddObjectToObject(res, "lora");
+            cJSON_AddBoolToObject(lora, "enabled", ls.enabled);
+            cJSON_AddBoolToObject(lora, "initialized", ls.initialized);
+            cJSON_AddNumberToObject(lora, "ble_pin", ls.ble_pin);
+            cJSON_AddBoolToObject(lora, "ble_connected", ls.ble_connected);
+            cJSON_AddNumberToObject(lora, "noise_floor_dbm", ls.noise_floor_dbm);
+            cJSON_AddNumberToObject(lora, "last_rssi_dbm", ls.last_rssi_dbm);
+            cJSON_AddNumberToObject(lora, "last_snr_db", (double)ls.last_snr_q4 / 4.0);
+            cJSON_AddNumberToObject(lora, "packet_count", ls.packet_count);
+            cJSON_AddNumberToObject(lora, "packets_sent", ls.packets_sent);
+            cJSON_AddNumberToObject(lora, "recv_flood", ls.recv_flood);
+            cJSON_AddNumberToObject(lora, "recv_direct", ls.recv_direct);
+            cJSON_AddNumberToObject(lora, "sent_flood", ls.sent_flood);
+            cJSON_AddNumberToObject(lora, "sent_direct", ls.sent_direct);
+            cJSON_AddNumberToObject(lora, "recv_errors", ls.recv_errors);
+            cJSON_AddNumberToObject(lora, "tx_air_ms", ls.tx_air_ms);
+            cJSON_AddNumberToObject(lora, "rx_air_ms", ls.rx_air_ms);
+            cJSON_AddNumberToObject(lora, "msg_seq", ls.msg_seq);
+            cJSON_AddNumberToObject(lora, "advert_seq", ls.advert_seq);
+            cJSON_AddNumberToObject(lora, "last_packet_at", ls.last_packet_time_s);
+            if (ls.last_packet_time_s != 0 && now >= (time_t)ls.last_packet_time_s) {
+                cJSON_AddNumberToObject(lora, "age_s", (double)(now - (time_t)ls.last_packet_time_s));
+            } else {
+                cJSON_AddNullToObject(lora, "age_s");
+            }
+        } else {
+            cJSON *lora = cJSON_AddObjectToObject(res, "lora");
+            fill_lora_json(lora, now);
+        }
+        reply_cjson(reply, out, size, res);
+    } else if (strcmp(path, "/api/lora/messages/clear") == 0 && strcmp(method, "POST") == 0) {
+        esp_err_t err = lora_widget_clear_messages();
+        if (err == ESP_OK) {
+            reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
+        } else {
+            reply_error(reply, out, size, 500, "failed to clear messages");
+        }
+    } else if (strcmp(path, "/api/lora/contacts") == 0 && strcmp(method, "POST") == 0) {
+        cJSON *in = cJSON_Parse(body);
+        const cJSON *act = in != NULL ? cJSON_GetObjectItemCaseSensitive(in, "action") : NULL;
+        const cJSON *pk_item = in != NULL ? cJSON_GetObjectItemCaseSensitive(in, "pub_key") : NULL;
+        uint8_t pub_key[32];
+        if (!cJSON_IsString(act) || act->valuestring == NULL ||
+            !cJSON_IsString(pk_item) || !hex_to_bytes(pk_item->valuestring, pub_key, sizeof(pub_key))) {
+            cJSON_Delete(in);
+            reply_error(reply, out, size, 400, "invalid action or pub_key");
+        } else if (strcmp(act->valuestring, "delete") == 0) {
+            esp_err_t err = lora_widget_remove_contact(pub_key);
+            cJSON_Delete(in);
+            if (err == ESP_OK) {
+                reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
+            } else {
+                reply_error(reply, out, size, 404, "contact not found");
+            }
+        } else if (strcmp(act->valuestring, "reset_path") == 0) {
+            esp_err_t err = lora_widget_reset_contact_path(pub_key);
+            cJSON_Delete(in);
+            if (err == ESP_OK) {
+                reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
+            } else {
+                reply_error(reply, out, size, 404, "contact not found");
+            }
+        } else if (strcmp(act->valuestring, "save") == 0) {
+            companion_contact_t c = {0};
+            c.out_path_len = -1;
+            bool found = false;
+            size_t n_contacts = lora_widget_get_contact_count();
+            for (size_t i = 0; i < n_contacts && i < COMPANION_MAX_CONTACTS; i++) {
+                companion_contact_t existing;
+                if (lora_widget_get_contact(i, &existing) != ESP_OK) break;
+                if (memcmp(existing.pub_key, pub_key, 32) == 0) {
+                    c = existing;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                lora_stats_t ls = lora_widget_get_stats();
+                for (size_t i = 0; i < ls.advert_count && i < MESHCORE_MAX_ADVERTS; i++) {
+                    meshcore_advert_t adv;
+                    if (!lora_widget_get_advert(i, &adv)) break;
+                    if (memcmp(adv.pub_key, pub_key, 32) == 0) {
+                        snprintf(c.name, sizeof(c.name), "%s", adv.name);
+                        c.type = adv.node_type;
+                        c.last_advert_ts = adv.rx_time_s;
+                        if (adv.has_loc) {
+                            c.lat_e6 = adv.lat_e6;
+                            c.lon_e6 = adv.lon_e6;
+                        }
+                        break;
+                    }
+                }
+            }
+            memcpy(c.pub_key, pub_key, 32);
+            const cJSON *name_item = cJSON_GetObjectItemCaseSensitive(in, "name");
+            if (cJSON_IsString(name_item) && name_item->valuestring != NULL) {
+                snprintf(c.name, sizeof(c.name), "%s", name_item->valuestring);
+            }
+            const cJSON *type_item = cJSON_GetObjectItemCaseSensitive(in, "type");
+            if (cJSON_IsNumber(type_item)) {
+                c.type = (uint8_t)type_item->valueint;
+            }
+            const cJSON *lat_item = cJSON_GetObjectItemCaseSensitive(in, "lat");
+            const cJSON *lon_item = cJSON_GetObjectItemCaseSensitive(in, "lon");
+            if (cJSON_IsNumber(lat_item) && cJSON_IsNumber(lon_item)) {
+                c.lat_e6 = (int32_t)(lat_item->valuedouble * 1000000.0);
+                c.lon_e6 = (int32_t)(lon_item->valuedouble * 1000000.0);
+            }
+            c.lastmod = (uint32_t)time(NULL);
+            esp_err_t err = lora_widget_save_contact(&c);
+            cJSON_Delete(in);
+            if (err == ESP_OK) {
+                reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
+            } else {
+                reply_error(reply, out, size, 500, "failed to save contact");
+            }
+        } else {
+            cJSON_Delete(in);
+            reply_error(reply, out, size, 400, "unknown action");
+        }
+    } else if (strcmp(path, "/api/lora/channels") == 0 && strcmp(method, "POST") == 0) {
+        cJSON *in = cJSON_Parse(body);
+        const cJSON *idx_item = in != NULL ? cJSON_GetObjectItemCaseSensitive(in, "index") : NULL;
+        const cJSON *en_item = in != NULL ? cJSON_GetObjectItemCaseSensitive(in, "enabled") : NULL;
+        const cJSON *name_item = in != NULL ? cJSON_GetObjectItemCaseSensitive(in, "name") : NULL;
+        const cJSON *mode_item = in != NULL ? cJSON_GetObjectItemCaseSensitive(in, "key_mode") : NULL;
+        const cJSON *key_item = in != NULL ? cJSON_GetObjectItemCaseSensitive(in, "key") : NULL;
+
+        if (!cJSON_IsNumber(idx_item) || idx_item->valueint < 0 || idx_item->valueint >= COMPANION_MAX_CHANNELS) {
+            cJSON_Delete(in);
+            reply_error(reply, out, size, 400, "invalid channel index");
+        } else {
+            uint8_t idx = (uint8_t)idx_item->valueint;
+            bool enabled = cJSON_IsBool(en_item) ? cJSON_IsTrue(en_item) : true;
+            const char *name = (cJSON_IsString(name_item) && name_item->valuestring != NULL) ? name_item->valuestring : "";
+            const char *mode = (cJSON_IsString(mode_item) && mode_item->valuestring != NULL) ? mode_item->valuestring : NULL;
+            const char *key = (cJSON_IsString(key_item) && key_item->valuestring != NULL) ? key_item->valuestring : "";
+
+            if (idx == 0 && !enabled) {
+                cJSON_Delete(in);
+                reply_error(reply, out, size, 400, "cannot disable slot 0");
+            } else if (enabled && name[0] == '\0') {
+                cJSON_Delete(in);
+                reply_error(reply, out, size, 400, "missing channel name");
+            } else {
+                uint8_t secret[16] = {0};
+                bool key_ok = true;
+                if (enabled) {
+                    if (mode != NULL && strcmp(mode, "public") == 0) {
+                        key_ok = (util_base64_decode(LORA_DEFAULT_PUBLIC_PSK, secret, sizeof(secret)) == 16);
+                    } else if (mode != NULL && strcmp(mode, "base64") == 0) {
+                        key_ok = (util_base64_decode(key, secret, sizeof(secret)) == 16);
+                    } else if (mode != NULL && strcmp(mode, "hex") == 0) {
+                        key_ok = hex_to_bytes(key, secret, sizeof(secret));
+                    } else if (mode != NULL && strcmp(mode, "passphrase") == 0) {
+                        const char *pass = (key[0] != '\0') ? key : name;
+                        if (pass[0] == '\0') {
+                            key_ok = false;
+                        } else {
+                            uint8_t hash[UTIL_SHA256_LEN];
+                            util_sha256(pass, strlen(pass), hash);
+                            memcpy(secret, hash, 16);
+                        }
+                    } else if (mode != NULL && strcmp(mode, "keep") == 0) {
+                        companion_channel_t cur = {0};
+                        if (lora_widget_get_channel(idx, &cur) == ESP_OK && cur.valid) {
+                            memcpy(secret, cur.secret, 16);
+                        } else {
+                            key_ok = false;
+                        }
+                    } else if (mode == NULL && name[0] == '#' && key[0] == '\0') {
+                        uint8_t hash[UTIL_SHA256_LEN];
+                        util_sha256(name, strlen(name), hash);
+                        memcpy(secret, hash, 16);
+                    } else {
+                        key_ok = false;
+                    }
+                }
+
+                if (!key_ok) {
+                    memset(secret, 0, sizeof(secret));
+                    cJSON_Delete(in);
+                    reply_error(reply, out, size, 400, "invalid key or key_mode");
+                } else {
+                    esp_err_t err = lora_widget_set_channel(idx, enabled, name, secret);
+                    if (err == ESP_OK && idx == 0) {
+                        char b64_psk[32] = {0};
+                        util_base64_encode(secret, 16, b64_psk, sizeof(b64_psk));
+                        snprintf(app_state()->settings.lora.channel_name,
+                                 sizeof(app_state()->settings.lora.channel_name), "%s", name);
+                        app_lora_sync_psk_secret(b64_psk);
+                        memset(b64_psk, 0, sizeof(b64_psk));
+                        app_ui_save_settings();
+                    }
+                    memset(secret, 0, sizeof(secret));
+                    cJSON_Delete(in);
+                    if (err == ESP_OK) {
+                        reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
+                    } else {
+                        reply_error(reply, out, size, 500, "failed to set channel");
+                    }
+                }
+            }
+        }
     } else if (strcmp(path, "/api/lora/send") == 0 && strcmp(method, "POST") == 0) {
         cJSON *in = cJSON_Parse(body);
         const cJSON *t = in != NULL ? cJSON_GetObjectItemCaseSensitive(in, "text") : NULL;
@@ -945,9 +1503,44 @@ void app_web_api(const char *method, const char *path, const char *query, const 
             cJSON_Delete(in);
             reply_error(reply, out, size, 400, "missing text");
         } else {
-            esp_err_t err = lora_widget_send_channel_msg(t->valuestring);
+            const cJSON *to_item = cJSON_GetObjectItemCaseSensitive(in, "to");
+            const cJSON *ch_item = cJSON_GetObjectItemCaseSensitive(in, "channel");
+            esp_err_t err = ESP_FAIL;
+            bool bad_req = false;
+            const char *bad_msg = "invalid request";
+
+            if (to_item != NULL && !cJSON_IsNull(to_item)) {
+                uint8_t pub_key[32];
+                if (!cJSON_IsString(to_item) || !hex_to_bytes(to_item->valuestring, pub_key, sizeof(pub_key))) {
+                    bad_req = true;
+                    bad_msg = "invalid to pub_key";
+                } else {
+                    const cJSON *ff_item = cJSON_GetObjectItemCaseSensitive(in, "force_flood");
+                    bool force_flood = cJSON_IsTrue(ff_item);
+                    err = lora_widget_send_direct_msg(pub_key, t->valuestring, force_flood);
+                }
+            } else if (ch_item != NULL && !cJSON_IsNull(ch_item)) {
+                if (!cJSON_IsNumber(ch_item) || ch_item->valueint < 0 || ch_item->valueint >= COMPANION_MAX_CHANNELS) {
+                    bad_req = true;
+                    bad_msg = "invalid channel";
+                } else {
+                    uint8_t ch_idx = (uint8_t)ch_item->valueint;
+                    companion_channel_t ch = {0};
+                    if (lora_widget_get_channel(ch_idx, &ch) != ESP_OK || !ch.valid) {
+                        bad_req = true;
+                        bad_msg = "channel not enabled";
+                    } else {
+                        err = lora_widget_send_channel_msg_ex(ch_idx, 0, t->valuestring);
+                    }
+                }
+            } else {
+                err = lora_widget_send_channel_msg(t->valuestring);
+            }
+
             cJSON_Delete(in);
-            if (err == ESP_OK) {
+            if (bad_req) {
+                reply_error(reply, out, size, 400, bad_msg);
+            } else if (err == ESP_OK) {
                 reply_text(reply, out, size, (size_t)snprintf((char *)out, size, "{\"ok\":true}"));
             } else {
                 reply_error(reply, out, size, 500, "failed to send message");
@@ -960,7 +1553,7 @@ void app_web_api(const char *method, const char *path, const char *query, const 
             cJSON_Delete(in);
             reply_error(reply, out, size, 400, "missing cmd");
         } else {
-            EXT_RAM_BSS_ATTR static char reply_buf[1536];
+            EXT_RAM_BSS_ATTR static char reply_buf[4096];
             reply_buf[0] = '\0';
             app_lora_exec_cli(cmd->valuestring, reply_buf, sizeof(reply_buf));
             cJSON_Delete(in);

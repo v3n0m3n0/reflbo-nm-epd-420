@@ -50,7 +50,19 @@ nav a {
   flex: none; padding: 6px 12px; border-radius: 999px;
   color: var(--ink); text-decoration: none; white-space: nowrap;
 }
-nav a.on { background: var(--ink); color: var(--bg); }
+nav a[aria-current="page"], nav a.on {
+  background: var(--ink);
+  color: var(--bg);
+  font-weight: 700;
+  border-bottom: 2px solid var(--accent);
+}
+nav a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (max-width: 900px) {
+  nav { flex-wrap: wrap; }
+}
 main { max-width: 760px; margin: 0 auto; padding: 16px 16px 64px; }
 h1 { font-size: 1.35rem; margin: 4px 0 14px; }
 h2 { font-size: 1.05rem; margin: 0 0 10px; }
@@ -180,4 +192,368 @@ pre#lora-cli-output {
 .badge.chat { background: #16a34a; color: #fff; }
 .badge.room { background: #9333ea; color: #fff; }
 .badge.sensor { background: #d97706; color: #fff; }
+.badge.unread {
+  background: var(--bad);
+  color: #fff;
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+.badge.saved, .badge.type {
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+.badge.channel {
+  text-transform: none;
+}
+.btn.small {
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+.conv-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.conv-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.conv-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.conv-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.75;
+}
+.conv-tab-close:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.15);
+}
+.chat-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.chat-toolbar label.check {
+  margin: 0;
+  gap: 6px;
+}
+.chat-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.chat-sender-btn {
+  all: unset;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--accent);
+}
+.chat-sender-btn:hover { text-decoration: underline; }
+.chat-body {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 14px;
+}
+.chat-msg.dm {
+  border-left: 3px solid var(--accent);
+  background: var(--bg);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.chat-ack {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.chat-ack.pending { color: var(--muted); }
+.chat-ack.delivered { color: var(--good); }
+.chat-ack.timeout { color: var(--bad); }
+.composer-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.composer-meta .over {
+  color: var(--bad);
+  font-weight: 600;
+}
+.contacts-filter {
+  margin-top: 6px;
+}
+.contacts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.contact-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.contact-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.contact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.import-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.import-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 10px;
+}
+.channels-table-wrap {
+  container-type: inline-size;
+  overflow-x: auto;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.channels-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.channels-table th,
+.channels-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+}
+.channels-table tr:last-child td { border-bottom: 0; }
+.channels-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.channels-table input[type=text],
+.channels-table select {
+  padding: 5px 8px;
+  font-size: 13px;
+  min-width: 90px;
+}
+#lora-node-map {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px auto 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  cursor: grab;
+  touch-action: none;
+}
+#lora-node-map:active {
+  cursor: grabbing;
+}
+.map-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+.map-range-badge {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.map-nogps-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-soft, rgba(128,128,128,0.04));
+}
+.map-nogps-chip {
+  padding: 2px 8px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+.map-nogps-chip.active {
+  border-color: var(--accent, #2563eb);
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--accent, #2563eb);
+  font-weight: 600;
+}
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.map-inspector {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-soft, rgba(128,128,128,0.04));
+  overflow-wrap: anywhere;
+}
+.map-inspector code {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+.map-inspector-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px 12px;
+  margin: 8px 0;
+  font-size: 13px;
+}
+@media (max-width: 760px) {
+  .contact-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  #lora-adverts-box .list li {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .contact-actions {
+    justify-content: flex-start;
+  }
+  .composer-meta {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+}
+
+.lora-subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 14px;
+}
+.lora-subtab {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.9rem;
+}
+.lora-subtab[aria-selected="true"] {
+  background: var(--ink);
+  color: var(--bg);
+  border-color: var(--ink);
+  font-weight: 600;
+}
+.lora-subtab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.lora-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px 14px;
+  margin: 10px 0;
+}
+.lora-settings-grid label {
+  margin-top: 0;
+}
+.lora-settings-grid > .field {
+  margin: 0;
+}
+@container (width < 600px) {
+  .channels-table,
+  .channels-table tbody,
+  .channels-table tr,
+  .channels-table td {
+    display: block;
+    width: 100%;
+  }
+  .channels-table thead {
+    display: none;
+  }
+  .channels-table tr {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .channels-table td {
+    border-bottom: 0;
+    padding: 4px 0;
+  }
+  .channels-table td[data-label]::before {
+    content: attr(data-label) ": ";
+    font-weight: 600;
+    color: var(--muted);
+    margin-right: 6px;
+  }
+}
 

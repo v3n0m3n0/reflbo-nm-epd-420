@@ -17,8 +17,8 @@ static const ui_slot_t k_weather[] = {
     { "now", { 0, 21, 200, 160 }, UI_SIZE_L, UI_KINDS_L },
     { "today", { 200, 21, 200, 80 }, UI_SIZE_M, UI_KINDS_M },
     { "hourly", { 200, 101, 200, 80 }, UI_SIZE_M, UI_KINDS_M },
-    { "s1", { 0, 182, 200, 118 }, UI_SIZE_S, UI_KINDS_S },
-    { "s2", { 200, 182, 200, 118 }, UI_SIZE_S, UI_KINDS_S },
+    { "s1", { 0, 182, 200, 118 }, UI_SIZE_M, UI_KINDS_M },
+    { "s2", { 200, 182, 200, 118 }, UI_SIZE_M, UI_KINDS_M },
 };
 
 static const ui_slot_t k_grid[] = {

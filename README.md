@@ -32,6 +32,26 @@ This project is an independent hardware port derived from Dan Vybiral's [**`Vybo
 
 ---
 
+## Screenshots
+
+### E-Paper Display (`400×300`, 1-bit B/W)
+
+| Weather Preset (48 px Icons) | Rain Radar (Multi-Gradient RainViewer) |
+|---|---|
+| ![Weather preset](docs/images/epd_weather.png) | ![Rain radar preset](docs/images/epd_rain_radar.png) |
+
+| LoRa MeshCore Preset | Wi-Fi Setup (`KEY` to close) |
+|---|---|
+| ![LoRa preset](docs/images/epd_lora.png) | ![Wi-Fi setup screen](docs/images/epd_wifi_setup.png) |
+
+### Web UI (`#lora` Geo Map & Mobile View)
+
+| Desktop Geo Map (Poland Voivodeships) | Mobile Responsive View |
+|---|---|
+| ![Web UI LoRa Geo Map](docs/images/webui_lora_map_desktop.png) | ![Web UI LoRa Mobile](docs/images/webui_lora_mobile.png) |
+
+---
+
 ## RockBase NM-EPD-420 Hardware Pinout
 
 Authoritative pin definitions live in [`components/board/include/board_pins.h`](components/board/include/board_pins.h):

@@ -140,7 +140,9 @@ typedef struct {
 
 static void on_segment(void *arg, map_line_kind_t kind, double lat0, double lon0, double lat1, double lon1)
 {
-    (void)kind; /* borders and coasts look alike: 1 px lines */
+    if (kind == MAP_LINE_ADMIN1) {
+        return;
+    }
     lines_ctx_t *c = arg;
     float ax, ay, bx, by;
     fast_project(&c->fast, lat0, lon0, &ax, &ay);

@@ -96,7 +96,7 @@ async function load(routes = {}, opts = {}) {
     ...routes,
   });
   const ctx = vm.createContext({
-    document, Node: FakeNode, Blob, TextEncoder, Intl, URL: url, console,
+    document, Node: FakeNode, Blob, TextEncoder, Intl, URL: url, URLSearchParams, console,
     fetch: (path, init) => { calls.push({ path, init }); return answer(path, init); },
     setTimeout: () => 0, clearTimeout() {}, confirm: opts.confirm || (() => true),
     location: { hash: '', reload() {} }, window: { scrollTo() {}, scrollY: 0 }, ZONES: {},
@@ -528,6 +528,27 @@ test('the location again clears a radar\'s own centre', async () => {
   pick(main, 'wx-centre', 'The location');
   await buttonNamed(main, 'Save weather radar').click();
   assert.deepEqual(patches.at(-1), { radar: { weather: { lat: null, lon: null, zoom: 7 } } }); /* RFC 7396 removes them */
+});
+
+test('the Radar page saves a weather radar source and reverts to auto with null', async () => {
+  const patches = [], previews = [];
+  const { ctx, main } = await load(radarDevice(RADAR_SETTINGS, patches, previews));
+  await ctx.radarPage();
+  const src = below(main).find((e) => e.tag === 'select' && e.attrs.name === 'source');
+  assert.equal(src.value, 'auto');
+  src.value = 'rainviewer';
+  await buttonNamed(main, 'Save weather radar').click();
+  assert.deepEqual(patches.at(-1), { radar: { weather: { lat: null, lon: null, zoom: 6.5, source: 'rainviewer' } } });
+
+  const withSource = { ...RADAR_SETTINGS, radar: { weather: { source: 'rainviewer', zoom: 6.5 }, flights: {} } };
+  const patches2 = [];
+  const r2 = await load(radarDevice(withSource, patches2, []));
+  await r2.ctx.radarPage();
+  const src2 = below(r2.main).find((e) => e.tag === 'select' && e.attrs.name === 'source');
+  assert.equal(src2.value, 'rainviewer');
+  src2.value = 'auto';
+  await buttonNamed(r2.main, 'Save weather radar').click();
+  assert.deepEqual(patches2.at(-1), { radar: { weather: { lat: null, lon: null, zoom: 6.5, source: null } } });
 });
 
 test('the flight radar\'s filters are saved within their bounds', async () => {
@@ -1665,6 +1686,25 @@ function loraDevice(patches, customSettings = {}, customStatus = {}, resetCalls 
     },
     'POST /api/lora/send': (init) => {
       actions.send = JSON.parse(init.body || '{}');
+      (actions.sends ||= []).push(actions.send);
+      return reply(200, { ok: true });
+    },
+    'GET /api/lora/chat': () => {
+      actions.chatGets = (actions.chatGets || 0) + 1;
+      return reply(200, { messages: currentStatus.lora?.messages || [] });
+    },
+    'POST /api/lora/contacts': (init) => {
+      actions.contacts = JSON.parse(init.body || '{}');
+      (actions.contactsLog ||= []).push(actions.contacts);
+      return reply(200, { ok: true });
+    },
+    'POST /api/lora/channels': (init) => {
+      actions.channels = JSON.parse(init.body || '{}');
+      return reply(200, { ok: true });
+    },
+    'POST /api/lora/messages/clear': () => {
+      actions.clearMessages = (actions.clearMessages || 0) + 1;
+      if (currentStatus.lora) currentStatus.lora.messages = [];
       return reply(200, { ok: true });
     },
     'POST /api/lora/cli': (init) => {
@@ -2282,5 +2322,600 @@ test('LoRa live status shows legacy_identity warning and Reset identity calls PO
   assert.match(text(main), /fedcba9876543210/);
   assert.match(text(main), /765432/);
 });
+
+test('LoRa multi-channel tabs switch composer placeholder and send channel payload', async () => {
+  const actionsCalled = {};
+  const dev = loraDevice([], {}, {
+    lora: {
+      channels: [
+        { index: 0, enabled: true, name: 'Public' },
+        { index: 1, enabled: true, name: 'TeamOps' },
+      ],
+    },
+  }, [], actionsCalled);
+  const { ctx, main } = await load(dev);
+  await ctx.loraPage();
+
+  const ch1Tab = below(main).find((e) => e.tag === 'button' && text(e) === '#1 TeamOps');
+  assert.ok(ch1Tab, 'channel #1 tab exists');
+  await ch1Tab.click();
+  await settle();
+
+  const chatInput = below(main).find((e) => e.attrs?.id === 'lora-chat-input' || e.id === 'lora-chat-input');
+  const chatSend = below(main).find((e) => e.attrs?.id === 'lora-chat-send' || e.id === 'lora-chat-send');
+  assert.match(chatInput.placeholder || '', /TeamOps|#1/);
+
+  await type(chatInput, 'Team ping');
+  await chatSend.click();
+  await settle();
+  assert.deepEqual(actionsCalled.send, { text: 'Team ping', channel: 1 });
+
+  const allTab = below(main).find((e) => e.tag === 'button' && text(e) === 'All');
+  assert.ok(allTab, 'All tab exists');
+  await allTab.click();
+  await settle();
+
+  await type(chatInput, 'Back to public');
+  await chatSend.click();
+  await settle();
+  assert.deepEqual(actionsCalled.send, { text: 'Back to public' });
+});
+
+test('LoRa contacts lifecycle: Advert + Contact, URI import, Reset path, Remove, and Haversine distance', async () => {
+  const actionsCalled = {};
+  const pub64 = 'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899';
+  const dev = loraDevice([], { location: { lat: 50.0755, lon: 14.4378 } }, {
+    location: { lat: 50.0755, lon: 14.4378 },
+    lora: {
+      contacts: [
+        {
+          pub_key: pub64,
+          name: 'Bob',
+          type: 1,
+          out_path_len: 2,
+          lat: 49.1951,
+          lon: 16.6068,
+          age_s: 30,
+        },
+      ],
+    },
+  }, [], actionsCalled);
+  const { ctx, main } = await load(dev);
+  await ctx.loraPage();
+
+  assert.match(text(main), /Saved Contacts \(1 \/ 64\)/);
+  assert.match(text(main), /km [NESW]/);
+
+  // + Contact on Recent Adverts
+  await buttonNamed(main, '+ Contact').click();
+  await settle();
+  assert.deepEqual(actionsCalled.contacts, {
+    action: 'save',
+    pub_key: 'aabbccddeeff0011',
+    name: 'Repeater-1',
+    type: 2,
+    lat: 49.1951,
+    lon: 16.6068,
+  });
+
+  // + Add / Import Contact via meshcore:// URI
+  await buttonNamed(main, '+ Add / Import Contact').click();
+  const aliceHex = '1122334455667788990011223344556677889900112233445566778899001122';
+  const uriInput = below(main).find((e) => e.tag === 'input' && e.attrs?.placeholder === 'Paste meshcore://… URI');
+  assert.ok(uriInput, 'URI import input exists');
+  uriInput.value = `meshcore://${aliceHex}?name=Alice&type=1&lat=50.0&lon=20.0`;
+  await Promise.all((uriInput.listeners.input || []).map((fn) => fn({ target: uriInput })));
+
+  await buttonNamed(main, 'Save contact').click();
+  await settle();
+  assert.deepEqual(actionsCalled.contacts, {
+    action: 'save',
+    pub_key: aliceHex,
+    name: 'Alice',
+    type: 1,
+    lat: 50,
+    lon: 20,
+  });
+
+  // Reset path & Remove on saved contact
+  await buttonNamed(main, 'Reset path').click();
+  await settle();
+  assert.deepEqual(actionsCalled.contacts, { action: 'reset_path', pub_key: pub64 });
+
+  await buttonNamed(main, 'Remove').click();
+  await settle();
+  assert.deepEqual(actionsCalled.contacts, { action: 'delete', pub_key: pub64 });
+});
+
+test('LoRa Direct Messaging, ACK lifecycle states, and Retry (Flood)', async () => {
+  const actionsCalled = {};
+  const peerPub = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff';
+  const dev = loraDevice([], {}, {
+    lora: {
+      contacts: [{ pub_key: peerPub, name: 'Alice', type: 1, age_s: 10 }],
+      messages: [
+        { direct: true, outgoing: true, peer_pub: peerPub, sender: 'Me', text: 'Ping 1', ack: 1, age_s: 5 },
+        { direct: true, outgoing: true, peer_pub: peerPub, sender: 'Me', text: 'Ping 2', ack: 2, ack_rtt_ms: 340, age_s: 4 },
+        { direct: true, outgoing: true, peer_pub: peerPub, sender: 'Me', text: 'Ping 3', ack: 3, age_s: 3 },
+      ],
+    },
+  }, [], actionsCalled);
+  const { ctx, main } = await load(dev);
+  await ctx.loraPage();
+
+  const txt = text(main);
+  assert.match(txt, /Waiting ACK…/);
+  assert.match(txt, /Delivered \(340 ms\)/);
+  assert.match(txt, /No ACK/);
+
+  // Open DM tab from Saved Contacts Message button
+  await buttonNamed(main, 'Message').click();
+  await settle();
+
+  const chatInput = below(main).find((e) => e.attrs?.id === 'lora-chat-input' || e.id === 'lora-chat-input');
+  const chatSend = below(main).find((e) => e.attrs?.id === 'lora-chat-send' || e.id === 'lora-chat-send');
+  await type(chatInput, 'Secret DM');
+  await chatSend.click();
+  await settle();
+  assert.deepEqual(actionsCalled.send, { text: 'Secret DM', to: peerPub, force_flood: false });
+
+  // Retry (Flood) on ack: 3
+  await buttonNamed(main, 'Retry (Flood)').click();
+  await settle();
+  assert.deepEqual(actionsCalled.send, { text: 'Ping 3', to: peerPub, force_flood: true });
+});
+
+test('LoRa channels manager, Clear history, composer meta, copy URI, and route() cleanup', async () => {
+  const actionsCalled = {};
+  const dev = loraDevice([], { location: { lat: 50.0755, lon: 14.4378 } }, {
+    location: { lat: 50.0755, lon: 14.4378 },
+  }, [], actionsCalled);
+  const { ctx, main } = await load(dev);
+  await ctx.loraPage();
+
+  // Channel slot #1 Save slot
+  const chTable = below(main).find((e) => e.attrs?.id === 'lora-channels-table' || e.id === 'lora-channels-table');
+  assert.ok(chTable, '#lora-channels-table exists');
+  const tbody = chTable.children.find((c) => c.tag === 'tbody');
+  const row1 = tbody.children[1];
+  const ch1Enable = row1.children[1].children[0];
+  const ch1Name = row1.children[2].children[0];
+  const ch1Mode = row1.children[3].children[0];
+  const ch1Key = row1.children[4].children[0];
+  ch1Enable.checked = true;
+  ch1Name.value = 'Ops';
+  ch1Mode.value = 'passphrase';
+  ch1Key.value = 'secret-pass';
+  await buttonNamed(row1, 'Save slot').click();
+  await settle();
+  assert.deepEqual(actionsCalled.channels, {
+    index: 1,
+    enabled: true,
+    name: 'Ops',
+    key_mode: 'passphrase',
+    key: 'secret-pass',
+  });
+
+  // Live UTF-8 byte counter & airtime estimate
+  const chatInput = below(main).find((e) => e.attrs?.id === 'lora-chat-input' || e.id === 'lora-chat-input');
+  chatInput.value = 'Ahoj světe';
+  await Promise.all((chatInput.listeners.input || []).map((fn) => fn({ target: chatInput })));
+  const metaEl = below(main).find((e) => (e.className || '').includes('composer-meta'));
+  assert.ok(metaEl, '.composer-meta exists');
+  assert.match(text(metaEl), /11 \/ 120 B/);
+  assert.match(text(metaEl), /Est\. airtime: ~\d+ ms @ SF7\/BW250/);
+
+  // Clear history
+  await buttonNamed(main, 'Clear history').click();
+  await settle();
+  assert.equal(actionsCalled.clearMessages, 1);
+
+  // Copy meshcore:// URI button
+  const copyBtn = below(main).find((e) => e.attrs?.id === 'lora-btn-copy-uri' || e.id === 'lora-btn-copy-uri');
+  assert.ok(copyBtn, '#lora-btn-copy-uri exists');
+  await copyBtn.click();
+
+  // Navigating away from #lora to #status restores document.title = 'reflbo'
+  ctx.document.title = '(2) reflbo';
+  ctx.location.hash = '#status';
+  ctx.route();
+  await settle();
+  assert.equal(ctx.document.title, 'reflbo');
+});
+
+test('LoRa 2B/3B out_path_len decoding, Sensor URI import, and Clear history cancel guard', async () => {
+  const actionsCalled = {};
+  const pub2b = '1111111111111111111111111111111111111111111111111111111111111111';
+  const pub3b = '2222222222222222222222222222222222222222222222222222222222222222';
+  const pubSens = '4444444444444444444444444444444444444444444444444444444444444444';
+  const dev = loraDevice([], {}, {
+    lora: {
+      msg_seq: 5,
+      advert_seq: 3,
+      contacts: [
+        { pub_key: pub2b, name: 'TwoBytePeer', type: 1, out_path_len: 0x42, age_s: 12 },
+        { pub_key: pub3b, name: 'ThreeBytePeer', type: 2, out_path_len: -126, age_s: 20 }, /* 0x82 as int8_t */
+      ],
+    },
+  }, [], actionsCalled);
+
+  const { ctx, main } = await load(dev, { confirm: () => false });
+  await ctx.loraPage();
+
+  const txt = text(main);
+  assert.match(txt, /DIRECT \(2 hops, 2B\)/);
+  assert.match(txt, /DIRECT \(2 hops, 3B\)/);
+
+  // Cancel guard on Clear history must prevent API call
+  await buttonNamed(main, 'Clear history').click();
+  await settle();
+  assert.equal(actionsCalled.clearMessages || 0, 0);
+
+  // Import Sensor (type=4) via meshcore:// URI
+  await buttonNamed(main, '+ Add / Import Contact').click();
+  const uriIn = control(main, 'meshcore:// URI');
+  await type(uriIn, `meshcore://${pubSens}?name=RoofSensor&type=4`);
+  await buttonNamed(main, 'Save contact').click();
+  await settle();
+  assert.deepEqual(actionsCalled.contacts, {
+    action: 'save',
+    pub_key: pubSens,
+    name: 'RoofSensor',
+    type: 4,
+  });
+});
+
+test('LoRa Priority 2 UX: neighbor name resolution, contact search filter, and dynamic chat header', async () => {
+  const pubRpt = '44625f6c316df85d000000000000000000000000000000000000000000000000';
+  const pubPeer = '969692f111111111111111111111111111111111111111111111111111111111';
+  const dev = loraDevice([], {}, {
+    lora: {
+      channel_name: 'Public',
+      channel_hash: 0x11,
+      channels: [
+        { index: 0, enabled: true, name: 'Public', channel_hash: 0x11 },
+        { index: 1, enabled: true, name: '#test', channel_hash: 0x9a },
+      ],
+      neighbors: [
+        { name: '', node_type: 2, pub_key: '44625f6c316df85d', snr_in_db: 11.25, snr_out_db: 9.5, rssi_dbm: -82, age_s: 15 },
+      ],
+      contacts: [
+        { pub_key: pubRpt, name: 'SQ7ECZ-P1', type: 2, out_path_len: 0x40, age_s: 30 },
+        { pub_key: pubPeer, name: 'WG Sobolew Most', type: 2, out_path_len: 0x43, age_s: 60 },
+      ],
+    },
+  });
+
+  const { ctx, main } = await load(dev);
+  await ctx.loraPage();
+
+  // 1. Neighbor prefix 44625f6c316df85d resolves friendly name SQ7ECZ-P1 from contacts
+  assert.match(text(main), /SQ7ECZ-P1\s*44625f6c\s*Repeater/);
+  assert.match(text(main), /SNR Out 9\.5 dB · In 11\.25 dB/);
+
+  // 2. Dynamic chat header updates across All -> #1 #test -> @DM
+  assert.match(text(main), /All conversations · Primary #0: Public \(0x11\)/);
+  await buttonNamed(main, '#1 #test').click();
+  await settle();
+  assert.match(text(main), /Channel #1: #test \(0x9A\) · AES-128/);
+
+  // 3. Contact filter narrows list and updates Saved Contacts counter
+  const filterIn = below(main).find((e) => e.attrs?.id === 'lora-contact-filter' || e.id === 'lora-contact-filter');
+  assert.ok(filterIn, '#lora-contact-filter exists');
+  await type(filterIn, 'sobolew');
+  assert.match(text(main), /Saved Contacts \(1 \/ 2 of 64\)/);
+  const contactsBox = below(main).find((e) => e.attrs?.id === 'lora-contacts-box' || e.id === 'lora-contacts-box');
+  assert.match(text(contactsBox), /WG Sobolew Most/);
+  assert.doesNotMatch(text(contactsBox), /SQ7ECZ-P1/);
+
+  // Opening DM from filtered contact shows dynamic DM header with 2B route
+  await buttonNamed(contactsBox, 'Message').click();
+  await settle();
+  assert.match(text(main), /Direct Message to @WG Sobolew Most · E2E X25519 · Route: DIRECT \(3 hops, 2B\)/);
+});
+
+test('LoRa P1.3 noise_floor_dbm: 0 displays dash and full channel names in chat badges & Export .txt', async () => {
+  const peerPub = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff';
+  const dev = loraDevice([], {}, {
+    lora: {
+      noise_floor_dbm: 0,
+      channel_name: 'Public',
+      channels: [
+        { index: 0, enabled: true, name: 'Public' },
+        { index: 1, enabled: true, name: 'Ops' },
+        { index: 2, enabled: true, name: '#bot' },
+      ],
+      messages: [
+        { channel: 0, outgoing: false, sender: 'Alice', text: 'Hi public', age_s: 10 },
+        { channel: 1, outgoing: false, sender: 'Bob', text: 'Ops check', age_s: 8 },
+        { channel: 2, outgoing: false, sender: 'BotUser', text: 'Bot ping', age_s: 5 },
+        { direct: true, outgoing: true, peer_pub: peerPub, sender: 'Me', text: 'Secret DM', age_s: 2 },
+      ],
+    },
+  });
+
+  const { ctx, blobs, main } = await load(dev);
+  await ctx.loraPage();
+
+  // 1. noise_floor_dbm: 0 shows '—' (not '0 dBm') in #lora-live-status
+  const liveStatus = below(main).find((e) => e.attrs?.id === 'lora-live-status' || e.id === 'lora-live-status');
+  assert.ok(liveStatus, '#lora-live-status exists');
+  assert.match(text(liveStatus), /Noise floor\s*—/);
+  assert.doesNotMatch(text(liveStatus), /0 dBm/);
+
+  // 2. Chat badges: channel 0 has 'Public'; channel 1 has 'Ops'; channel 2 has '#bot'; DM has 'DM'
+  const chatBox = below(main).find((e) => e.attrs?.id === 'lora-chat-box' || e.id === 'lora-chat-box');
+  assert.ok(chatBox, '#lora-chat-box exists');
+  const badges = below(chatBox).filter((e) => e.tag === 'span' && (e.className || '').includes('badge'));
+  const badgeTexts = badges.map((b) => text(b));
+  assert.deepEqual(badgeTexts, ['Public', 'Ops', '#bot', 'DM']);
+
+  // 3. Export .txt: includes [Public], [Ops], [#bot], [DM]
+  await buttonNamed(main, 'Export .txt').click();
+  assert.equal(blobs.length, 1);
+  const exported = await blobs[0].text();
+  assert.doesNotMatch(exported, /\[#0\]/);
+  assert.match(exported, /\[RX\] \[Public\] Alice: Hi public/);
+  assert.match(exported, /\[RX\] \[Ops\] Bob: Ops check/);
+  assert.match(exported, /\[RX\] \[#bot\] BotUser: Bot ping/);
+  assert.match(exported, /\[TX\] \[DM\] Me: Secret DM/);
+});
+
+test('LoRa P1.2 messages without .text (having sender + body) render and export identically', async () => {
+  const dev = loraDevice([], {}, {
+    lora: {
+      channel_name: 'Public',
+      channels: [
+        { index: 0, enabled: true, name: 'Public' },
+        { index: 1, enabled: true, name: '#bot' },
+        { index: 2, enabled: true, name: '#test' },
+      ],
+      messages: [
+        { channel: 0, outgoing: false, sender: 'Alice', body: 'Hello Public', age_s: 12 },
+        { channel: 1, outgoing: false, sender: 'BotUser', body: 'Bot status', age_s: 8 },
+        { channel: 2, outgoing: true, sender: 'Me', body: 'Test ping', age_s: 4 },
+      ],
+    },
+  });
+
+  const { ctx, blobs, main } = await load(dev);
+  await ctx.loraPage();
+
+  const chatBox = below(main).find((e) => e.attrs?.id === 'lora-chat-box' || e.id === 'lora-chat-box');
+  assert.ok(chatBox, '#lora-chat-box exists');
+  const badges = below(chatBox).filter((e) => e.tag === 'span' && (e.className || '').includes('badge'));
+  assert.deepEqual(badges.map((b) => text(b)), ['Public', '#bot', '#test']);
+  assert.match(text(chatBox), /Alice/);
+  assert.match(text(chatBox), /Hello Public/);
+  assert.match(text(chatBox), /BotUser/);
+  assert.match(text(chatBox), /Bot status/);
+  assert.match(text(chatBox), /Me/);
+  assert.match(text(chatBox), /Test ping/);
+
+  await buttonNamed(main, 'Export .txt').click();
+  assert.equal(blobs.length, 1);
+  const exported = await blobs[0].text();
+  assert.match(exported, /\[RX\] \[Public\] Alice: Hello Public/);
+  assert.match(exported, /\[RX\] \[#bot\] BotUser: Bot status/);
+  assert.match(exported, /\[TX\] \[#test\] Me: Test ping/);
+});
+
+test('LoRa Interactive Geo Map, /api/lora/map cache reuse, click hit-testing, and #lora-map-inspector actions', async () => {
+  const actionsCalled = { mapFetches: 0, contacts: [] };
+  const advKey = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const noGpsKey = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+  const baseDev = loraDevice([], {}, {
+    location: { lat: 52.2297, lon: 21.0122 },
+    lora: {
+      node_name: 'WarsawBase',
+      pub_key: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      adverts: [
+        {
+          pub_key: advKey,
+          name: 'AdvRepeater',
+          node_type: 2,
+          has_loc: true,
+          lat: 52.25,
+          lon: 21.05,
+          rssi_dbm: -78,
+          snr_db: 7.5,
+          hops: 1,
+          age_s: 15,
+          rx_ts: 1700000000,
+          adv_ts: 1699999990,
+        },
+        {
+          pub_key: noGpsKey,
+          name: 'NoGpsSensor',
+          node_type: 4,
+          has_loc: false,
+          rssi_dbm: -92,
+          snr_db: 3.0,
+          hops: 0,
+          age_s: 25,
+        },
+      ],
+      contacts: [],
+      neighbors: [],
+    },
+  }, [], actionsCalled);
+
+  const dev = baseDev;
+  dev['GET /api/lora/map'] = () => {
+    actionsCalled.mapFetches += 1;
+    return reply(200, {
+      bounds: [51.5, 53.0, 20.0, 22.0],
+      lines: [
+        [0, 52.2, 21.0, 52.25, 21.05],
+        [2, 52.1, 20.9, 52.3, 21.1],
+      ],
+      towns: [
+        { name: 'Warszawa', lat: 52.2297, lon: 21.0122, pop: 1800000 },
+        { name: 'Pruszków', lat: 52.17, lon: 20.80, pop: 65000 },
+      ],
+    });
+  };
+  dev['POST /api/lora/contacts'] = (init) => {
+    actionsCalled.contacts.push(JSON.parse(init.body));
+    return reply(200, { ok: true });
+  };
+
+  const { ctx, main } = await load(dev);
+  const origCreate = ctx.document.createElement;
+  const drawCalls = [];
+  const pathCalls = [];
+  const dashCalls = [];
+  ctx.document.createElement = (tag) => {
+    const el = origCreate(tag);
+    if (tag === 'canvas') {
+      el.getContext = () => ({
+        save() {}, restore() {}, scale() {}, clearRect() {},
+        beginPath() {},
+        moveTo(x, y) { pathCalls.push(['moveTo', x, y]); },
+        lineTo(x, y) { pathCalls.push(['lineTo', x, y]); },
+        arc(x, y, r) { pathCalls.push(['arc', x, y, r]); },
+        rect(x, y, w, h) { pathCalls.push(['rect', x, y, w, h]); },
+        fillRect(x, y, w, h) { pathCalls.push(['fillRect', x, y, w, h]); },
+        closePath() {},
+        stroke() {}, fill() {},
+        setLineDash(d) { dashCalls.push(d); },
+        measureText(t) { return { width: String(t).length * 6 }; },
+        strokeText(t, x, y) { drawCalls.push({ op: 'strokeText', t, x, y }); },
+        fillText(t, x, y) { drawCalls.push({ op: 'fillText', t, x, y }); },
+      });
+      el.getBoundingClientRect = () => ({ left: 0, top: 0, width: 560, height: 360 });
+    }
+    return el;
+  };
+
+  await ctx.loraPage();
+  await settle();
+
+  assert.equal(actionsCalled.mapFetches, 1, 'initial /api/lora/map fetch');
+  assert.ok(drawCalls.some((c) => c.t === 'Pruszków'), 'renders town label from /api/lora/map');
+  assert.ok(pathCalls.every((p) => p.slice(1).every((n) => Number.isFinite(n))), 'zero NaN canvas path calls');
+  assert.ok(!dashCalls.some((d) => Array.isArray(d) && d[0] === 4 && d[1] === 4), 'no dashed outer circle in Geo Map mode');
+  assert.ok(!drawCalls.some((c) => c.t === 'NoGpsSensor'), 'no-GPS node is not drawn on Geo Map canvas');
+
+  const noGpsStrip = below(main).find((e) => (e.className || e.attrs?.class || '').includes('map-nogps-strip'));
+  assert.ok(noGpsStrip && !noGpsStrip.hidden, '.map-nogps-strip is visible');
+  const noGpsBtn = buttonNamed(noGpsStrip, 'NoGpsSensor');
+  assert.ok(noGpsBtn, 'NoGpsSensor chip exists in .map-nogps-strip');
+  await noGpsBtn.click();
+  await settle();
+  const inspNoGps = below(main).find((e) => e.attrs?.id === 'lora-map-inspector' || e.id === 'lora-map-inspector');
+  assert.match(text(inspNoGps), /NoGpsSensor/);
+
+  // Local zoom in should reuse cached bounds without extra /api/lora/map fetch
+  await buttonNamed(main, '+').click();
+  await settle();
+  assert.equal(actionsCalled.mapFetches, 1, 'reuses cached /api/lora/map vectors on local zoom');
+
+  // Click at projected position of AdvRepeater (lat 52.25, lon 21.05)
+  const canvas = below(main).find((e) => e.attrs?.id === 'lora-node-map' || e.id === 'lora-node-map');
+  assert.ok(canvas, '#lora-node-map exists');
+  await Promise.all((canvas.listeners.click || []).map((fn) => fn({ clientX: 305, clientY: 158 })));
+  await settle();
+
+  const inspector = below(main).find((e) => e.attrs?.id === 'lora-map-inspector' || e.id === 'lora-map-inspector');
+  assert.ok(inspector, '#lora-map-inspector exists');
+  const inspText = text(inspector);
+  assert.match(inspText, /AdvRepeater/);
+  assert.match(inspText, new RegExp(advKey));
+  assert.match(inspText, /RSSI -78 dBm/);
+  assert.match(inspText, /52\.25000, 21\.05000/);
+
+  // + Contact action from inspector
+  await buttonNamed(inspector, '+ Contact').click();
+  await settle();
+  assert.equal(actionsCalled.contacts.length, 1);
+  assert.equal(actionsCalled.contacts[0].action, 'save');
+  assert.equal(actionsCalled.contacts[0].pub_key, advKey);
+
+  // Message action from inspector opens DM & focuses #lora-chat-input
+  await buttonNamed(inspector, 'Message').click();
+  await settle();
+  const chatInput = below(main).find((e) => e.attrs?.id === 'lora-chat-input' || e.id === 'lora-chat-input');
+  assert.match(chatInput.placeholder || chatInput.attrs.placeholder || '', /AdvRepeater/);
+});
+
+test('Etap 2: #lora sub-tabs, aria-current, colored badges, danger buttons, airtime comma, Channels 0-7 region, and 401 poll stop', async () => {
+  const patches = [];
+  let chatCalls = 0;
+  let return401 = false;
+  const dev = {
+    ...loraDevice(patches),
+    'GET /api/status': () => reply(200, {
+      ...LORA_STATUS,
+      lora: {
+        ...LORA_STATUS.lora,
+        contacts: [{ pub_key: 'aa'.repeat(32), name: 'AlphaRep', type: 2, out_path_len: 1 }],
+      },
+    }),
+    'GET /api/lora/chat': () => {
+      chatCalls++;
+      if (return401) return reply(401, { error: 'unauthorized' });
+      return reply(200, { unchanged: true, lora: LORA_STATUS.lora });
+    },
+  };
+  const { ctx, main } = await load(dev);
+  ctx.location.hash = '#lora';
+  ctx.route();
+  await settle();
+
+  // 1. aria-current="page" on active nav link
+  const navLinks = ctx.document.querySelectorAll('nav a');
+  if (navLinks.length > 0) {
+    const loraNav = navLinks.find((a) => a.getAttribute('href') === '#lora');
+    assert.equal(loraNav.attrs['aria-current'], 'page');
+    for (const a of navLinks) {
+      if (a !== loraNav) assert.equal(a.attrs['aria-current'], undefined);
+    }
+  }
+
+  // 2. #lora sub-tabs: 'All sections' default, non-collision with chat 'All'
+  const subtabAll = buttonNamed(main, 'All sections');
+  assert.equal(subtabAll.attrs['aria-selected'], 'true');
+  assert.ok(buttonNamed(main, 'All'), 'chat All tab still exists');
+
+  const subtabChat = buttonNamed(main, 'Chat');
+  await subtabChat.click();
+  assert.equal(subtabChat.attrs['aria-selected'], 'true');
+  assert.equal(subtabAll.attrs['aria-selected'], 'false');
+
+  // ArrowRight switches from Chat -> Map & Nodes
+  await subtabChat.listeners.keydown[0]({ key: 'ArrowRight', preventDefault() {} });
+  assert.equal(buttonNamed(main, 'Map & Nodes').attrs['aria-selected'], 'true');
+  await buttonNamed(main, 'All sections').click();
+
+  // 3. Colored contact badges (no 'type' class)
+  const alphaBadge = below(main).find((e) => e.tag === 'span' && text(e) === 'Repeater' && (e.className || e.attrs?.class || '').includes('badge'));
+  assert.ok(alphaBadge, 'contact role badge exists');
+  assert.equal((alphaBadge.className || alphaBadge.attrs?.class || '').includes('type'), false);
+
+  // 4. Danger buttons
+  const rekeyBtn = buttonNamed(main, 'Reset identity');
+  const clearHistBtn = buttonNamed(main, 'Clear history');
+  assert.ok((rekeyBtn.className || rekeyBtn.attrs?.class || '').includes('danger'));
+  assert.ok((clearHistBtn.className || clearHistBtn.attrs?.class || '').includes('danger'));
+
+  // 5. airtime_factor comma normalization '1,5'
+  await type(control(main, 'Airtime factor (0–9)'), '1,5');
+  await buttonNamed(main, 'Save').click();
+  await settle();
+  assert.equal(patches.at(-1).lora.airtime_factor, 1.5);
+  assert.equal(patches.at(-1).lora.airtime_factor_x10, 15);
+
+  // 6. Channels 0-7 region & data-label
+  const chWrap = below(main).find((e) => (e.className || e.attrs?.class || '').includes('channels-table-wrap'));
+  assert.equal(chWrap.attrs.role, 'region');
+  assert.equal(chWrap.attrs['aria-label'], 'Channels 0 to 7');
+  assert.equal(chWrap.attrs.tabindex, '0');
+  const firstTd = below(chWrap).find((e) => e.tag === 'td');
+  assert.equal(firstTd.attrs['data-label'], '#');
+});
+
+
+
 
 

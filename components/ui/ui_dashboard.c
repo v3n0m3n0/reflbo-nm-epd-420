@@ -222,8 +222,14 @@ void ui_draw_dashboard(gfx_fb_t *fb, const ui_context_t *ctx, const ui_preset_t 
             any_stale |= v.state == UI_VALUE_STALE;
             if (!draw_visual(fb, layout->slots[i].rect, &c, &v, titles != NULL ? titles->visual[i] : NULL,
                              (ui_stale_policy_t)preset->stale_policy)) {
-                ui_widget_draw(fb, layout->slots[i].rect, layout->slots[i].size, &v,
-                               (ui_stale_policy_t)preset->stale_policy, c.lang);
+                if (preset->layout == UI_LAYOUT_WEATHER && (i == 3 || i == 4) &&
+                    layout->slots[i].size == UI_SIZE_M) {
+                    ui_widget_draw_iconic(fb, layout->slots[i].rect, layout->slots[i].size, &v,
+                                          (ui_stale_policy_t)preset->stale_policy, c.lang);
+                } else {
+                    ui_widget_draw(fb, layout->slots[i].rect, layout->slots[i].size, &v,
+                                   (ui_stale_policy_t)preset->stale_policy, c.lang);
+                }
             }
         }
         if (asleep) {

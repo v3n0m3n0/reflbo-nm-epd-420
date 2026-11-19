@@ -215,16 +215,34 @@ static void read_centre(const cJSON *obj, const settings_t *s, bool *set, int32_
     *lon = *set ? (int32_t)read_scaled(obj, "lon", s->lon_e4, 1e4, -1800000, 1800000) : s->lon_e4;
 }
 
-static void read_radar(const cJSON *radar, settings_t *out)
+static uint8_t choice(const cJSON *item, const char *const *names, size_t count, uint8_t fallback);
+
+static const char *const k_wx_sources[] = { [SETTINGS_WX_RADAR_AUTO] = "auto",
+                                            [SETTINGS_WX_RADAR_RAINVIEWER] = "rainviewer",
+                                            [SETTINGS_WX_RADAR_DWD] = "dwd" };
+
+static bool read_radar(const cJSON *radar, settings_t *out, char *err, size_t err_size)
 {
     const cJSON *wx = child(radar, "weather"), *fl = child(radar, "flights");
     read_centre(wx, out, &out->wx_centre_set, &out->wx_lat_e4, &out->wx_lon_e4);
     out->wx_zoom_q = (uint8_t)read_scaled(wx, "zoom", out->wx_zoom_q, 4, SETTINGS_ZOOM_Q_MIN, SETTINGS_ZOOM_Q_MAX);
+    const cJSON *src = child(wx, "source");
+    if (src != NULL && !cJSON_IsNull(src)) {
+        uint8_t v = choice(src, k_wx_sources, sizeof(k_wx_sources) / sizeof(k_wx_sources[0]), UINT8_MAX);
+        if (v == UINT8_MAX) {
+            snprintf(err, err_size, "radar.weather.source must be auto, rainviewer, or dwd");
+            return false;
+        }
+        out->wx_source = v;
+    } else if (cJSON_IsNull(src)) {
+        out->wx_source = SETTINGS_WX_RADAR_AUTO;
+    }
     read_centre(fl, out, &out->fl_centre_set, &out->fl_lat_e4, &out->fl_lon_e4);
     out->fl_range_km = (uint8_t)read_scaled(fl, "range_km", out->fl_range_km, 1, 10, 100);
     out->fl_min_alt_ft = (uint16_t)read_scaled(fl, "min_alt_ft", out->fl_min_alt_ft, 1, 0, 60000);
     read_bool(fl, "ground", &out->fl_ground);
     out->fl_max = (uint8_t)read_scaled(fl, "max", out->fl_max, 1, 1, 100);
+    return true;
 }
 
 static const char *const k_steps[] = { "weather", "air", "radar", "solar", "energy", "pc" };
@@ -529,6 +547,7 @@ bool settings_check_solar(const settings_t *s, bool fs_key_set, char *err, size_
 void settings_radar_defaults(settings_t *out)
 {
     out->wx_centre_set = false;
+    out->wx_source = SETTINGS_WX_RADAR_AUTO;
     out->wx_lat_e4 = out->lat_e4;
     out->wx_lon_e4 = out->lon_e4;
     out->wx_zoom_q = 26;
@@ -633,7 +652,10 @@ bool settings_from_json(const char *json, const settings_t *defaults, settings_t
     }
     read_ntp(child(time, "ntp"), out);
     read_sync(child(root, "sync"), out);
-    read_radar(child(root, "radar"), out); /* after the location, which its centres may follow */
+    if (!read_radar(child(root, "radar"), out, err, err_size)) { /* after the location, which its centres may follow */
+        cJSON_Delete(root);
+        return false;
+    }
     read_steps(child(child(root, "sync"), "steps"), out);
     if (!cJSON_IsObject(child(root, "pc"))) {
         out->sync_steps |= SETTINGS_STEP_PC; /* a steps list from before M7 never names it */
@@ -753,6 +775,11 @@ size_t settings_to_json(const settings_t *s, const char *base_json, char *out, s
     cJSON *wx = object_at(radar, "weather");
     put_centre(wx, s->wx_centre_set, s->wx_lat_e4, s->wx_lon_e4);
     put(wx, "zoom", cJSON_CreateNumber(s->wx_zoom_q / 4.0));
+    if (s->wx_source == SETTINGS_WX_RADAR_AUTO) {
+        cJSON_DeleteItemFromObjectCaseSensitive(wx, "source");
+    } else {
+        put(wx, "source", cJSON_CreateString(k_wx_sources[s->wx_source <= SETTINGS_WX_RADAR_DWD ? s->wx_source : 0]));
+    }
     cJSON *fl = object_at(radar, "flights");
     put_centre(fl, s->fl_centre_set, s->fl_lat_e4, s->fl_lon_e4);
     put(fl, "range_km", cJSON_CreateNumber(s->fl_range_km));

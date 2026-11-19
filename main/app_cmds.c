@@ -6,6 +6,7 @@
 
 #include "app_internal.h"
 #include "diag.h"
+#include "esp_attr.h"
 #include "esp_console.h"
 #include "esp_log.h"
 #include "lang.h"
@@ -701,7 +702,7 @@ static int lora_body(int argc, char **argv)
             if (w > 0) off += (size_t)w;
             if (off >= sizeof(cmd_buf) - 1) break;
         }
-        static char reply[1536];
+        EXT_RAM_BSS_ATTR static char reply[4096];
         reply[0] = '\0';
         app_lora_exec_cli(cmd_buf, reply, sizeof(reply));
         printf("%s", reply);
@@ -738,7 +739,11 @@ static int lora_body(int argc, char **argv)
         printf("  share location: %s\n", s.share_loc ? "yes" : "no");
         printf("  channel: %s (hash 0x%02X)\n", s.channel_name, s.channel_hash);
     }
-    printf("  noise floor: %d dBm\n", (int)s.noise_floor_dbm);
+    if (s.noise_floor_dbm == 0) {
+        printf("  noise floor: (not sampled)\n");
+    } else {
+        printf("  noise floor: %d dBm\n", (int)s.noise_floor_dbm);
+    }
     printf("  packets received: %lu (flood: %lu, direct: %lu, errors: %lu)\n",
            (unsigned long)s.packet_count, (unsigned long)s.recv_flood,
            (unsigned long)s.recv_direct, (unsigned long)s.recv_errors);
@@ -794,6 +799,7 @@ static int storage_body(int argc, char **argv)
         STORAGE_PRESETS_PATH,
         "/fs/state/lora_channels.bin",
         "/fs/state/lora_contacts.bin",
+        "/fs/state/lora_msgs.bin",
     };
     for (size_t i = 0; i < sizeof(k_paths) / sizeof(k_paths[0]); i++) {
         struct stat st_buf;

@@ -638,8 +638,14 @@ static void refresh_task(int64_t start)
     netmgr_status_t ns;
     netmgr_status(&ns);
     if (ns.state != NETMGR_STATION || ns.ip[0] == '\0') {
-        failed(SYNC_STEP_WIFI, "not joined");
-        return;
+        esp_err_t err = netmgr_join(JOIN_MAX_MS);
+        if (err != ESP_OK) {
+            failed(SYNC_STEP_WIFI, err == ESP_ERR_NOT_FOUND ? "no network saved"
+                                  : err == ESP_ERR_INVALID_STATE ? "Wi-Fi busy"
+                                                                 : "join failed");
+            return;
+        }
+        s_deadline_us = esp_timer_get_time() + (int64_t)REFRESH_MAX_MS * 1000;
     }
     s_report.result[SYNC_STEP_WIFI] = SYNC_STEP_OK;
     if (s_req.refresh_radar) {

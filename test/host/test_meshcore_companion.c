@@ -376,6 +376,152 @@ void test_companion_latlon_and_unsupported_cmds(void)
     }
 }
 
+static void test_companion_set_channel_slot0_syncs_cfg(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+
+    companion_env_t env = {0};
+    lora_config_t cfg = {0};
+    bool cfg_changed = false;
+
+    uint8_t resp[256];
+    uint8_t cmd[2 + 32 + 16] = {0};
+    cmd[0] = CMD_SET_CHANNEL;
+    cmd[1] = 0; /* slot 0 */
+    memcpy(&cmd[2], "Emergency", 9);
+    for (int i = 0; i < 16; i++) {
+        cmd[34 + i] = (uint8_t)(i + 1);
+    }
+
+    size_t rlen = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &cfg_changed,
+                                                cmd, sizeof(cmd),
+                                                resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_UINT32(1U, (uint32_t)rlen);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_TRUE(cfg_changed);
+    TEST_ASSERT_EQUAL_STRING("Emergency", cfg.channel_name);
+    TEST_ASSERT_TRUE(strlen(cfg.channel_psk) > 0);
+}
+
+static void build_add_update_contact_cmd(uint8_t *cmd, size_t *out_len,
+                                         const uint8_t pub_key[COMPANION_PUB_KEY_SIZE],
+                                         uint8_t type, uint8_t flags, int8_t out_path_len,
+                                         const char *name, int32_t lat_e6, int32_t lon_e6)
+{
+    size_t idx = 0;
+    cmd[idx++] = CMD_ADD_UPDATE_CONTACT;
+    memcpy(&cmd[idx], pub_key, COMPANION_PUB_KEY_SIZE);
+    idx += COMPANION_PUB_KEY_SIZE;
+    cmd[idx++] = type;
+    cmd[idx++] = flags;
+    cmd[idx++] = (uint8_t)out_path_len;
+    memset(&cmd[idx], 0, COMPANION_MAX_PATH_SIZE);
+    idx += COMPANION_MAX_PATH_SIZE;
+    memset(&cmd[idx], 0, COMPANION_NAME_SIZE);
+    if (name) {
+        strncpy((char *)&cmd[idx], name, COMPANION_NAME_SIZE - 1);
+    }
+    idx += COMPANION_NAME_SIZE;
+    uint32_t ts = 1700000000U;
+    memcpy(&cmd[idx], &ts, 4);
+    idx += 4;
+    memcpy(&cmd[idx], &lat_e6, 4);
+    idx += 4;
+    memcpy(&cmd[idx], &lon_e6, 4);
+    idx += 4;
+    memcpy(&cmd[idx], &ts, 4);
+    idx += 4;
+    *out_len = idx;
+}
+
+static void test_companion_contacts_add_reset_remove_and_max64(void)
+{
+    companion_context_t ctx;
+    meshcore_companion_init(&ctx);
+    companion_env_t env = { .get_time_s = mock_get_time_s };
+    lora_config_t cfg = {0};
+    bool changed = false;
+
+    uint8_t resp[256];
+    uint8_t cmd[256];
+    size_t cmd_len = 0;
+
+    /* 1. Add contact #0 and verify fields persisted in ctx.contacts */
+    uint8_t key0[COMPANION_PUB_KEY_SIZE] = {0};
+    key0[0] = 0xA0;
+    key0[31] = 0x01;
+    build_add_update_contact_cmd(cmd, &cmd_len, key0, 1, 0x02, 3, "Alice", 50061400, 19936600);
+    size_t rlen = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, cmd_len, resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)rlen);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(1, ctx.contact_count);
+    TEST_ASSERT_EQUAL_STRING("Alice", ctx.contacts[0].name);
+    TEST_ASSERT_EQUAL_UINT8(1, ctx.contacts[0].type);
+    TEST_ASSERT_EQUAL_INT8(3, ctx.contacts[0].out_path_len);
+    TEST_ASSERT_EQUAL_INT32(50061400, ctx.contacts[0].lat_e6);
+    TEST_ASSERT_EQUAL_INT32(19936600, ctx.contacts[0].lon_e6);
+
+    /* 2. Update existing contact with same pub_key: updates fields without increasing count */
+    build_add_update_contact_cmd(cmd, &cmd_len, key0, 2, 0x04, 5, "Alice-Updated", 52229700, 21012200);
+    rlen = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, cmd_len, resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)rlen);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(1, ctx.contact_count);
+    TEST_ASSERT_EQUAL_STRING("Alice-Updated", ctx.contacts[0].name);
+    TEST_ASSERT_EQUAL_UINT8(2, ctx.contacts[0].type);
+    TEST_ASSERT_EQUAL_INT8(5, ctx.contacts[0].out_path_len);
+    TEST_ASSERT_EQUAL_INT32(52229700, ctx.contacts[0].lat_e6);
+    TEST_ASSERT_EQUAL_INT32(21012200, ctx.contacts[0].lon_e6);
+
+    /* 3. Fill up to COMPANION_MAX_CONTACTS (64) */
+    for (uint8_t i = 1; i < COMPANION_MAX_CONTACTS; i++) {
+        uint8_t key[COMPANION_PUB_KEY_SIZE] = {0};
+        key[0] = 0xB0;
+        key[31] = i;
+        build_add_update_contact_cmd(cmd, &cmd_len, key, 1, 0, 1, "Peer", 0, 0);
+        rlen = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, cmd_len, resp, sizeof(resp));
+        TEST_ASSERT_EQUAL_INT(1, (int)rlen);
+        TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    }
+    TEST_ASSERT_EQUAL_UINT8(COMPANION_MAX_CONTACTS, ctx.contact_count);
+
+    /* 4. 65th distinct contact -> RESP_CODE_ERR (COMPANION_ERR_TABLE_FULL) */
+    uint8_t key65[COMPANION_PUB_KEY_SIZE] = {0};
+    key65[0] = 0xC0;
+    key65[31] = 0xFF;
+    build_add_update_contact_cmd(cmd, &cmd_len, key65, 1, 0, 1, "Overflow", 0, 0);
+    rlen = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, cmd_len, resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(2, (int)rlen);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_ERR, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(COMPANION_ERR_TABLE_FULL, resp[1]);
+    TEST_ASSERT_EQUAL_UINT8(COMPANION_MAX_CONTACTS, ctx.contact_count);
+
+    /* 5. CMD_RESET_PATH on contact #0 -> out_path_len == -1 and RESP_CODE_OK */
+    uint8_t reset_cmd[1 + COMPANION_PUB_KEY_SIZE];
+    reset_cmd[0] = CMD_RESET_PATH;
+    memcpy(&reset_cmd[1], key0, COMPANION_PUB_KEY_SIZE);
+    rlen = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, reset_cmd, sizeof(reset_cmd), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)rlen);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_EQUAL_INT8(-1, ctx.contacts[0].out_path_len);
+
+    /* 6. CMD_REMOVE_CONTACT -> count decrements and slot can be reused */
+    uint8_t rem_cmd[1 + COMPANION_PUB_KEY_SIZE];
+    rem_cmd[0] = CMD_REMOVE_CONTACT;
+    memcpy(&rem_cmd[1], key0, COMPANION_PUB_KEY_SIZE);
+    rlen = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, rem_cmd, sizeof(rem_cmd), resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)rlen);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(COMPANION_MAX_CONTACTS - 1, ctx.contact_count);
+
+    build_add_update_contact_cmd(cmd, &cmd_len, key65, 1, 0, 2, "Reused", 0, 0);
+    rlen = meshcore_companion_handle_cmd(&ctx, &env, &cfg, &changed, cmd, cmd_len, resp, sizeof(resp));
+    TEST_ASSERT_EQUAL_INT(1, (int)rlen);
+    TEST_ASSERT_EQUAL_UINT8(RESP_CODE_OK, resp[0]);
+    TEST_ASSERT_EQUAL_UINT8(COMPANION_MAX_CONTACTS, ctx.contact_count);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -385,5 +531,7 @@ int main(void)
     RUN_TEST(test_companion_battery_reporting_4190mv);
     RUN_TEST(test_companion_get_channel_slots_0_to_7_and_not_found_on_8);
     RUN_TEST(test_companion_set_channel_and_delete);
+    RUN_TEST(test_companion_set_channel_slot0_syncs_cfg);
+    RUN_TEST(test_companion_contacts_add_reset_remove_and_max64);
     return UNITY_END();
 }

@@ -78,6 +78,7 @@ typedef struct {
     uint32_t recv_direct;
     uint32_t sent_flood;
     uint32_t sent_direct;
+    uint32_t forwarded_count;
     uint32_t recv_errors;
     uint32_t tx_air_ms;
     uint32_t rx_air_ms;
@@ -170,3 +171,43 @@ void lora_widget_set_identity(const uint8_t seed[32], uint32_t default_pin, bool
 
 /* Registers callback invoked by CLI 'reset-identity' command to rotate NVS identity and apply changes. */
 void lora_widget_set_rekey_cb(bool (*cb)(void));
+
+#ifndef _COMPANION_TYPES_DEFINED
+#define _COMPANION_TYPES_DEFINED
+
+#define COMPANION_PUB_KEY_SIZE      32
+#define COMPANION_MAX_PATH_SIZE     64
+#define COMPANION_NAME_SIZE         32
+#define COMPANION_MAX_CONTACTS      64
+#define COMPANION_MAX_CHANNELS      8
+
+typedef struct {
+    uint8_t  pub_key[COMPANION_PUB_KEY_SIZE];
+    uint8_t  type;
+    uint8_t  flags;
+    int8_t   out_path_len;
+    uint8_t  out_path[COMPANION_MAX_PATH_SIZE];
+    char     name[COMPANION_NAME_SIZE];
+    uint32_t last_advert_ts;
+    int32_t  lat_e6;
+    int32_t  lon_e6;
+    uint32_t lastmod;
+} companion_contact_t;
+
+typedef struct {
+    char    name[COMPANION_NAME_SIZE];
+    uint8_t secret[16];
+    bool    valid;
+} companion_channel_t;
+
+#endif /* _COMPANION_TYPES_DEFINED */
+
+esp_err_t lora_widget_get_channel(uint8_t idx, companion_channel_t *out);
+esp_err_t lora_widget_set_channel(uint8_t idx, bool enabled, const char *name, const uint8_t secret[16]);
+size_t lora_widget_get_contact_count(void);
+esp_err_t lora_widget_get_contact(size_t idx, companion_contact_t *out);
+esp_err_t lora_widget_save_contact(const companion_contact_t *contact);
+esp_err_t lora_widget_remove_contact(const uint8_t pub_key[32]);
+esp_err_t lora_widget_reset_contact_path(const uint8_t pub_key[32]);
+esp_err_t lora_widget_send_direct_msg(const uint8_t pub_key[32], const char *text, bool force_flood);
+esp_err_t lora_widget_clear_messages(void);

@@ -227,13 +227,20 @@ esp_err_t radar_fetch(const radar_fetch_req_t *req, radar_fetch_result_t *out)
 {
     memset(out, 0, sizeof(*out));
     fetch_session_t s = { 0 };
-    bool dwd = radar_dwd_covers(req->lat_e4 / 1e4, req->lon_e4 / 1e4);
-    bool used_rv = !dwd;
-    esp_err_t err = dwd ? fetch_dwd(&s, req, out) : fetch_rainviewer(&s, req, out);
-    if (dwd && err != ESP_OK && out->count == 0 && budget_ms(req) >= DWD_FALLBACK_BUDGET_MS) {
-        ESP_LOGW(TAG, "DWD failed (%s), falling back to RainViewer", out->detail);
-        used_rv = true;
-        err = fetch_rainviewer(&s, req, out);
+    bool dwd_covers = radar_dwd_covers(req->lat_e4 / 1e4, req->lon_e4 / 1e4);
+    bool primary_rv = (req->source == RADAR_SOURCE_RAINVIEWER) || !dwd_covers;
+    bool used_rv = primary_rv;
+    esp_err_t err = primary_rv ? fetch_rainviewer(&s, req, out) : fetch_dwd(&s, req, out);
+    if (err != ESP_OK && out->count == 0 && budget_ms(req) >= DWD_FALLBACK_BUDGET_MS) {
+        if (primary_rv && dwd_covers) {
+            ESP_LOGW(TAG, "RainViewer failed (%s), falling back to DWD", out->detail);
+            used_rv = false;
+            err = fetch_dwd(&s, req, out);
+        } else if (!primary_rv) {
+            ESP_LOGW(TAG, "DWD failed (%s), falling back to RainViewer", out->detail);
+            used_rv = true;
+            err = fetch_rainviewer(&s, req, out);
+        }
     }
     fetch_close(&s);
     ESP_LOGI(TAG, "%s: %u new frame%s%s%s", used_rv ? "RainViewer" : "DWD", out->count,

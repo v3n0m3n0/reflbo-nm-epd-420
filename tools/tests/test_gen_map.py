@@ -104,11 +104,24 @@ class GeoNamesTest(unittest.TestCase):
             self.row("Warszawa", "Warsaw", 52.22977, 21.01178, "PPLC", 1702139),        # outside the area
             self.row("Sl\u2019ažany", "Sl'azany", 48.39487, 18.32848, "PPL", 1706),    # a letter the fonts lack
         ])
-        places = gen_map.geonames_places(text, self.AREA)
+        places = gen_map.geonames_places(text, self.AREA, min_population=1000)
         self.assertEqual([p[:4] for p in places],
                          [(492985, 165314, 11860, "Kuřim"), (483949, 183285, 1706, "Sl'azany")])
         self.assertEqual(places[0].names, {"kuřim", "kurim", "kurzim"})
         self.assertEqual((places[0].country, places[0].admin), ("CZ", ("78", "0643", "", "")))
+
+    def test_extra_areas_include_large_polish_towns_and_exclude_small_ones(self):
+        text = "\n".join([
+            self.row("Kuřim", "Kurim", 49.29852, 16.53144, "PPL", 11860),
+            self.row("Puławy", "Pulawy", 51.41655, 21.96939, "PPL", 47000, country="PL"),
+            self.row("Małe Miasto", "Male Miasto", 52.0, 21.0, "PPL", 19999, country="PL"),
+        ])
+        places = gen_map.geonames_places(text)
+        self.assertEqual([p.name for p in places], ["Puławy"])
+
+        custom = gen_map.geonames_places(text, self.AREA, min_population=1000,
+                                         extra_areas=(((51.5, 52.5, 20.5, 21.5), 15000),))
+        self.assertEqual([p.name for p in custom], ["Małe Miasto", "Kuřim"])
 
     def test_natural_earth_keeps_its_towns_and_a_towns_districts_go(self):
         natural_earth = [(500800, 144400, 1162000, "Praha"), (492000, 166100, 388277, "Brno")]
@@ -161,6 +174,33 @@ class PackTest(unittest.TestCase):
         self.assertEqual(gen_map.TOWN.unpack_from(blob, town_off), (492000, 166100, 388277, 0))
         self.assertEqual(blob[name_off:name_off + name_bytes], b"Brno\0")
         self.assertEqual(gen_map.AIRPORT.unpack_from(blob, airport_off), (491519, 166944, b"BRQ", b"LKTB", 1))
+
+
+class Admin1Test(unittest.TestCase):
+    def test_admin1_poland_lines_filters_pol_only(self):
+        geojson = {"features": [
+            {"properties": {"ADM0_A3": "POL"},
+             "geometry": {"type": "LineString", "coordinates": [[19.0, 51.0], [20.0, 52.0]]}},
+            {"properties": {"adm0_a3": "POL"},
+             "geometry": {"type": "MultiLineString", "coordinates": [[[18.0, 50.0], [18.5, 50.5]]]}},
+            {"properties": {"ADM0_A3": "DEU"},
+             "geometry": {"type": "LineString", "coordinates": [[10.0, 51.0], [11.0, 52.0]]}},
+        ]}
+        self.assertEqual(gen_map.admin1_poland_lines(geojson),
+                         [[(19.0, 51.0), (20.0, 52.0)], [(18.0, 50.0), (18.5, 50.5)]])
+
+    def test_lines_of_packs_admin1_last_with_kind_2(self):
+        lines = gen_map.lines_of(
+            [[(16.0, 49.0), (16.5, 49.5)]],
+            [[(0.0, 0.0), (1.0, 0.0)]],
+            [[(19.0, 51.0), (20.0, 52.0)]],
+        )
+        self.assertEqual([k for k, _ in lines], [gen_map.KIND_BORDER, gen_map.KIND_COAST, gen_map.KIND_ADMIN1])
+        self.assertEqual(gen_map.KIND_ADMIN1, 2)
+        blob = gen_map.pack(lines, [], [])
+        _, _, _, _, n_lines, line_off, *_ = gen_map.HEADER.unpack_from(blob)
+        self.assertEqual(n_lines, 3)
+        self.assertEqual(gen_map.LINE.unpack_from(blob, line_off + 32)[6], gen_map.KIND_ADMIN1)
 
 
 if __name__ == "__main__":

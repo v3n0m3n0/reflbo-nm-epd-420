@@ -16,6 +16,7 @@
 typedef struct {
     int32_t lat_e4, lon_e4; /* radar.weather's centre */
     uint8_t zoom_q;         /* and its zoom, in quarters */
+    uint8_t source;         /* radar_source_t */
     uint8_t want;           /* the frames kept: 1, or in sync mode `always` the hour's (DWD RV 12, ICON-EU/RainViewer 6) */
     uint8_t have_count;
     uint32_t have[RADAR_LOOP_FRAMES]; /* the frame times the app keeps, not fetched again */

@@ -29,7 +29,8 @@ _Static_assert(NETMGR_REASON_ASSOC_LEAVE == WIFI_REASON_ASSOC_LEAVE, "netmgr_lin
 #define TASK_PRIORITY   4 /* below the app (5) and the buttons (6) */
 #define DNS_STACK       3072
 #define DNS_PRIORITY    3
-#define JOIN_TIMEOUT_MS 8000 /* 8 s per attempt (matches netmgr.h and 25 s sync join budget) */
+#define JOIN_TIMEOUT_MS     8000 /* 8 s per attempt (matches netmgr.h and 25 s sync join budget) */
+#define JOIN_RETRY_PAUSE_MS 1500 /* settle window before a cold-boot full-scan retry inside do_join() */
 #define AP_CLIENTS_MAX  2
 #define LIST_VERSION    1
 #define SEEN_MAX        24
@@ -474,6 +475,12 @@ static bool join_time_left(void)
     return s_join_until_us == 0 || esp_timer_get_time() + (int64_t)JOIN_TIMEOUT_MS * 1000 <= s_join_until_us;
 }
 
+static bool join_retry_time_left(void)
+{
+    return s_join_until_us != 0 &&
+           esp_timer_get_time() + (int64_t)(JOIN_RETRY_PAUSE_MS + JOIN_TIMEOUT_MS) * 1000 <= s_join_until_us;
+}
+
 static bool join_saved(bool ap_on)
 {
     static netmgr_list_t list;
@@ -481,18 +488,27 @@ static bool join_saved(bool ap_on)
     list = s_list;
     unlock();
     bool ok = false;
-    for (int i = 0; i < list.count && !ok && (i == 0 || join_time_left()); i++) {
-        const netmgr_net_t *n = &list.nets[i];
-        bool cached = n->channel != 0;
-        netmgr_test_t r = join(n->ssid, n->pass, cached ? n->bssid : NULL, n->channel);
-        if (r != NETMGR_TEST_OK && cached && join_time_left()) {
-            r = join(n->ssid, n->pass, NULL, 0); /* the router may have moved */
+    for (int pass = 0; pass < 2 && !ok; pass++) {
+        if (pass > 0) {
+            if (!join_retry_time_left()) {
+                break;
+            }
+            ESP_LOGI(TAG, "retrying saved networks in %d ms", JOIN_RETRY_PAUSE_MS);
+            vTaskDelay(pdMS_TO_TICKS(JOIN_RETRY_PAUSE_MS));
         }
-        if (r == NETMGR_TEST_OK) {
-            joined(n->ssid, ap_on);
-            ok = true;
-        } else {
-            ESP_LOGI(TAG, "\"%s\": %s", n->ssid, netmgr_test_name(r));
+        for (int i = 0; i < list.count && !ok && ((pass == 0 && i == 0) || join_time_left()); i++) {
+            const netmgr_net_t *n = &list.nets[i];
+            bool cached = pass == 0 && n->channel != 0;
+            netmgr_test_t r = join(n->ssid, n->pass, cached ? n->bssid : NULL, cached ? n->channel : 0);
+            if (r != NETMGR_TEST_OK && cached && join_time_left()) {
+                r = join(n->ssid, n->pass, NULL, 0); /* the router may have moved */
+            }
+            if (r == NETMGR_TEST_OK) {
+                joined(n->ssid, ap_on);
+                ok = true;
+            } else {
+                ESP_LOGI(TAG, "\"%s\": %s", n->ssid, netmgr_test_name(r));
+            }
         }
     }
     memset(&list, 0, sizeof(list));

@@ -222,6 +222,30 @@ static void test_dwd_frames_decode_rv_and_iconeu(void)
     map_view_init(&v7, 500755, 144378, 6.5, 7, 1);
     TEST_ASSERT_EQUAL_INT(
         PNG_ERR_FORMAT, radar_dwd_decode(synth, slen, NULL, &v7, RADAR_DWD_LAYER_RV, T_20260924_1120, &f));
+
+    /* Synthetic ICON-EU swatches: neutral greys/black/white -> NONE, legend swatches -> LIGHT/MODERATE/HEAVY */
+    static const uint8_t k_iconeu_rgba[8 * 4] = {
+        0,   0,   0,   255, /* black -> NONE */
+        255, 255, 255, 255, /* white -> NONE */
+        128, 128, 128, 255, /* neutral grey -> NONE */
+        127, 128, 127, 255, /* near-neutral anti-aliased grey -> NONE */
+        192, 192, 192, 255, /* silver-grey swatch -> LIGHT */
+        254, 254, 192, 255, /* pale yellow -> MODERATE */
+        254, 254, 91,  255, /* bright yellow -> MODERATE */
+        254, 0,   0,   255, /* red -> HEAVY */
+    };
+    slen = make_rgba_row_png(synth, 8, k_iconeu_rgba);
+    TEST_ASSERT_EQUAL_INT(
+        PNG_OK, radar_dwd_decode(synth, slen, NULL, &v8, RADAR_DWD_LAYER_ICONEU, T_20260924_1120, &f));
+    TEST_ASSERT_EQUAL_INT(RADAR_NONE, radar_frame_level(&f, 0, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_NONE, radar_frame_level(&f, 1, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_NONE, radar_frame_level(&f, 2, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_NONE, radar_frame_level(&f, 3, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_LIGHT, radar_frame_level(&f, 4, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_MODERATE, radar_frame_level(&f, 5, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_MODERATE, radar_frame_level(&f, 6, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_HEAVY, radar_frame_level(&f, 7, 0));
+    radar_frame_free(&f, NULL);
 }
 
 /* A frame on the (49.9 N, 15.3 E z=5.5 400x279) DWD grid with one square around a place. */
@@ -351,30 +375,38 @@ static void test_a_rainviewer_tile_decodes_by_its_colour_table(void)
     long n[4];
     count_levels(&f, n);
     TEST_ASSERT_EQUAL_INT32(57811, n[RADAR_NONE]);
-    TEST_ASSERT_EQUAL_INT32(7050, n[RADAR_LIGHT]);
-    TEST_ASSERT_EQUAL_INT32(629, n[RADAR_MODERATE]);
-    TEST_ASSERT_EQUAL_INT32(46, n[RADAR_HEAVY]);
+    TEST_ASSERT_EQUAL_INT32(5228, n[RADAR_LIGHT]);
+    TEST_ASSERT_EQUAL_INT32(2243, n[RADAR_MODERATE]);
+    TEST_ASSERT_EQUAL_INT32(254, n[RADAR_HEAVY]);
     radar_frame_free(&f, NULL);
     free(png);
 
     /* Light < 20 dBZ echoes and semi-transparent alpha >= 80 decode cleanly; alpha < 80 stays NONE. */
-    static const uint8_t k_rv_rgba[5 * 4] = {
+    static const uint8_t k_rv_rgba[9 * 4] = {
         210, 196, 139, 160, /* < 20 dBZ tan cloud -> LIGHT */
         54,  186, 229, 255, /* intermediate cyan/blue -> LIGHT */
         210, 196, 139, 79,  /* trace alpha < 80 -> NONE */
-        255, 165, 0,   200, /* orange -> MODERATE */
+        255, 165, 0,   200, /* orange -> HEAVY */
         230, 20,  60,  220, /* red -> HEAVY */
+        0x00, 0x47, 0x68, 255, /* #004768 dark navy -> MODERATE */
+        0x00, 0x7f, 0xb4, 255, /* #007fb4 cobalt blue -> MODERATE */
+        0x51, 0xc5, 0xe8, 255, /* #51c5e8 light cyan -> LIGHT */
+        0xff, 0x8b, 0x00, 255, /* #ff8b00 orange -> HEAVY */
     };
     uint8_t rv_png[512];
-    size_t rv_len = make_rgba_row_png(rv_png, 5, k_rv_rgba);
+    size_t rv_len = make_rgba_row_png(rv_png, 9, k_rv_rgba);
     radar_rv_tiles_t t1 = { .z = 3, .x0 = 4, .y0 = 2, .nx = 1, .ny = 1 };
     TEST_ASSERT_TRUE(radar_rv_frame_alloc(&f, &t1, 1790889000, NULL));
     TEST_ASSERT_EQUAL_INT(PNG_OK, radar_rv_decode_tile(rv_png, rv_len, NULL, &t1, 4, 2, &f));
     TEST_ASSERT_EQUAL_INT(RADAR_LIGHT, radar_frame_level(&f, 0, 0));
     TEST_ASSERT_EQUAL_INT(RADAR_LIGHT, radar_frame_level(&f, 1, 0));
     TEST_ASSERT_EQUAL_INT(RADAR_NONE, radar_frame_level(&f, 2, 0));
-    TEST_ASSERT_EQUAL_INT(RADAR_MODERATE, radar_frame_level(&f, 3, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_HEAVY, radar_frame_level(&f, 3, 0));
     TEST_ASSERT_EQUAL_INT(RADAR_HEAVY, radar_frame_level(&f, 4, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_MODERATE, radar_frame_level(&f, 5, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_MODERATE, radar_frame_level(&f, 6, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_LIGHT, radar_frame_level(&f, 7, 0));
+    TEST_ASSERT_EQUAL_INT(RADAR_HEAVY, radar_frame_level(&f, 8, 0));
     radar_frame_free(&f, NULL);
 }
 

@@ -115,7 +115,9 @@ static bool file_exists(const char *path)
 
 static bool has_lora_disk_state(void)
 {
-    return file_exists("/fs/state/lora_contacts.bin") || file_exists("/fs/state/lora_channels.bin");
+    return file_exists("/fs/state/lora_contacts.bin") ||
+           file_exists("/fs/state/lora_channels.bin") ||
+           file_exists("/fs/state/lora_msgs.bin");
 }
 
 void app_lora_identity_init(bool has_prior_state)

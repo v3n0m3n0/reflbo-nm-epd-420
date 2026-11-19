@@ -230,13 +230,17 @@ static void test_ui_lora_negative_fractional_snr_and_zero_pin(void)
         ui_draw_lora_view(&s_fb, below, &s_ctx);
 
         char expected_line[64];
-        snprintf(expected_line, sizeof(expected_line), "RSSI -80 dBm \xC2\xB7 %s \xC2\xB7 NF -100",
+        snprintf(expected_line, sizeof(expected_line), "RSSI -80 \xC2\xB7 %s \xC2\xB7 NF -100",
                  cases[i].expected_snr);
+        int right_w = gfx_text_width(&gfx_font_sans_12, expected_line);
+        int right_box_w = right_w + 2;
+        if (right_box_w > 240) right_box_w = 240;
+        int right_x = 392 - right_box_w;
         memset(expected_buf, 0, sizeof(expected_buf));
         gfx_clear(&expected_fb, GFX_WHITE);
-        gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 248, 40, 144, 16 },
+        gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ right_x, 40, right_box_w, 16 },
                          GFX_ALIGN_RIGHT, expected_line, GFX_BLACK);
-        TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, 248, 40, 392, 56));
+        TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, right_x, 40, 392, 56));
     }
 }
 
@@ -279,6 +283,260 @@ static void test_ui_status_draws_lora_and_ble_indicator_when_enabled(void)
     TEST_ASSERT_FALSE(rect_pixels_equal(&s_fb, &ble_fb, 4, 2, 20, 18));
 }
 
+static void test_ui_lora_dm_outgoing_ack_and_multichannel_badges(void)
+{
+    static uint8_t expected_buf[400 * 300 / 8];
+    gfx_fb_t expected_fb;
+    gfx_fb_init(&expected_fb, expected_buf, 400, 300);
+    gfx_rect_t below = { 0, 20, 400, 280 };
+
+    /* 1. Outgoing DM with ACK delivered renders "[TX] > @Alice: Secret [OK]" */
+    s_lora.msg_count = 1;
+    memset(&s_lora.msgs[0], 0, sizeof(s_lora.msgs[0]));
+    s_lora.msgs[0].timestamp = 0; /* uses [TX] prefix independent of host timezone */
+    s_lora.msgs[0].outgoing = true;
+    s_lora.msgs[0].is_direct = true;
+    s_lora.msgs[0].ack_status = 2; /* MESHCORE_ACK_DELIVERED */
+    snprintf(s_lora.msgs[0].sender, sizeof(s_lora.msgs[0].sender), "Alice");
+    snprintf(s_lora.msgs[0].text, sizeof(s_lora.msgs[0].text), "Secret");
+
+    gfx_clear(&s_fb, GFX_WHITE);
+    ui_draw_lora_view(&s_fb, below, &s_ctx);
+
+    memset(expected_buf, 0, sizeof(expected_buf));
+    gfx_clear(&expected_fb, GFX_WHITE);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 61, 250, 16 },
+                     GFX_ALIGN_LEFT, lang_str(s_ctx.lang, LS_LORA_MESSAGES), GFX_BLACK);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 76, 384, 14 },
+                     GFX_ALIGN_LEFT, "[TX] > @Alice: Secret [OK]", GFX_BLACK);
+    TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, 8, 76, 392, 90));
+
+    /* 2. Incoming secondary channel #2 message renders "[RX] < [#2] Bob: Ops msg" */
+    memset(&s_lora.msgs[0], 0, sizeof(s_lora.msgs[0]));
+    s_lora.msgs[0].timestamp = 0;
+    s_lora.msgs[0].outgoing = false;
+    s_lora.msgs[0].is_direct = false;
+    s_lora.msgs[0].channel_idx = 2;
+    snprintf(s_lora.msgs[0].sender, sizeof(s_lora.msgs[0].sender), "Bob");
+    snprintf(s_lora.msgs[0].text, sizeof(s_lora.msgs[0].text), "Ops msg");
+
+    gfx_clear(&s_fb, GFX_WHITE);
+    ui_draw_lora_view(&s_fb, below, &s_ctx);
+
+    memset(expected_buf, 0, sizeof(expected_buf));
+    gfx_clear(&expected_fb, GFX_WHITE);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 61, 250, 16 },
+                     GFX_ALIGN_LEFT, lang_str(s_ctx.lang, LS_LORA_MESSAGES), GFX_BLACK);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 76, 384, 14 },
+                     GFX_ALIGN_LEFT, "[RX] < [#2] Bob: Ops msg", GFX_BLACK);
+    TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, 8, 76, 392, 90));
+}
+
+static void test_ui_lora_hard_newlines_break_lines_without_missing_glyph_box(void)
+{
+    static uint8_t expected_buf[400 * 300 / 8];
+    gfx_fb_t expected_fb;
+    gfx_fb_init(&expected_fb, expected_buf, 400, 300);
+    gfx_rect_t below = { 0, 20, 400, 280 };
+
+    /* Short multi-line bot reply ("Path:\n1. C3CC\n2. B9F0\n3. 6FD3") must break at '\n' into 3 clean lines */
+    s_lora.msg_count = 1;
+    memset(&s_lora.msgs[0], 0, sizeof(s_lora.msgs[0]));
+    s_lora.msgs[0].timestamp = 0;
+    s_lora.msgs[0].outgoing = false;
+    s_lora.msgs[0].is_direct = false;
+    s_lora.msgs[0].channel_idx = 2;
+    snprintf(s_lora.msgs[0].sender, sizeof(s_lora.msgs[0].sender), "Bot");
+    snprintf(s_lora.msgs[0].text, sizeof(s_lora.msgs[0].text), "Path:\r\n1. C3CC\n2. B9F0\n3. 6FD3");
+
+    gfx_clear(&s_fb, GFX_WHITE);
+    ui_draw_lora_view(&s_fb, below, &s_ctx);
+
+    memset(expected_buf, 0, sizeof(expected_buf));
+    gfx_clear(&expected_fb, GFX_WHITE);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 61, 250, 16 },
+                     GFX_ALIGN_LEFT, lang_str(s_ctx.lang, LS_LORA_MESSAGES), GFX_BLACK);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 76, 384, 14 },
+                     GFX_ALIGN_LEFT, "[RX] < [#2] Bot: Path:", GFX_BLACK);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 89, 384, 14 },
+                     GFX_ALIGN_LEFT, "1. C3CC", GFX_BLACK);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 102, 384, 14 },
+                     GFX_ALIGN_LEFT, "2. B9F0 3. 6FD3", GFX_BLACK);
+    TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, 8, 76, 392, 116));
+
+    /* UI_FIELD_LORA_LAST_MSG must also flatten newlines to spaces */
+    ui_value_t val = {0};
+    TEST_ASSERT_TRUE(ui_resolve_lora(&s_ctx, UI_FIELD_LORA_LAST_MSG, &val));
+    TEST_ASSERT_NULL(strchr(val.text, '\n'));
+    TEST_ASSERT_NULL(strchr(val.text, '\r'));
+    TEST_ASSERT_EQUAL_STRING("Path: 1. C3CC 2. B9F0 3. 6FD3", val.text);
+}
+
+static void test_ui_lora_noise_floor_zero_omitted(void)
+{
+    static uint8_t expected_buf[400 * 300 / 8];
+    gfx_fb_t expected_fb;
+    gfx_fb_init(&expected_fb, expected_buf, 400, 300);
+    gfx_rect_t below = { 0, 20, 400, 280 };
+
+    /* 1. packet_count == 0, noise_floor_dbm == 0 -> "TX +22 dBm" without NF */
+    s_lora.noise_floor_dbm = 0;
+    s_lora.packet_count = 0;
+    s_lora.tx_power_dbm = 22;
+    gfx_clear(&s_fb, GFX_WHITE);
+    ui_draw_lora_view(&s_fb, below, &s_ctx);
+
+    memset(expected_buf, 0, sizeof(expected_buf));
+    gfx_clear(&expected_fb, GFX_WHITE);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 248, 40, 144, 16 },
+                     GFX_ALIGN_RIGHT, "TX +22 dBm", GFX_BLACK);
+    TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, 248, 40, 392, 56));
+
+    /* 2. packet_count > 0, noise_floor_dbm == 0 -> "RSSI -85 dBm · +5.0 dB" without NF */
+    s_lora.packet_count = 1;
+    s_lora.last_rssi_dbm = -85;
+    s_lora.last_snr_q4 = 20;
+    gfx_clear(&s_fb, GFX_WHITE);
+    ui_draw_lora_view(&s_fb, below, &s_ctx);
+
+    memset(expected_buf, 0, sizeof(expected_buf));
+    gfx_clear(&expected_fb, GFX_WHITE);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 248, 40, 144, 16 },
+                     GFX_ALIGN_RIGHT, "RSSI -85 dBm \xC2\xB7 +5.0 dB", GFX_BLACK);
+    TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, 248, 40, 392, 56));
+}
+
+static void test_ui_lora_channel_name_formatting(void)
+{
+    static uint8_t expected_buf[400 * 300 / 8];
+    gfx_fb_t expected_fb;
+    gfx_fb_init(&expected_fb, expected_buf, 400, 300);
+    gfx_rect_t below = { 0, 20, 400, 280 };
+
+    /* 1. channel_idx = 0 + channel_name = "Public" renders "[RX] < [Public] Bob: Hello" */
+    s_lora.msg_count = 1;
+    memset(&s_lora.msgs[0], 0, sizeof(s_lora.msgs[0]));
+    s_lora.msgs[0].timestamp = 0;
+    s_lora.msgs[0].outgoing = false;
+    s_lora.msgs[0].is_direct = false;
+    s_lora.msgs[0].channel_idx = 0;
+    snprintf(s_lora.msgs[0].channel_name, sizeof(s_lora.msgs[0].channel_name), "Public");
+    snprintf(s_lora.msgs[0].sender, sizeof(s_lora.msgs[0].sender), "Bob");
+    snprintf(s_lora.msgs[0].text, sizeof(s_lora.msgs[0].text), "Hello");
+
+    gfx_clear(&s_fb, GFX_WHITE);
+    ui_draw_lora_view(&s_fb, below, &s_ctx);
+
+    memset(expected_buf, 0, sizeof(expected_buf));
+    gfx_clear(&expected_fb, GFX_WHITE);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 61, 250, 16 },
+                     GFX_ALIGN_LEFT, lang_str(s_ctx.lang, LS_LORA_MESSAGES), GFX_BLACK);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 76, 384, 14 },
+                     GFX_ALIGN_LEFT, "[RX] < [Public] Bob: Hello", GFX_BLACK);
+    TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, 8, 76, 392, 90));
+
+    /* 2. channel_idx = 2 + channel_name = "#bot" renders "[RX] < [#bot] Bob: Hello" */
+    s_lora.msgs[0].channel_idx = 2;
+    snprintf(s_lora.msgs[0].channel_name, sizeof(s_lora.msgs[0].channel_name), "#bot");
+    gfx_clear(&s_fb, GFX_WHITE);
+    ui_draw_lora_view(&s_fb, below, &s_ctx);
+
+    memset(expected_buf, 0, sizeof(expected_buf));
+    gfx_clear(&expected_fb, GFX_WHITE);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 61, 250, 16 },
+                     GFX_ALIGN_LEFT, lang_str(s_ctx.lang, LS_LORA_MESSAGES), GFX_BLACK);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 76, 384, 14 },
+                     GFX_ALIGN_LEFT, "[RX] < [#bot] Bob: Hello", GFX_BLACK);
+    TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, 8, 76, 392, 90));
+
+    /* 3. channel_idx = 2 + channel_name = "Ops" renders "[RX] < [Ops] Bob: Hello" */
+    snprintf(s_lora.msgs[0].channel_name, sizeof(s_lora.msgs[0].channel_name), "Ops");
+    gfx_clear(&s_fb, GFX_WHITE);
+    ui_draw_lora_view(&s_fb, below, &s_ctx);
+
+    memset(expected_buf, 0, sizeof(expected_buf));
+    gfx_clear(&expected_fb, GFX_WHITE);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 61, 250, 16 },
+                     GFX_ALIGN_LEFT, lang_str(s_ctx.lang, LS_LORA_MESSAGES), GFX_BLACK);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 76, 384, 14 },
+                     GFX_ALIGN_LEFT, "[RX] < [Ops] Bob: Hello", GFX_BLACK);
+    TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, 8, 76, 392, 90));
+}
+
+static void test_ui_lora_header_line2_channel_all_and_repeat_off(void)
+{
+    static uint8_t expected_buf[400 * 300];
+    gfx_fb_t expected_fb;
+    gfx_fb_init(&expected_fb, expected_buf, 400, 300);
+
+    gfx_rect_t below = { 0, 21, 400, 279 };
+
+    /* 1. active_channel_count = 3 -> "Ch: All", client_repeat = false -> "Rpt: off" even if sent_flood > 0 */
+    s_lora.active_channel_count = 3;
+    snprintf(s_lora.channel_name, sizeof(s_lora.channel_name), "#test");
+    s_lora.client_repeat = false;
+    s_lora.sent_flood = 5;
+    s_lora.forwarded_count = 2;
+    s_lora.packet_count = 0;
+    s_lora.packets_sent = 0;
+
+    gfx_clear(&s_fb, GFX_WHITE);
+    ui_draw_lora_view(&s_fb, below, &s_ctx);
+
+    memset(expected_buf, 0, sizeof(expected_buf));
+    gfx_clear(&expected_fb, GFX_WHITE);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 40, 220, 16 },
+                     GFX_ALIGN_LEFT, "Ch: All \xC2\xB7 RX: 0 \xC2\xB7 TX: 0 \xC2\xB7 Rpt: off", GFX_BLACK);
+    TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, 8, 40, 210, 56));
+
+    /* 2. active_channel_count = 1 -> "Ch: #test", client_repeat = true -> "Fwd: 2" */
+    s_lora.active_channel_count = 1;
+    s_lora.client_repeat = true;
+
+    gfx_clear(&s_fb, GFX_WHITE);
+    ui_draw_lora_view(&s_fb, below, &s_ctx);
+
+    memset(expected_buf, 0, sizeof(expected_buf));
+    gfx_clear(&expected_fb, GFX_WHITE);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ 8, 40, 220, 16 },
+                     GFX_ALIGN_LEFT, "Ch: #test \xC2\xB7 RX: 0 \xC2\xB7 TX: 0 \xC2\xB7 Fwd: 2", GFX_BLACK);
+    TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, 8, 40, 210, 56));
+}
+
+static void test_ui_lora_header_line2_no_overlap_on_long_rssi(void)
+{
+    static uint8_t expected_buf[400 * 300];
+    gfx_fb_t expected_fb;
+    gfx_fb_init(&expected_fb, expected_buf, 400, 300);
+
+    gfx_rect_t below = { 0, 21, 400, 279 };
+
+    s_lora.active_channel_count = 1;
+    snprintf(s_lora.channel_name, sizeof(s_lora.channel_name), "#longchannel");
+    s_lora.client_repeat = true;
+    s_lora.packet_count = 123;
+    s_lora.packets_sent = 45;
+    s_lora.forwarded_count = 12;
+    s_lora.last_rssi_dbm = -115;
+    s_lora.last_snr_q4 = -50;
+    s_lora.noise_floor_dbm = -105;
+
+    gfx_clear(&s_fb, GFX_WHITE);
+    ui_draw_lora_view(&s_fb, below, &s_ctx);
+
+    const char *compact_right = "RSSI -115 \xC2\xB7 -12.5 dB \xC2\xB7 NF -105";
+    int right_w = gfx_text_width(&gfx_font_sans_12, compact_right);
+    int right_box_w = right_w + 2;
+    if (right_box_w > 240) right_box_w = 240;
+    int right_x = 392 - right_box_w;
+
+    memset(expected_buf, 0, sizeof(expected_buf));
+    gfx_clear(&expected_fb, GFX_WHITE);
+    gfx_text_in_rect(&expected_fb, &gfx_font_sans_12, (gfx_rect_t){ right_x, 40, right_box_w, 16 },
+                     GFX_ALIGN_RIGHT, compact_right, GFX_BLACK);
+    TEST_ASSERT_TRUE(rect_pixels_equal(&s_fb, &expected_fb, right_x, 40, 392, 56));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -289,5 +547,11 @@ int main(void)
     RUN_TEST(test_ui_lora_chronological_scrolling_keeps_newest);
     RUN_TEST(test_ui_lora_negative_fractional_snr_and_zero_pin);
     RUN_TEST(test_ui_status_draws_lora_and_ble_indicator_when_enabled);
+    RUN_TEST(test_ui_lora_dm_outgoing_ack_and_multichannel_badges);
+    RUN_TEST(test_ui_lora_hard_newlines_break_lines_without_missing_glyph_box);
+    RUN_TEST(test_ui_lora_noise_floor_zero_omitted);
+    RUN_TEST(test_ui_lora_channel_name_formatting);
+    RUN_TEST(test_ui_lora_header_line2_channel_all_and_repeat_off);
+    RUN_TEST(test_ui_lora_header_line2_no_overlap_on_long_rssi);
     return UNITY_END();
 }
