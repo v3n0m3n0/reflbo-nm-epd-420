@@ -2,7 +2,20 @@
 
 ---
 
-## Latest Release: v1.1.0 (`2026-11-14`)
+## Latest Release: v1.2.0 (`2026-11-19`)
+
+**UI, LoRa map, radar, and reliability update for `reflbo-nm-epd-420`** — adding Poland voivodeship boundaries and a full `#lora` Web UI overhaul, `48 px` Weather icons, multi-gradient RainViewer clouds, DMA-safe e-paper partial refreshes, reliable cold-boot auto-sync, `USER` (`KEY`) dismissal for `Wi-Fi Setup`, and a `1.5 s` post-commit preset toast.
+
+For full release details and flash package contents, see [docs/releases/v1.2.0.md](docs/releases/v1.2.0.md) and [release/README.md](release/README.md).
+
+### Summary of v1.2.0 Changes
+- **`#lora` Web UI & Poland Voivodeships:** Added all 16 Polish voivodeship boundaries (`MAP_LINE_ADMIN1`) to `map.bin` and `GET /api/lora/map`, overhauled Geo Map / Polar Radar with non-GPS contact chips, responsive subtabs (`All sections`, `Chat`, `Map & Nodes`, `Settings & Channels`, `CLI`), and mobile layout fixes.
+- **E-Paper Weather, RainViewer & `#lora` Bar:** Added `48 px` ink-cropped icons and larger digits to the `Weather` preset, re-tiered RainViewer *Universal Blue* clouds into `light`/`moderate`/`heavy`, updated the `#lora` status bar (`Ch: All`, `Rpt: off` / real `Fwd: <n>`), and added a static `DMA_ATTR` SPI bounce buffer in `st7305.c`.
+- **Cold-Boot Auto-Sync, `Wi-Fi Setup` & Toast Timing:** Added a second full-scan Wi-Fi join pass within the `25 s` sync budget + `1 min` first lost-clock retry + `2106` timestamp underflow guard; bound `USER` (`KEY` short) to close `Wi-Fi Setup` cleanly; and measured the `1.5 s` preset toast duration after `display_commit()` completes.
+
+---
+
+## Previous Release: v1.1.0 (`2026-11-14`)
 
 **Feature, responsiveness, and radar update for `reflbo-nm-epd-420`** — adding European DWD OpenData WMS precipitation radar, instant preset switching with auto-hiding toast, faster cold sync & early NTP application, top-left Wi-Fi status visibility, modular MeshCore/SX1262 architecture with persistent NVS identity & encrypted secrets, drift-compensated sleep timing, and LittleFS health recovery.
 
